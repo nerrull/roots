@@ -10,11 +10,15 @@
 #include "RootSystem.h"
 #include "SegmentAnalyser.h"
 
+#include <algorithm>
 #include <climits>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
 
 static void glfwError(int, const char* desc) {
     fprintf(stderr, "GLFW error: %s\n", desc);
@@ -65,6 +69,23 @@ int main(int argc, char** argv) {
     rs->initialize(false);
 
     // ------------------------------------------------------------------
+    // Root system presets — enumerate all .xml files in rootsystem dir
+    // ------------------------------------------------------------------
+    std::vector<std::string> rsNames, rsPaths;
+    {
+        namespace fs = std::filesystem;
+        std::vector<std::pair<std::string, std::string>> entries;
+        for (auto& e : fs::directory_iterator(PARAM_DIR "/structural/rootsystem"))
+            if (e.path().extension() == ".xml")
+                entries.push_back({e.path().stem().string(), e.path().string()});
+        std::sort(entries.begin(), entries.end());
+        for (auto& [n, p] : entries) { rsNames.push_back(n); rsPaths.push_back(p); }
+    }
+    int selectedRsIdx = 0;
+    for (int i = 0; i < (int)rsPaths.size(); i++)
+        if (rsPaths[i] == paramFile) { selectedRsIdx = i; break; }
+
+    // ------------------------------------------------------------------
     // Renderer
     // ------------------------------------------------------------------
     RootRenderer renderer(800, 600);
@@ -86,6 +107,19 @@ int main(int argc, char** argv) {
     double simTime      = 0.0;    // accumulated simulation days
     int    prevSegCount = INT_MIN; // forces initial upload
 
+    // ------------------------------------------------------------------
+    // Light orbit state
+    // ------------------------------------------------------------------
+    float lightOrbitSpeed = 0.4f;   // rad/s
+    float lightElevation  = 0.9f;   // radians above horizon
+    float lightAngle      = 0.0f;   // accumulated azimuth
+
+    // ------------------------------------------------------------------
+    // Load-dialog state
+    // ------------------------------------------------------------------
+    char        loadPathBuf[2048] = {};
+    std::string loadError;
+
     double lastFrameTime = glfwGetTime();
 
     // ------------------------------------------------------------------
@@ -98,11 +132,21 @@ int main(int argc, char** argv) {
         float  dt  = static_cast<float>(now - lastFrameTime);
         lastFrameTime = now;
 
-        // 1. Advance simulation
+        // 1. Advance simulation and light orbit
         if (playing) {
             rs->simulate(static_cast<double>(dt * speed), false);
             simTime += static_cast<double>(dt * speed);
         }
+        lightAngle += lightOrbitSpeed * dt;
+
+        float lCos = cosf(lightElevation), lSin = sinf(lightElevation);
+        float lightDir[3] = {
+            lCos * sinf(lightAngle),
+            lSin,
+            lCos * cosf(lightAngle)
+        };
+        float lLen = sqrtf(lightDir[0]*lightDir[0] + lightDir[1]*lightDir[1] + lightDir[2]*lightDir[2]);
+        lightDir[0] /= lLen; lightDir[1] /= lLen; lightDir[2] /= lLen;
 
         // 2. Sync TBOs whenever segment count changes (cheap O(1) poll)
         int newSegCount = rs->getNumberOfSegments();
@@ -157,6 +201,67 @@ int main(int argc, char** argv) {
             playing      = false;
         }
 
+        // ---- Root system picker ----
+        ImGui::Spacing();
+        ImGui::Text("Root system:");
+        ImGui::SetNextItemWidth(-1);
+        const char* preview = (!rsNames.empty() && selectedRsIdx < (int)rsNames.size())
+                              ? rsNames[selectedRsIdx].c_str() : "";
+        if (ImGui::BeginCombo("##rscombo", preview)) {
+            for (int i = 0; i < (int)rsNames.size(); i++) {
+                bool sel = (i == selectedRsIdx);
+                if (ImGui::Selectable(rsNames[i].c_str(), sel) && i != selectedRsIdx) {
+                    selectedRsIdx = i;
+                    try {
+                        auto newRs = std::make_shared<CPlantBox::RootSystem>();
+                        newRs->readParameters(rsPaths[i], "plant", true, false);
+                        newRs->initialize(false);
+                        rs = newRs; paramFile = rsPaths[i];
+                        simTime = 0.0; prevSegCount = INT_MIN; playing = false;
+                        loadError.clear();
+                    } catch (const std::exception& e) { loadError = e.what(); }
+                }
+                if (sel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        if (!loadError.empty())
+            ImGui::TextColored(ImVec4(1.f, 0.35f, 0.35f, 1.f), "%s", loadError.c_str());
+
+        // ---- Load arbitrary file ----
+        ImGui::Spacing();
+        if (ImGui::Button("  Load file...  ")) {
+            strncpy(loadPathBuf, paramFile.c_str(), sizeof(loadPathBuf) - 1);
+            loadPathBuf[sizeof(loadPathBuf) - 1] = '\0';
+            loadError.clear();
+            ImGui::OpenPopup("Load spec file");
+        }
+
+        if (ImGui::BeginPopupModal("Load spec file", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("Root system spec file (.xml):");
+            ImGui::SetNextItemWidth(500.0f);
+
+            bool doLoad = ImGui::InputText("##specpath", loadPathBuf,
+                                           sizeof(loadPathBuf),
+                                           ImGuiInputTextFlags_EnterReturnsTrue);
+            doLoad |= ImGui::Button("Load");
+            if (doLoad) {
+                try {
+                    auto newRs = std::make_shared<CPlantBox::RootSystem>();
+                    newRs->readParameters(std::string(loadPathBuf), "plant", true, false);
+                    newRs->initialize(false);
+                    rs = newRs; paramFile = loadPathBuf;
+                    simTime = 0.0; prevSegCount = INT_MIN; playing = false;
+                    loadError.clear();
+                    ImGui::CloseCurrentPopup();
+                } catch (const std::exception& e) { loadError = e.what(); }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) { loadError.clear(); ImGui::CloseCurrentPopup(); }
+            ImGui::EndPopup();
+        }
+
         ImGui::Spacing();
         ImGui::SliderFloat("Speed (days/s)", &speed, 0.1f, 20.0f, "%.1f");
         ImGui::Spacing();
@@ -170,6 +275,28 @@ int main(int argc, char** argv) {
         ImGui::TextDisabled("Left-drag: orbit");
         ImGui::TextDisabled("Scroll:    zoom");
 
+        ImGui::Separator();
+        ImGui::Text("Material");
+        ImGui::ColorEdit3("Base color",  renderer.mat.baseColor);
+        ImGui::SliderFloat("Ambient",    &renderer.mat.ambient,   0.0f,  1.0f,   "%.2f");
+        ImGui::SliderFloat("Diffuse",    &renderer.mat.diffuse,   0.0f,  1.0f,   "%.2f");
+        ImGui::ColorEdit3("Spec color",  renderer.mat.specColor);
+        ImGui::SliderFloat("Shininess",  &renderer.mat.shininess, 1.0f, 512.0f,  "%.0f",
+                           ImGuiSliderFlags_Logarithmic);
+
+        ImGui::Separator();
+        ImGui::Text("Light");
+        ImGui::SliderFloat("Orbit speed", &lightOrbitSpeed, 0.0f, 3.14f, "%.2f rad/s");
+        ImGui::SliderFloat("Elevation",   &lightElevation, -1.5f,  1.5f, "%.2f rad");
+
+        ImGui::Separator();
+        ImGui::Text("Fog");
+        ImGui::ColorEdit3("Fog color",      renderer.fog.color);
+        ImGui::SliderFloat("Density",       &renderer.fog.density,       0.0f, 0.10f, "%.4f");
+        ImGui::SliderFloat("Falloff",       &renderer.fog.falloff,       0.0f, 0.30f, "%.3f");
+        ImGui::SliderFloat("Noise scale",   &renderer.fog.noiseScale,    0.01f, 0.5f, "%.3f");
+        ImGui::SliderFloat("Noise strength",&renderer.fog.noiseStrength, 0.0f,  1.0f, "%.2f");
+
         ImGui::EndChild();
         ImGui::SameLine();
 
@@ -178,8 +305,9 @@ int main(int argc, char** argv) {
         int vpW = std::max(1, static_cast<int>(vpSize.x));
         int vpH = std::max(1, static_cast<int>(vpSize.y));
 
+        renderer.fog.time = static_cast<float>(now);
         renderer.resize(vpW, vpH);
-        renderer.render(azimuth, elevation, orbitRadius, target, fov);
+        renderer.render(azimuth, elevation, orbitRadius, target, fov, lightDir);
 
         ImGui::Image(static_cast<ImTextureID>(renderer.colorTex()), vpSize);
 
