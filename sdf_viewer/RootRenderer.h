@@ -19,9 +19,18 @@ public:
         float color[3]      = {0.12f, 0.08f, 0.05f};
         float density       = 0.008f;
         float falloff       = 0.05f;
-        float noiseScale    = 0.05f;   // noise period ≈ 20 cm
-        float noiseStrength = 0.70f;   // 0 = uniform, 1 = fully patchy
-        float time          = 0.0f;    // wall-clock seconds; set each frame
+        float noiseScale    = 0.05f;
+        float noiseStrength = 0.70f;
+        float driftTime     = 0.0f;    // accumulated; advance by dt*driftSpeed each frame
+        float driftSpeed    = 1.0f;
+        int   noiseType     = 0;       // 0 = value noise, 1 = simplex
+    };
+
+    struct Overlay {
+        bool  showAxes    = false;
+        float axisLength  = 10.0f;    // cm
+        bool  showGrid    = false;
+        float gridSpacing = 5.0f;     // cm
     };
 
     RootRenderer(int w, int h);
@@ -36,13 +45,13 @@ public:
     void render(float azimuth, float elevation, float radius,
                 const float* target3, float fov, const float* lightDir3);
 
-    // Returns the fog-composited output texture for display.
     GLuint colorTex() const { return m_fogColorTex; }
     int    width()    const { return m_w; }
     int    height()   const { return m_h; }
 
     Material mat;
     Fog      fog;
+    Overlay  overlay;
 
 private:
     void buildFBO();
@@ -50,36 +59,36 @@ private:
 
     int    m_w, m_h;
 
-    // Geometry pass FBO
     GLuint m_fbo      = 0;
-    GLuint m_colorTex = 0;   // Phong-shaded roots (no fog)
-    GLuint m_depthTex = 0;   // depth texture (readable by fog pass)
+    GLuint m_colorTex = 0;
+    GLuint m_depthTex = 0;
 
-    // Fog post-process pass
     GLuint m_fogFbo      = 0;
-    GLuint m_fogColorTex = 0;   // final composited output
+    GLuint m_fogColorTex = 0;
     GLuint m_fogProg     = 0;
 
     GLuint m_vao  = 0;
-    GLuint m_prog = 0;  // geometry pass program
+    GLuint m_prog = 0;
 
-    // Texture Buffer Objects
     GLuint m_nodeBuf = 0, m_nodeTex = 0;
     GLuint m_segBuf  = 0, m_segTex  = 0;
     GLuint m_radBuf  = 0, m_radTex  = 0;
 
     int m_segCount = 0;
 
-    // Geometry pass uniform locations
+    // Geometry pass
     int m_uNodes = -1, m_uSegs = -1, m_uRads = -1, m_uSegCount = -1;
     int m_uEye = -1, m_uCam = -1, m_uFov = -1, m_uRes = -1, m_uViewProj = -1;
     int m_uBaseColor = -1, m_uAmbient = -1, m_uDiffuse = -1;
     int m_uSpecColor = -1, m_uShininess = -1, m_uLightDir = -1;
 
-    // Fog pass uniform locations (prefix fp = fog pass)
+    // Fog pass
     int m_fpColorTex = -1, m_fpDepthTex = -1;
     int m_fpEye = -1, m_fpCam = -1, m_fpFov = -1, m_fpRes = -1;
     int m_fpNear = -1, m_fpFar = -1;
     int m_fpFogColor = -1, m_fpFogDensity = -1, m_fpFogFalloff = -1;
     int m_fpFogNoiseScale = -1, m_fpFogNoiseStrength = -1, m_fpFogTime = -1;
+    int m_fpNoiseType = -1;
+    int m_fpShowAxes = -1, m_fpAxisLength = -1;
+    int m_fpShowGrid = -1, m_fpGridSpacing = -1;
 };

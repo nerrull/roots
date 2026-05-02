@@ -157,12 +157,17 @@ void RootRenderer::buildShader() {
         m_fpRes      = glGetUniformLocation(m_fogProg, "u_res");
         m_fpNear     = glGetUniformLocation(m_fogProg, "u_near");
         m_fpFar      = glGetUniformLocation(m_fogProg, "u_far");
-        m_fpFogColor        = glGetUniformLocation(m_fogProg, "u_fogColor");
-        m_fpFogDensity      = glGetUniformLocation(m_fogProg, "u_fogDensity");
-        m_fpFogFalloff      = glGetUniformLocation(m_fogProg, "u_fogFalloff");
-        m_fpFogNoiseScale   = glGetUniformLocation(m_fogProg, "u_fogNoiseScale");
-        m_fpFogNoiseStrength= glGetUniformLocation(m_fogProg, "u_fogNoiseStrength");
-        m_fpFogTime         = glGetUniformLocation(m_fogProg, "u_fogTime");
+        m_fpFogColor         = glGetUniformLocation(m_fogProg, "u_fogColor");
+        m_fpFogDensity       = glGetUniformLocation(m_fogProg, "u_fogDensity");
+        m_fpFogFalloff       = glGetUniformLocation(m_fogProg, "u_fogFalloff");
+        m_fpFogNoiseScale    = glGetUniformLocation(m_fogProg, "u_fogNoiseScale");
+        m_fpFogNoiseStrength = glGetUniformLocation(m_fogProg, "u_fogNoiseStrength");
+        m_fpFogTime          = glGetUniformLocation(m_fogProg, "u_fogTime");
+        m_fpNoiseType        = glGetUniformLocation(m_fogProg, "u_noiseType");
+        m_fpShowAxes         = glGetUniformLocation(m_fogProg, "u_showAxes");
+        m_fpAxisLength       = glGetUniformLocation(m_fogProg, "u_axisLength");
+        m_fpShowGrid         = glGetUniformLocation(m_fogProg, "u_showGrid");
+        m_fpGridSpacing      = glGetUniformLocation(m_fogProg, "u_gridSpacing");
     }
 }
 
@@ -374,7 +379,12 @@ void RootRenderer::render(float azimuth, float elevation, float radius,
     glUniform1f (m_fpFogFalloff,         fog.falloff);
     glUniform1f (m_fpFogNoiseScale,      fog.noiseScale);
     glUniform1f (m_fpFogNoiseStrength,   fog.noiseStrength);
-    glUniform1f (m_fpFogTime,            fog.time);
+    glUniform1f (m_fpFogTime,            fog.driftTime);
+    glUniform1i (m_fpNoiseType,          fog.noiseType);
+    glUniform1i (m_fpShowAxes,           overlay.showAxes  ? 1 : 0);
+    glUniform1f (m_fpAxisLength,         overlay.axisLength);
+    glUniform1i (m_fpShowGrid,           overlay.showGrid  ? 1 : 0);
+    glUniform1f (m_fpGridSpacing,        overlay.gridSpacing);
 
     glBindVertexArray(m_vao);
     glDrawArrays(GL_TRIANGLES, 0, 3);

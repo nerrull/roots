@@ -291,11 +291,25 @@ int main(int argc, char** argv) {
 
         ImGui::Separator();
         ImGui::Text("Fog");
-        ImGui::ColorEdit3("Fog color",      renderer.fog.color);
-        ImGui::SliderFloat("Density",       &renderer.fog.density,       0.0f, 0.10f, "%.4f");
-        ImGui::SliderFloat("Falloff",       &renderer.fog.falloff,       0.0f, 0.30f, "%.3f");
-        ImGui::SliderFloat("Noise scale",   &renderer.fog.noiseScale,    0.01f, 0.5f, "%.3f");
-        ImGui::SliderFloat("Noise strength",&renderer.fog.noiseStrength, 0.0f,  1.0f, "%.2f");
+        ImGui::ColorEdit3("Fog color",       renderer.fog.color);
+        ImGui::SliderFloat("Density",        &renderer.fog.density,       0.0f,  0.10f, "%.4f");
+        ImGui::SliderFloat("Falloff",        &renderer.fog.falloff,       0.0f,  0.30f, "%.3f");
+        ImGui::SliderFloat("Noise scale",    &renderer.fog.noiseScale,    0.01f, 0.5f,  "%.3f");
+        ImGui::SliderFloat("Noise strength", &renderer.fog.noiseStrength, 0.0f,  1.0f,  "%.2f");
+        ImGui::SliderFloat("Drift speed",    &renderer.fog.driftSpeed,   0.0f,  5.0f,  "%.2f");
+        {
+            const char* noiseTypes[] = { "Value", "Simplex" };
+            ImGui::Combo("Noise type", &renderer.fog.noiseType, noiseTypes, 2);
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Overlay");
+        ImGui::Checkbox("Show axes", &renderer.overlay.showAxes);
+        if (renderer.overlay.showAxes)
+            ImGui::SliderFloat("Axis length", &renderer.overlay.axisLength, 1.0f, 50.0f, "%.0f cm");
+        ImGui::Checkbox("Show grid", &renderer.overlay.showGrid);
+        if (renderer.overlay.showGrid)
+            ImGui::SliderFloat("Grid spacing", &renderer.overlay.gridSpacing, 1.0f, 20.0f, "%.0f cm");
 
         ImGui::EndChild();
         ImGui::SameLine();
@@ -305,7 +319,7 @@ int main(int argc, char** argv) {
         int vpW = std::max(1, static_cast<int>(vpSize.x));
         int vpH = std::max(1, static_cast<int>(vpSize.y));
 
-        renderer.fog.time = static_cast<float>(now);
+        renderer.fog.driftTime += dt * renderer.fog.driftSpeed;
         renderer.resize(vpW, vpH);
         renderer.render(azimuth, elevation, orbitRadius, target, fov, lightDir);
 
