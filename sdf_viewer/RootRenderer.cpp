@@ -138,6 +138,13 @@ void RootRenderer::buildShader() {
         m_uSpecColor = glGetUniformLocation(m_prog, "u_specColor");
         m_uShininess = glGetUniformLocation(m_prog, "u_shininess");
         m_uLightDir  = glGetUniformLocation(m_prog, "u_lightDir");
+        m_uShaderMode    = glGetUniformLocation(m_prog, "u_shaderMode");
+        m_uMetallic      = glGetUniformLocation(m_prog, "u_metallic");
+        m_uRoughness     = glGetUniformLocation(m_prog, "u_roughness");
+        m_uWispCount     = glGetUniformLocation(m_prog, "u_wispCount");
+        m_uWispPos       = glGetUniformLocation(m_prog, "u_wispPos[0]");
+        m_uWispColor     = glGetUniformLocation(m_prog, "u_wispColor[0]");
+        m_uWispIntensity = glGetUniformLocation(m_prog, "u_wispIntensity[0]");
     }
 
     // --- Fog post-process pass ---
@@ -168,6 +175,10 @@ void RootRenderer::buildShader() {
         m_fpAxisLength       = glGetUniformLocation(m_fogProg, "u_axisLength");
         m_fpShowGrid         = glGetUniformLocation(m_fogProg, "u_showGrid");
         m_fpGridSpacing      = glGetUniformLocation(m_fogProg, "u_gridSpacing");
+        m_fpWispCount        = glGetUniformLocation(m_fogProg, "u_wispCount");
+        m_fpWispPos          = glGetUniformLocation(m_fogProg, "u_wispPos[0]");
+        m_fpWispColor        = glGetUniformLocation(m_fogProg, "u_wispColor[0]");
+        m_fpWispIntensity    = glGetUniformLocation(m_fogProg, "u_wispIntensity[0]");
     }
 }
 
@@ -317,7 +328,26 @@ void RootRenderer::render(float azimuth, float elevation, float radius,
                 vp[col*4+row] += proj[k*4+row] * view[col*4+k];
 
     // -----------------------------------------------------------------------
-    // Pass 1: geometry — Phong shading, no fog
+    // Animate wisps
+    // -----------------------------------------------------------------------
+    int   activeWisps = (wispCount < MAX_WISPS) ? wispCount : MAX_WISPS;
+    float wispPosArr[MAX_WISPS * 3]   = {};
+    float wispColorArr[MAX_WISPS * 3] = {};
+    float wispIntArr[MAX_WISPS]       = {};
+    for (int i = 0; i < activeWisps; i++) {
+        const auto& w = wisps[i];
+        float t = wispTime;
+        wispPosArr[i*3+0] = w.basePos[0] + w.driftRadius * sinf(w.driftSpeed * t            + w.phase[0]);
+        wispPosArr[i*3+1] = w.basePos[1] + w.driftRadius * cosf(w.driftSpeed * t * 0.7f     + w.phase[1]);
+        wispPosArr[i*3+2] = w.basePos[2] + w.driftRadius * sinf(w.driftSpeed * t * 1.3f     + w.phase[2]);
+        wispColorArr[i*3+0] = w.color[0];
+        wispColorArr[i*3+1] = w.color[1];
+        wispColorArr[i*3+2] = w.color[2];
+        wispIntArr[i] = w.intensity;
+    }
+
+    // -----------------------------------------------------------------------
+    // Pass 1: geometry — shading, no fog
     // -----------------------------------------------------------------------
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
     glViewport(0, 0, m_w, m_h);
@@ -347,6 +377,15 @@ void RootRenderer::render(float azimuth, float elevation, float radius,
     glUniform3fv(m_uSpecColor, 1, mat.specColor);
     glUniform1f (m_uShininess,    mat.shininess);
     glUniform3fv(m_uLightDir,  1, lightDir3);
+    glUniform1i (m_uShaderMode,   static_cast<int>(shaderMode));
+    glUniform1f (m_uMetallic,     pbr.metallic);
+    glUniform1f (m_uRoughness,    pbr.roughness);
+    glUniform1i (m_uWispCount,    activeWisps);
+    if (activeWisps > 0) {
+        glUniform3fv(m_uWispPos,       activeWisps, wispPosArr);
+        glUniform3fv(m_uWispColor,     activeWisps, wispColorArr);
+        glUniform1fv(m_uWispIntensity, activeWisps, wispIntArr);
+    }
 
     glBindVertexArray(m_vao);
     glDrawArraysInstanced(GL_TRIANGLES, 0, 6, m_segCount);
@@ -385,6 +424,12 @@ void RootRenderer::render(float azimuth, float elevation, float radius,
     glUniform1f (m_fpAxisLength,         overlay.axisLength);
     glUniform1i (m_fpShowGrid,           overlay.showGrid  ? 1 : 0);
     glUniform1f (m_fpGridSpacing,        overlay.gridSpacing);
+    glUniform1i (m_fpWispCount,          activeWisps);
+    if (activeWisps > 0) {
+        glUniform3fv(m_fpWispPos,       activeWisps, wispPosArr);
+        glUniform3fv(m_fpWispColor,     activeWisps, wispColorArr);
+        glUniform1fv(m_fpWispIntensity, activeWisps, wispIntArr);
+    }
 
     glBindVertexArray(m_vao);
     glDrawArrays(GL_TRIANGLES, 0, 3);

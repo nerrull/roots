@@ -7,12 +7,19 @@ namespace CPlantBox { class Vector3d; class Vector2i; }
 
 class RootRenderer {
 public:
+    enum class ShaderMode { Phong = 0, PBR = 1 };
+
     struct Material {
         float baseColor[3] = {0.60f, 0.55f, 0.45f};
         float ambient      = 0.03f;
         float diffuse      = 0.30f;
         float specColor[3] = {1.00f, 0.95f, 0.85f};
         float shininess    = 150.0f;
+    };
+
+    struct PBRParams {
+        float metallic  = 0.05f;
+        float roughness = 0.70f;
     };
 
     struct Fog {
@@ -33,6 +40,16 @@ public:
         float gridSpacing = 5.0f;     // cm
     };
 
+    struct WispDef {
+        float basePos[3]  = {};
+        float color[3]    = {0.8f, 0.9f, 1.0f};
+        float intensity   = 3.0f;
+        float driftRadius = 5.0f;
+        float driftSpeed  = 0.5f;
+        float phase[3]    = {};
+    };
+    static constexpr int MAX_WISPS = 4;
+
     RootRenderer(int w, int h);
     ~RootRenderer();
 
@@ -49,9 +66,14 @@ public:
     int    width()    const { return m_w; }
     int    height()   const { return m_h; }
 
-    Material mat;
-    Fog      fog;
-    Overlay  overlay;
+    ShaderMode shaderMode = ShaderMode::Phong;
+    Material   mat;
+    PBRParams  pbr;
+    Fog        fog;
+    Overlay    overlay;
+    WispDef    wisps[MAX_WISPS];
+    int        wispCount = 2;
+    float      wispTime  = 0.0f;  // advance by dt each frame
 
 private:
     void buildFBO();
@@ -81,6 +103,8 @@ private:
     int m_uEye = -1, m_uCam = -1, m_uFov = -1, m_uRes = -1, m_uViewProj = -1;
     int m_uBaseColor = -1, m_uAmbient = -1, m_uDiffuse = -1;
     int m_uSpecColor = -1, m_uShininess = -1, m_uLightDir = -1;
+    int m_uShaderMode = -1, m_uMetallic = -1, m_uRoughness = -1;
+    int m_uWispCount = -1, m_uWispPos = -1, m_uWispColor = -1, m_uWispIntensity = -1;
 
     // Fog pass
     int m_fpColorTex = -1, m_fpDepthTex = -1;
@@ -91,4 +115,5 @@ private:
     int m_fpNoiseType = -1;
     int m_fpShowAxes = -1, m_fpAxisLength = -1;
     int m_fpShowGrid = -1, m_fpGridSpacing = -1;
+    int m_fpWispCount = -1, m_fpWispPos = -1, m_fpWispColor = -1, m_fpWispIntensity = -1;
 };

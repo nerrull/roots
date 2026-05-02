@@ -90,6 +90,59 @@ int main(int argc, char** argv) {
     // ------------------------------------------------------------------
     RootRenderer renderer(800, 600);
 
+    // Default wisps — warm wisp and cool wisp orbiting the root system
+    renderer.wisps[0].basePos[0] = 8.0f;
+    renderer.wisps[0].basePos[1] = 4.0f;
+    renderer.wisps[0].basePos[2] = 0.0f;
+    renderer.wisps[0].color[0]   = 1.0f;
+    renderer.wisps[0].color[1]   = 0.85f;
+    renderer.wisps[0].color[2]   = 0.4f;   // warm amber
+    renderer.wisps[0].intensity  = 2.5f;
+    renderer.wisps[0].driftRadius = 6.0f;
+    renderer.wisps[0].driftSpeed  = 0.4f;
+    renderer.wisps[0].phase[0]    = 0.0f;
+    renderer.wisps[0].phase[1]    = 1.57f;
+    renderer.wisps[0].phase[2]    = 2.1f;
+
+    renderer.wisps[1].basePos[0] = -7.0f;
+    renderer.wisps[1].basePos[1] = 2.0f;
+    renderer.wisps[1].basePos[2] = 4.0f;
+    renderer.wisps[1].color[0]   = 0.4f;
+    renderer.wisps[1].color[1]   = 0.8f;
+    renderer.wisps[1].color[2]   = 1.0f;   // cool blue
+    renderer.wisps[1].intensity  = 2.0f;
+    renderer.wisps[1].driftRadius = 5.0f;
+    renderer.wisps[1].driftSpeed  = 0.35f;
+    renderer.wisps[1].phase[0]    = 1.2f;
+    renderer.wisps[1].phase[1]    = 0.7f;
+    renderer.wisps[1].phase[2]    = 3.1f;
+
+    renderer.wisps[2].basePos[0] = 0.0f;
+    renderer.wisps[2].basePos[1] = 8.0f;
+    renderer.wisps[2].basePos[2] = -3.0f;
+    renderer.wisps[2].color[0]   = 0.6f;
+    renderer.wisps[2].color[1]   = 1.0f;
+    renderer.wisps[2].color[2]   = 0.6f;   // pale green
+    renderer.wisps[2].intensity  = 1.8f;
+    renderer.wisps[2].driftRadius = 4.0f;
+    renderer.wisps[2].driftSpeed  = 0.6f;
+    renderer.wisps[2].phase[0]    = 2.5f;
+    renderer.wisps[2].phase[1]    = 3.8f;
+    renderer.wisps[2].phase[2]    = 0.9f;
+
+    renderer.wisps[3].basePos[0] = -4.0f;
+    renderer.wisps[3].basePos[1] = 6.0f;
+    renderer.wisps[3].basePos[2] = -6.0f;
+    renderer.wisps[3].color[0]   = 0.9f;
+    renderer.wisps[3].color[1]   = 0.5f;
+    renderer.wisps[3].color[2]   = 1.0f;   // violet
+    renderer.wisps[3].intensity  = 2.2f;
+    renderer.wisps[3].driftRadius = 7.0f;
+    renderer.wisps[3].driftSpeed  = 0.28f;
+    renderer.wisps[3].phase[0]    = 4.1f;
+    renderer.wisps[3].phase[1]    = 2.2f;
+    renderer.wisps[3].phase[2]    = 1.5f;
+
     // ------------------------------------------------------------------
     // Camera state
     // ------------------------------------------------------------------
@@ -276,13 +329,27 @@ int main(int argc, char** argv) {
         ImGui::TextDisabled("Scroll:    zoom");
 
         ImGui::Separator();
+        ImGui::Text("Shader");
+        {
+            const char* modes[] = { "Phong", "PBR" };
+            int mode = static_cast<int>(renderer.shaderMode);
+            if (ImGui::Combo("Mode##shader", &mode, modes, 2))
+                renderer.shaderMode = static_cast<RootRenderer::ShaderMode>(mode);
+        }
+
+        ImGui::Separator();
         ImGui::Text("Material");
-        ImGui::ColorEdit3("Base color",  renderer.mat.baseColor);
-        ImGui::SliderFloat("Ambient",    &renderer.mat.ambient,   0.0f,  1.0f,   "%.2f");
-        ImGui::SliderFloat("Diffuse",    &renderer.mat.diffuse,   0.0f,  1.0f,   "%.2f");
-        ImGui::ColorEdit3("Spec color",  renderer.mat.specColor);
-        ImGui::SliderFloat("Shininess",  &renderer.mat.shininess, 1.0f, 512.0f,  "%.0f",
-                           ImGuiSliderFlags_Logarithmic);
+        ImGui::ColorEdit3("Base color", renderer.mat.baseColor);
+        ImGui::SliderFloat("Ambient",   &renderer.mat.ambient, 0.0f, 1.0f, "%.2f");
+        if (renderer.shaderMode == RootRenderer::ShaderMode::Phong) {
+            ImGui::SliderFloat("Diffuse",   &renderer.mat.diffuse,   0.0f,  1.0f,  "%.2f");
+            ImGui::ColorEdit3("Spec color", renderer.mat.specColor);
+            ImGui::SliderFloat("Shininess", &renderer.mat.shininess, 1.0f, 512.0f, "%.0f",
+                               ImGuiSliderFlags_Logarithmic);
+        } else {
+            ImGui::SliderFloat("Metallic",  &renderer.pbr.metallic,  0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Roughness", &renderer.pbr.roughness, 0.0f, 1.0f, "%.2f");
+        }
 
         ImGui::Separator();
         ImGui::Text("Light");
@@ -311,6 +378,22 @@ int main(int argc, char** argv) {
         if (renderer.overlay.showGrid)
             ImGui::SliderFloat("Grid spacing", &renderer.overlay.gridSpacing, 1.0f, 20.0f, "%.0f cm");
 
+        ImGui::Separator();
+        ImGui::Text("Wisps");
+        ImGui::SliderInt("Count##wisps", &renderer.wispCount, 0, RootRenderer::MAX_WISPS);
+        for (int wi = 0; wi < renderer.wispCount; wi++) {
+            ImGui::PushID(wi);
+            char label[16]; snprintf(label, sizeof(label), "Wisp %d", wi);
+            if (ImGui::TreeNode(label)) {
+                ImGui::ColorEdit3("Color",     renderer.wisps[wi].color);
+                ImGui::SliderFloat("Intensity", &renderer.wisps[wi].intensity,   0.0f, 10.0f, "%.1f");
+                ImGui::SliderFloat("Drift R",   &renderer.wisps[wi].driftRadius, 0.0f, 30.0f, "%.1f cm");
+                ImGui::SliderFloat("Drift spd", &renderer.wisps[wi].driftSpeed,  0.0f,  3.0f, "%.2f");
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        }
+
         ImGui::EndChild();
         ImGui::SameLine();
 
@@ -320,6 +403,7 @@ int main(int argc, char** argv) {
         int vpH = std::max(1, static_cast<int>(vpSize.y));
 
         renderer.fog.driftTime += dt * renderer.fog.driftSpeed;
+        renderer.wispTime      += dt;
         renderer.resize(vpW, vpH);
         renderer.render(azimuth, elevation, orbitRadius, target, fov, lightDir);
 

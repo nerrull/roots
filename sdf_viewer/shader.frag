@@ -16,10 +16,21 @@ uniform vec3  u_specColor;
 uniform float u_shininess;
 uniform vec3  u_lightDir;
 
+uniform int   u_shaderMode;   // 0 = Phong, 1 = PBR
+uniform float u_metallic;
+uniform float u_roughness;
+
+uniform int   u_wispCount;
+uniform vec3  u_wispPos[4];
+uniform vec3  u_wispColor[4];
+uniform float u_wispIntensity[4];
+
 flat in int  v_segIdx;
 in vec2      v_ndc;
 
 out vec4 fragColor;
+
+const float PI = 3.14159265359;
 
 float capsuleSDF(vec3 p, vec3 a, vec3 b, float r) {
     vec3  ab = b - a;
@@ -32,6 +43,42 @@ vec3 capsuleNormal(vec3 p, vec3 a, vec3 b) {
     vec3  ab = b - a;
     float t  = clamp(dot(p - a, ab) / dot(ab, ab), 0.0, 1.0);
     return normalize(p - (a + t * ab));
+}
+
+// ---------------------------------------------------------------------------
+// PBR — Cook-Torrance BRDF (GGX + Smith + Schlick)
+// ---------------------------------------------------------------------------
+float D_GGX(float NdotH, float a2) {
+    float d = (NdotH * NdotH) * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d);
+}
+
+float G_SchlickGGX(float NdotX, float k) {
+    return NdotX / (NdotX * (1.0 - k) + k);
+}
+
+vec3 F_Schlick(float cosTheta, vec3 F0) {
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+// Returns radiance contribution for a single light (no distance falloff — caller scales).
+vec3 pbrBRDF(vec3 N, vec3 V, vec3 L, vec3 albedo, float metallic, float roughness) {
+    float NdotL = max(dot(N, L), 0.0);
+    if (NdotL < 0.0001) return vec3(0.0);
+    vec3  H     = normalize(V + L);
+    float NdotH = max(dot(N, H), 0.0);
+    float NdotV = max(dot(N, V), 0.0001);
+    float VdotH = max(dot(V, H), 0.0);
+    float a     = roughness * roughness;
+    float a2    = a * a;
+    float k     = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+    float D     = D_GGX(NdotH, a2);
+    float G     = G_SchlickGGX(NdotV, k) * G_SchlickGGX(NdotL, k);
+    vec3  F0    = mix(vec3(0.04), albedo, metallic);
+    vec3  F     = F_Schlick(VdotH, F0);
+    vec3  spec  = (D * G * F) / max(4.0 * NdotV * NdotL, 0.001);
+    vec3  kD    = (1.0 - F) * (1.0 - metallic);
+    return (kD * albedo / PI + spec) * NdotL;
 }
 
 void main() {
@@ -62,13 +109,43 @@ void main() {
 
     vec3 p = ro + rd * hit;
     vec3 n = capsuleNormal(p, a, b);
+    vec3 V = -rd;
 
     vec4 clipP = u_viewProj * vec4(p, 1.0);
     gl_FragDepth = (clipP.z / clipP.w) * 0.5 + 0.5;
 
-    float diff = max(dot(n, u_lightDir), 0.0);
-    vec3  h    = normalize(u_lightDir - rd);
-    float spec = pow(max(dot(n, h), 0.0), u_shininess);
+    vec3 color;
 
-    fragColor = vec4(u_baseColor * (u_ambient + u_diffuse * diff) + u_specColor * spec, 1.0);
+    if (u_shaderMode == 0) {
+        // --- Phong ---
+        float diff = max(dot(n, u_lightDir), 0.0);
+        vec3  h    = normalize(u_lightDir + V);
+        float spec = pow(max(dot(n, h), 0.0), u_shininess);
+        color = u_baseColor * (u_ambient + u_diffuse * diff) + u_specColor * spec;
+
+        for (int wi = 0; wi < u_wispCount; wi++) {
+            vec3  lv    = u_wispPos[wi] - p;
+            float dist2 = dot(lv, lv);
+            vec3  ldir  = lv * inversesqrt(dist2);
+            float att   = u_wispIntensity[wi] / (1.0 + dist2 * 0.008);
+            float wd    = max(dot(n, ldir), 0.0);
+            vec3  wh    = normalize(ldir + V);
+            float ws    = pow(max(dot(n, wh), 0.0), u_shininess);
+            color += att * u_wispColor[wi] * (u_baseColor * u_diffuse * wd + u_specColor * ws);
+        }
+    } else {
+        // --- PBR ---
+        color = u_baseColor * u_ambient;
+        color += pbrBRDF(n, V, u_lightDir, u_baseColor, u_metallic, u_roughness);
+
+        for (int wi = 0; wi < u_wispCount; wi++) {
+            vec3  lv    = u_wispPos[wi] - p;
+            float dist2 = dot(lv, lv);
+            vec3  ldir  = lv * inversesqrt(dist2);
+            float att   = u_wispIntensity[wi] / (1.0 + dist2 * 0.008);
+            color += att * u_wispColor[wi] * pbrBRDF(n, V, ldir, u_baseColor, u_metallic, u_roughness);
+        }
+    }
+
+    fragColor = vec4(color, 1.0);
 }
