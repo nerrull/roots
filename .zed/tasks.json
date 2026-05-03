@@ -1,0 +1,22 @@
+[
+  {
+    "label": "CMake: Configure",
+    "command": "cmake -B build -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo",
+    "cwd": "$ZED_WORKTREE_ROOT",
+  },
+  {
+    "label": "Build",
+    "command": "cmake --build build --target sdf_viewer -j$(sysctl -n hw.logicalcpu)",
+    "cwd": "$ZED_WORKTREE_ROOT",
+  },
+  {
+    "label": "Build & Run",
+    "command": "pwd && cmake --build build --target sdf_viewer -j$(sysctl -n hw.logicalcpu) && ./build/sdf_viewer/sdf_viewer",
+    "cwd": "$ZED_WORKTREE_ROOT",
+  },
+  {
+    "label": "Run",
+    "command": "./build/sdf_viewer/sdf_viewer",
+    "cwd": "$ZED_WORKTREE_ROOT",
+  },
+]
