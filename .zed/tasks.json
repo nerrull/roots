@@ -19,4 +19,9 @@
     "command": "./build/sdf_viewer/sdf_viewer",
     "cwd": "$ZED_WORKTREE_ROOT",
   },
+  {
+    "label": "freenect: Build & Run",
+    "command": "cmake --build build --target freenect_test -j$(sysctl -n hw.logicalcpu) && ./build/freenect_test/freenect_test",
+    "cwd": "$ZED_WORKTREE_ROOT",
+  },
 ]

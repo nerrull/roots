@@ -17,3 +17,4 @@ target_include_directories(CPlantBox PUBLIC
 )
 
 add_subdirectory(sdf_viewer)
+add_subdirectory(freenect_test)
