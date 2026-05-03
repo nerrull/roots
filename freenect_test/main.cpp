@@ -10,6 +10,7 @@
 
 #include <opencv2/imgproc.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -18,16 +19,18 @@
 #include <mutex>
 #include <sys/time.h>
 #include <thread>
+#include <vector>
 
 static const int DW = 640, DH = 480;
 
 // ── shared camera buffers ─────────────────────────────────────────────────────
 static std::mutex        s_depth_mtx, s_video_mtx;
 static uint8_t           s_depth_pix[DW * DH * 3]{};
-static uint16_t          s_depth_raw[DW * DH]{};     // 11-bit raw disparity per pixel
+static uint16_t          s_depth_raw[DW * DH]{};
 static uint8_t           s_video_pix[DW * DH * 3]{};
 static uint8_t           s_video_back[DW * DH * 3]{};
 static std::atomic<bool> s_depth_dirty{false}, s_video_dirty{false};
+static int               s_video_skip = 30;
 static std::atomic<bool> s_running{true};
 static GLFWwindow*       s_win = nullptr;
 
@@ -37,6 +40,246 @@ static DetectBox               s_pose_box;
 static std::vector<PosePoint>  s_pose_kps;
 static std::vector<Joint3D>    s_pose_joints;
 static std::atomic<bool>       s_pose_ready{false};
+
+// ── 3D scene shaders ──────────────────────────────────────────────────────────
+static const char* SCENE3D_VERT = R"glsl(
+#version 410 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec4 aCol;
+out vec4 vCol;
+uniform mat4 uMVP;
+void main() {
+    gl_Position = uMVP * vec4(aPos, 1.0);
+    vCol = aCol;
+}
+)glsl";
+
+static const char* SCENE3D_FRAG = R"glsl(
+#version 410 core
+in vec4 vCol;
+out vec4 FragColor;
+void main() { FragColor = vCol; }
+)glsl";
+
+// ── 3D scene state ────────────────────────────────────────────────────────────
+static const int SCENE_W = 640, SCENE_H = 480;
+static GLuint g_fbo = 0, g_fbo_col = 0, g_fbo_dep = 0;
+static GLuint g_prog3d = 0, g_vao3d = 0, g_vbo3d = 0;
+static float  g_cam_az   = 0.f;
+static float  g_cam_el   = 0.35f;
+static float  g_cam_dist = 2000.f;
+
+struct SceneVert { float x,y,z,r,g,b,a; };
+static std::vector<SceneVert> g_scene_buf;
+
+// ── column-major 4×4 matrix ───────────────────────────────────────────────────
+struct M4 { float m[16]{}; };
+
+static M4 m4_identity() {
+    M4 r; r.m[0]=r.m[5]=r.m[10]=r.m[15]=1.f; return r;
+}
+
+static M4 m4_mul(const M4& a, const M4& b) {
+    M4 c{};
+    for (int col=0; col<4; col++)
+        for (int row=0; row<4; row++)
+            for (int k=0; k<4; k++)
+                c.m[col*4+row] += a.m[k*4+row] * b.m[col*4+k];
+    return c;
+}
+
+static M4 m4_perspective(float fov_rad, float aspect, float zn, float zf) {
+    float f = 1.f / tanf(fov_rad * 0.5f);
+    M4 r{};
+    r.m[0]=f/aspect; r.m[5]=f;
+    r.m[10]=(zf+zn)/(zn-zf); r.m[11]=-1.f;
+    r.m[14]=2.f*zf*zn/(zn-zf);
+    return r;
+}
+
+// Look at origin (0,0,0) from (ex,ey,ez), up=(0,1,0).
+static M4 m4_lookat(float ex, float ey, float ez) {
+    float fx=-ex, fy=-ey, fz=-ez;
+    float fl=sqrtf(fx*fx+fy*fy+fz*fz);
+    if (fl<1e-6f) fl=1.f; fx/=fl; fy/=fl; fz/=fl;
+
+    float upx=0.f, upy=1.f, upz=0.f;
+    if (fabsf(fy) > 0.99f) { upx=0.f; upy=0.f; upz=(fy>0.f?-1.f:1.f); }
+
+    float sx=fy*upz-fz*upy, sy=fz*upx-fx*upz, sz=fx*upy-fy*upx;
+    float sl=sqrtf(sx*sx+sy*sy+sz*sz);
+    if (sl<1e-6f) sl=1.f; sx/=sl; sy/=sl; sz/=sl;
+
+    float ux=sy*fz-sz*fy, uy=sz*fx-sx*fz, uz=sx*fy-sy*fx;
+
+    M4 r{};
+    r.m[0]=sx; r.m[1]=ux; r.m[2]=-fx; r.m[3]=0.f;
+    r.m[4]=sy; r.m[5]=uy; r.m[6]=-fy; r.m[7]=0.f;
+    r.m[8]=sz; r.m[9]=uz; r.m[10]=-fz; r.m[11]=0.f;
+    r.m[12]=-(sx*ex+sy*ey+sz*ez);
+    r.m[13]=-(ux*ex+uy*ey+uz*ez);
+    r.m[14]= (fx*ex+fy*ey+fz*ez);
+    r.m[15]=1.f;
+    return r;
+}
+
+static Vec3 quat_apply(Quat q, Vec3 v) {
+    float tx=2.f*(q.y*v.z-q.z*v.y), ty=2.f*(q.z*v.x-q.x*v.z), tz=2.f*(q.x*v.y-q.y*v.x);
+    return { v.x+q.w*tx+q.y*tz-q.z*ty,
+             v.y+q.w*ty+q.z*tx-q.x*tz,
+             v.z+q.w*tz+q.x*ty-q.y*tx };
+}
+
+// ── scene geometry builders ───────────────────────────────────────────────────
+static void push_line(float x0,float y0,float z0, float x1,float y1,float z1,
+                      float r,float g,float b, float a=1.f) {
+    g_scene_buf.push_back({x0,y0,z0, r,g,b,a});
+    g_scene_buf.push_back({x1,y1,z1, r,g,b,a});
+}
+
+// Draw a disk at (cx,cy,cz) with given normal and tangent (both unit vectors).
+// The orientation indicator line points along +tangent direction.
+static void push_disk(float cx, float cy, float cz,
+                      float nx, float ny, float nz,
+                      float tx, float ty, float tz,
+                      float rad, float r, float g, float b) {
+    // bitangent = cross(normal, tangent)
+    float bx=ny*tz-nz*ty, by=nz*tx-nx*tz, bz=nx*ty-ny*tx;
+    float bl=sqrtf(bx*bx+by*by+bz*bz);
+    if (bl<1e-6f) return;
+    bx/=bl; by/=bl; bz/=bl;
+
+    static const int N = 24;
+    static const float TAU = 6.28318530718f;
+    float px=cx+rad*tx, py=cy+rad*ty, pz=cz+rad*tz;
+    for (int i=1; i<=N; i++) {
+        float a = TAU*i/N;
+        float qx=cx+rad*(cosf(a)*tx+sinf(a)*bx);
+        float qy=cy+rad*(cosf(a)*ty+sinf(a)*by);
+        float qz=cz+rad*(cosf(a)*tz+sinf(a)*bz);
+        push_line(px,py,pz, qx,qy,qz, r,g,b, 0.6f);
+        px=qx; py=qy; pz=qz;
+    }
+    // Orientation indicator: yellow line from center to tangent direction
+    push_line(cx,cy,cz, cx+rad*tx, cy+rad*ty, cz+rad*tz, 1.f,1.f,0.f);
+}
+
+// ── init 3D scene GL resources ────────────────────────────────────────────────
+static void init_scene3d() {
+    glGenFramebuffers(1, &g_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
+
+    glGenTextures(1, &g_fbo_col);
+    glBindTexture(GL_TEXTURE_2D, g_fbo_col);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, SCENE_W, SCENE_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_fbo_col, 0);
+
+    glGenRenderbuffers(1, &g_fbo_dep);
+    glBindRenderbuffer(GL_RENDERBUFFER, g_fbo_dep);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, SCENE_W, SCENE_H);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, g_fbo_dep);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    auto compile = [](GLenum type, const char* src) {
+        GLuint s = glCreateShader(type);
+        glShaderSource(s, 1, &src, nullptr);
+        glCompileShader(s);
+        GLint ok; glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+        if (!ok) { char buf[512]; glGetShaderInfoLog(s,512,nullptr,buf); fprintf(stderr,"Shader: %s\n",buf); }
+        return s;
+    };
+    GLuint vs=compile(GL_VERTEX_SHADER, SCENE3D_VERT);
+    GLuint fs=compile(GL_FRAGMENT_SHADER, SCENE3D_FRAG);
+    g_prog3d = glCreateProgram();
+    glAttachShader(g_prog3d, vs); glAttachShader(g_prog3d, fs);
+    glLinkProgram(g_prog3d);
+    glDeleteShader(vs); glDeleteShader(fs);
+
+    glGenVertexArrays(1, &g_vao3d);
+    glBindVertexArray(g_vao3d);
+    glGenBuffers(1, &g_vbo3d);
+    glBindBuffer(GL_ARRAY_BUFFER, g_vbo3d);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 7*sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 7*sizeof(float), (void*)(3*sizeof(float)));
+    glEnableVertexAttribArray(1);
+    glBindVertexArray(0);
+}
+
+// Render skeleton to FBO. Returns MVP for text projection.
+static M4 render_scene3d(const std::vector<Joint3D>& joints) {
+    float el=g_cam_el, az=g_cam_az, dist=g_cam_dist;
+    float ex=dist*cosf(el)*sinf(az), ey=dist*sinf(el), ez=dist*cosf(el)*cosf(az);
+    M4 view = m4_lookat(ex, ey, ez);
+    M4 proj = m4_perspective(0.785f, (float)SCENE_W/SCENE_H, 50.f, 10000.f);
+    M4 mvp  = m4_mul(proj, view);
+
+    g_scene_buf.clear();
+
+    // World axes at origin (200 mm)
+    push_line(0,0,0, 200,0,0,  1.f,.2f,.2f);
+    push_line(0,0,0, 0,200,0,  .2f,1.f,.2f);
+    push_line(0,0,0, 0,0,-200, .2f,.2f,1.f);
+
+    if (!joints.empty()) {
+        Vec3 h{0,0,0};
+        if (joints[0].valid) h = joints[0].pos;
+
+        // Helper: kinect→display (center at head, flip Y, negate Z)
+        auto kd = [&](Vec3 p) -> Vec3 {
+            return { p.x-h.x, -(p.y-h.y), -(p.z-h.z) };
+        };
+
+        // Bones
+        for (auto& [pi, ci] : COCO_BONES) {
+            if (pi>=(int)joints.size()||ci>=(int)joints.size()) continue;
+            if (!joints[pi].valid || !joints[ci].valid) continue;
+            Vec3 a=kd(joints[pi].pos), b=kd(joints[ci].pos);
+            push_line(a.x,a.y,a.z, b.x,b.y,b.z, .9f,.9f,.9f,.8f);
+        }
+
+        // Orientation disks at each valid joint
+        for (int i=0; i<(int)joints.size(); i++) {
+            if (!joints[i].valid) continue;
+            Vec3 p = kd(joints[i].pos);
+
+            // Bone axis in display space
+            Vec3 ax_k = quat_apply(joints[i].orientation, {0,1,0});
+            Vec3 ax = v3norm({ax_k.x, -ax_k.y, -ax_k.z});
+
+            // Orientation tangent in display space
+            Vec3 t_k = quat_apply(joints[i].orientation, {1,0,0});
+            Vec3 t = v3norm({t_k.x, -t_k.y, -t_k.z});
+
+            push_disk(p.x,p.y,p.z, ax.x,ax.y,ax.z, t.x,t.y,t.z,
+                      40.f, .2f,.6f,1.f);
+        }
+    }
+
+    // Upload and draw
+    glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
+    glViewport(0, 0, SCENE_W, SCENE_H);
+    glClearColor(0.07f, 0.07f, 0.12f, 1.f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+
+    if (!g_scene_buf.empty()) {
+        glBindVertexArray(g_vao3d);
+        glBindBuffer(GL_ARRAY_BUFFER, g_vbo3d);
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(g_scene_buf.size()*sizeof(SceneVert)),
+                     g_scene_buf.data(), GL_STREAM_DRAW);
+        glUseProgram(g_prog3d);
+        glUniformMatrix4fv(glGetUniformLocation(g_prog3d,"uMVP"), 1, GL_FALSE, mvp.m);
+        glDrawArrays(GL_LINES, 0, (GLsizei)g_scene_buf.size());
+        glBindVertexArray(0);
+    }
+
+    glDisable(GL_DEPTH_TEST);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return mvp;
+}
 
 // ── freenect callbacks ────────────────────────────────────────────────────────
 static void sig_handler(int) {
@@ -58,6 +301,7 @@ static void depth_cb(freenect_device*, void* buf, uint32_t) {
 }
 
 static void video_cb(freenect_device* dev, void* buf, uint32_t) {
+    if (s_video_skip > 0) { --s_video_skip; return; }
     std::lock_guard<std::mutex> lk(s_video_mtx);
     memcpy(s_video_pix, buf, DW * DH * 3);
     freenect_set_video_buffer(dev, s_video_back);
@@ -77,7 +321,7 @@ static void pose_thread_fn() {
             MODEL_DIR "/rtmdet-nano/end2end.onnx",
             MODEL_DIR "/rtmpose-s/end2end.onnx");
 
-        cv::Mat              frame(DH, DW, CV_8UC3);
+        cv::Mat               frame(DH, DW, CV_8UC3);
         std::vector<uint16_t> depth(DW * DH);
 
         while (s_running) {
@@ -85,9 +329,7 @@ static void pose_thread_fn() {
                 std::lock_guard<std::mutex> lk(s_video_mtx);
                 memcpy(frame.data, s_video_pix, DW * DH * 3);
             }
-            // Kinect gives RGB; RTMDet/Pose pipeline expects BGR
             cv::cvtColor(frame, frame, cv::COLOR_RGB2BGR);
-
             {
                 std::lock_guard<std::mutex> lk(s_depth_mtx);
                 memcpy(depth.data(), s_depth_raw, sizeof(s_depth_raw));
@@ -180,7 +422,8 @@ int main() {
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 
-    GLFWwindow* win = glfwCreateWindow(1650, 560, "Kinect + RTMPose", nullptr, nullptr);
+    const int WIN_W = 3 * (DW + 16);
+    GLFWwindow* win = glfwCreateWindow(WIN_W, 560, "Kinect + RTMPose", nullptr, nullptr);
     if (!win) { glfwTerminate(); s_running = false; fk_thread.join(); pose_thread.join(); return 1; }
     s_win = win;
     signal(SIGINT,  sig_handler);
@@ -199,6 +442,15 @@ int main() {
 
     GLuint depth_tex = make_tex();
     GLuint video_tex = make_tex();
+    init_scene3d();
+
+    // Joint names for text overlay
+    static const char* JNAMES[17] = {
+        "nose","Leye","Reye","Lear","Rear",
+        "Lshl","Rshl","Lelb","Relb",
+        "Lwst","Rwst","Lhip","Rhip",
+        "Lkne","Rkne","Lank","Rank"
+    };
 
     while (!glfwWindowShouldClose(win)) {
         glfwPollEvents();
@@ -212,7 +464,6 @@ int main() {
             upload_tex(video_tex, s_video_pix);
         }
 
-        // snapshot pose state for this frame
         DetectBox              pose_box;
         std::vector<PosePoint> pose_kps;
         std::vector<Joint3D>   pose_joints;
@@ -222,6 +473,9 @@ int main() {
             pose_kps    = s_pose_kps;
             pose_joints = s_pose_joints;
         }
+
+        // Render 3D scene to FBO before starting ImGui frame
+        M4 scene_mvp = render_scene3d(pose_joints);
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
@@ -259,52 +513,60 @@ int main() {
         }
         ImGui::End();
 
-        // ── 3D joint info ─────────────────────────────────────────────────────
+        // ── 3D skeleton scene ─────────────────────────────────────────────────
         ImGui::SetNextWindowPos({2.f * (DW + 16.f), 0}, ImGuiCond_Always);
-        ImGui::SetNextWindowSize({330.f, DH + 36.f}, ImGuiCond_Always);
-        ImGui::Begin("Skeleton 3D", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+        ImGui::SetNextWindowSize({DW + 16.f, DH + 36.f}, ImGuiCond_Always);
+        ImGui::Begin("3D View", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
 
-        if (!s_pose_ready) {
-            ImGui::TextDisabled("initializing model...");
-        } else if (!pose_box.IsValid()) {
-            ImGui::TextDisabled("no person detected");
-        } else {
-            ImGui::Text("bbox  %d %d %d %d  (%.2f)",
-                        pose_box.left, pose_box.top,
-                        pose_box.right, pose_box.bottom, pose_box.score);
-            ImGui::Separator();
+        // Display FBO texture (flip Y: uv0=(0,1), uv1=(1,0))
+        ImGui::Image((ImTextureID)(uintptr_t)g_fbo_col, {SCENE_W, SCENE_H}, {0,1}, {1,0});
+        ImVec2 scene_origin = ImGui::GetItemRectMin();
 
-            static const char* JOINT_NAMES[] = {
-                "nose","L-eye","R-eye","L-ear","R-ear",
-                "L-shldr","R-shldr","L-elbow","R-elbow",
-                "L-wrist","R-wrist","L-hip","R-hip",
-                "L-knee","R-knee","L-ankle","R-ankle"
-            };
+        // Orbit camera input
+        if (ImGui::IsItemHovered()) {
+            ImGuiIO& io = ImGui::GetIO();
+            if (io.MouseDown[0]) {
+                g_cam_az -= io.MouseDelta.x * 0.005f;
+                g_cam_el += io.MouseDelta.y * 0.005f;
+                g_cam_el  = std::clamp(g_cam_el, -1.4f, 1.4f);
+            }
+            g_cam_dist -= io.MouseWheel * 150.f;
+            g_cam_dist  = std::max(300.f, g_cam_dist);
+        }
 
-            if (ImGui::BeginTable("joints", 4,
-                    ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY))
-            {
-                ImGui::TableSetupColumn("joint", ImGuiTableColumnFlags_WidthFixed, 60.f);
-                ImGui::TableSetupColumn("X mm",  ImGuiTableColumnFlags_WidthFixed, 70.f);
-                ImGui::TableSetupColumn("Y mm",  ImGuiTableColumnFlags_WidthFixed, 70.f);
-                ImGui::TableSetupColumn("Z mm",  ImGuiTableColumnFlags_WidthFixed, 70.f);
-                ImGui::TableHeadersRow();
+        // Floating confidence text overlay (billboarded via projection)
+        if (!pose_joints.empty()) {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            Vec3 h{0,0,0};
+            if (pose_joints[0].valid) h = pose_joints[0].pos;
 
-                for (int i = 0; i < 17 && i < (int)pose_joints.size(); i++) {
-                    ImGui::TableNextRow();
-                    ImGui::TableSetColumnIndex(0);
-                    ImGui::TextUnformatted(JOINT_NAMES[i]);
-                    if (pose_joints[i].valid) {
-                        ImGui::TableSetColumnIndex(1); ImGui::Text("%.0f", pose_joints[i].pos.x);
-                        ImGui::TableSetColumnIndex(2); ImGui::Text("%.0f", pose_joints[i].pos.y);
-                        ImGui::TableSetColumnIndex(3); ImGui::Text("%.0f", pose_joints[i].pos.z);
-                    } else {
-                        ImGui::TableSetColumnIndex(1); ImGui::TextDisabled("--");
-                    }
-                }
-                ImGui::EndTable();
+            for (int i=0; i<(int)pose_joints.size(); i++) {
+                if (!pose_joints[i].valid) continue;
+
+                // Display-space position (centered at head, Y-up)
+                float px = pose_joints[i].pos.x - h.x;
+                float py = -(pose_joints[i].pos.y - h.y);
+                float pz = -(pose_joints[i].pos.z - h.z);
+
+                // Project to clip space (column-major MVP * vec4(pos,1))
+                float cx = scene_mvp.m[0]*px + scene_mvp.m[4]*py + scene_mvp.m[8]*pz + scene_mvp.m[12];
+                float cy = scene_mvp.m[1]*px + scene_mvp.m[5]*py + scene_mvp.m[9]*pz + scene_mvp.m[13];
+                float cw = scene_mvp.m[3]*px + scene_mvp.m[7]*py + scene_mvp.m[11]*pz + scene_mvp.m[15];
+                if (cw <= 0.f) continue;
+
+                // NDC → screen pixel (flip Y to match UV-flipped display)
+                float sx = (cx/cw * 0.5f + 0.5f) * SCENE_W;
+                float sy = (-cy/cw * 0.5f + 0.5f) * SCENE_H;
+
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%s %.2f", JNAMES[i], pose_joints[i].confidence);
+                float tx = scene_origin.x + sx + 4.f;
+                float ty = scene_origin.y + sy - 8.f;
+                dl->AddText({tx+1,ty+1}, IM_COL32(0,0,0,200), buf);
+                dl->AddText({tx,ty},     IM_COL32(255,255,128,220), buf);
             }
         }
+
         ImGui::End();
 
         ImGui::Render();
@@ -317,8 +579,7 @@ int main() {
         glfwSwapBuffers(win);
     }
 
-    fprintf(stderr, "closing video streams\n")
-    // Stop streams while the event thread is still running.
+    fprintf(stderr, "closing video streams\n");
     freenect_stop_depth(dev);
     freenect_stop_video(dev);
     s_running = false;
@@ -327,6 +588,13 @@ int main() {
 
     freenect_close_device(dev);
     freenect_shutdown(ctx);
+
+    glDeleteFramebuffers(1, &g_fbo);
+    glDeleteTextures(1, &g_fbo_col);
+    glDeleteRenderbuffers(1, &g_fbo_dep);
+    glDeleteProgram(g_prog3d);
+    glDeleteVertexArrays(1, &g_vao3d);
+    glDeleteBuffers(1, &g_vbo3d);
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
