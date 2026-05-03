@@ -350,6 +350,8 @@ int main(int argc, char** argv) {
             ImGui::SliderFloat("Metallic",  &renderer.pbr.metallic,  0.0f, 1.0f, "%.2f");
             ImGui::SliderFloat("Roughness", &renderer.pbr.roughness, 0.0f, 1.0f, "%.2f");
         }
+        ImGui::SliderFloat("Root thickness", &renderer.radiusScale, 0.1f, 5.0f, "%.2f x",
+                           ImGuiSliderFlags_Logarithmic);
 
         ImGui::Separator();
         ImGui::Text("Light");

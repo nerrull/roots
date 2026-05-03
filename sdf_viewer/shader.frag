@@ -25,6 +25,8 @@ uniform vec3  u_wispPos[4];
 uniform vec3  u_wispColor[4];
 uniform float u_wispIntensity[4];
 
+uniform float u_radiusScale;
+
 flat in int  v_segIdx;
 in vec2      v_ndc;
 
@@ -90,7 +92,7 @@ void main() {
     ivec2 seg = texelFetch(u_segments, v_segIdx).xy;
     vec3  a   = texelFetch(u_nodes, seg.x).xyz;
     vec3  b   = texelFetch(u_nodes, seg.y).xyz;
-    float r   = texelFetch(u_radii, v_segIdx).r;
+    float r   = texelFetch(u_radii, v_segIdx).r * u_radiusScale;
 
     const int   MAX_STEPS = 32;
     const float HIT_EPS   = 0.001;

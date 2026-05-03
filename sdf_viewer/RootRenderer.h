@@ -66,14 +66,15 @@ public:
     int    width()    const { return m_w; }
     int    height()   const { return m_h; }
 
-    ShaderMode shaderMode = ShaderMode::Phong;
+    ShaderMode shaderMode   = ShaderMode::Phong;
     Material   mat;
     PBRParams  pbr;
     Fog        fog;
     Overlay    overlay;
     WispDef    wisps[MAX_WISPS];
-    int        wispCount = 2;
-    float      wispTime  = 0.0f;  // advance by dt each frame
+    int        wispCount    = 2;
+    float      wispTime     = 0.0f;  // advance by dt each frame
+    float      radiusScale  = 1.0f;
 
 private:
     void buildFBO();
@@ -105,6 +106,7 @@ private:
     int m_uSpecColor = -1, m_uShininess = -1, m_uLightDir = -1;
     int m_uShaderMode = -1, m_uMetallic = -1, m_uRoughness = -1;
     int m_uWispCount = -1, m_uWispPos = -1, m_uWispColor = -1, m_uWispIntensity = -1;
+    int m_uRadiusScale = -1;
 
     // Fog pass
     int m_fpColorTex = -1, m_fpDepthTex = -1;
