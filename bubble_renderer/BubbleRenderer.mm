@@ -24,7 +24,9 @@ struct Uniforms {
     float lightElevation;  // offset 80
     float aspectRatio;     // offset 84
     float fovTan;          // offset 88
-    float _p4;             // offset 92
+    float wobbleFreq;      // offset 92
+    float wobbleAmp;       // offset 96
+    float _p4;             // offset 100
 };
 
 struct BubbleRenderer::Impl {
@@ -148,6 +150,8 @@ void BubbleRenderer::render(float time, float azimuth, float elevation,
     u->lightElevation  = p.lightElevation;
     u->aspectRatio     = (float)_w / (float)_h;
     u->fovTan          = tanf(0.4363f);  // tan(25°) — comfortable FOV
+    u->wobbleFreq      = p.wobbleFreq;
+    u->wobbleAmp       = p.wobbleAmp;
 
     // Dispatch compute
     id<MTLCommandBuffer>      cmd = [_impl->queue commandBuffer];

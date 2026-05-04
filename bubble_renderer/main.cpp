@@ -86,6 +86,13 @@ int main() {
         ImGui::SliderFloat("##radius", &params.bubbleRadius, 0.3f, 4.0f, "%.2f");
 
         ImGui::Spacing();
+        ImGui::Text("Wobble");
+        ImGui::SetNextItemWidth(-1);
+        ImGui::SliderFloat("##wfreq", &params.wobbleFreq, 0.3f, 5.0f, "freq %.2f");
+        ImGui::SetNextItemWidth(-1);
+        ImGui::SliderFloat("##wamp",  &params.wobbleAmp,  0.0f, 0.3f, "amp  %.3f");
+
+        ImGui::Spacing();
         ImGui::Text("Light");
         ImGui::Checkbox("Auto-rotate", &autoLight);
         if (!autoLight) {

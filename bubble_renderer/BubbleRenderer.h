@@ -9,6 +9,8 @@ public:
         float bubbleRadius   = 1.5f;
         float lightAzimuth   = 0.8f;
         float lightElevation = 0.7f;
+        float wobbleFreq     = 1.8f;     // noise frequency of surface deformation
+        float wobbleAmp      = 0.08f;    // amplitude as fraction of bubble radius
     };
 
     BubbleRenderer(int w, int h);
