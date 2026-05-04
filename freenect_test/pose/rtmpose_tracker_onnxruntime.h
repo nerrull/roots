@@ -12,12 +12,12 @@ public:
                                const std::string& pose_path,
                                int detect_interval = 10);
 
-    std::pair<DetectBox, std::vector<PosePoint>> Inference(const cv::Mat& frame);
+    std::vector<std::pair<DetectBox, std::vector<PosePoint>>> Inference(const cv::Mat& frame);
 
 private:
     std::unique_ptr<RTMDetOnnxruntime>  m_det;
     std::unique_ptr<RTMPoseOnnxruntime> m_pose;
-    DetectBox    m_box;
+    std::vector<DetectBox> m_boxes;
     unsigned int m_frame_num{0};
     int          m_detect_interval;
 };

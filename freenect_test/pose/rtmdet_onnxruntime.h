@@ -10,7 +10,7 @@ public:
     RTMDetOnnxruntime() = delete;
     explicit RTMDetOnnxruntime(const std::string& onnx_model_path);
 
-    DetectBox Inference(const cv::Mat& input_mat);
+    std::vector<DetectBox> Inference(const cv::Mat& input_mat);
 
 private:
     void PrintModelInfo(Ort::Session& session);

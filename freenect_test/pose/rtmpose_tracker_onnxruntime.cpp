@@ -9,13 +9,18 @@ RTMPoseTrackerOnnxruntime::RTMPoseTrackerOnnxruntime(const std::string& det_path
     m_pose = std::make_unique<RTMPoseOnnxruntime>(pose_path);
 }
 
-std::pair<DetectBox, std::vector<PosePoint>>
+std::vector<std::pair<DetectBox, std::vector<PosePoint>>>
 RTMPoseTrackerOnnxruntime::Inference(const cv::Mat& frame)
 {
     if (m_frame_num % m_detect_interval == 0)
-        m_box = m_det->Inference(frame);
+        m_boxes = m_det->Inference(frame);
 
-    auto kps = m_pose->Inference(frame, m_box);
+    std::vector<std::pair<DetectBox, std::vector<PosePoint>>> results;
+    results.reserve(m_boxes.size());
+    for (auto& box : m_boxes) {
+        if (!box.IsValid()) continue;
+        results.push_back({box, m_pose->Inference(frame, box)});
+    }
     m_frame_num++;
-    return {m_box, kps};
+    return results;
 }

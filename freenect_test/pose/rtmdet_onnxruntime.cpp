@@ -20,7 +20,7 @@ RTMDetOnnxruntime::RTMDetOnnxruntime(const std::string& onnx_model_path)
     PrintModelInfo(m_session);
 }
 
-DetectBox RTMDetOnnxruntime::Inference(const cv::Mat& input_mat)
+std::vector<DetectBox> RTMDetOnnxruntime::Inference(const cv::Mat& input_mat)
 {
     // RTMDet-nano has a fixed 320×320 input.
     // Resize, then scale output boxes back to original image space.
@@ -56,20 +56,49 @@ DetectBox RTMDetOnnxruntime::Inference(const cv::Mat& input_mat)
     float* dets   = outs[0].GetTensorMutableData<float>();
     int*   labels = outs[1].GetTensorMutableData<int>();
 
+    constexpr float SCORE_THRESH = 0.5f;
+    constexpr float NMS_IOU_THRESH = 0.45f;
+
     std::vector<DetectBox> boxes;
     for (int i = 0; i < num_dets; i++) {
         if (labels[i] != 0) continue;
+        float score = dets[i * stride + 4];
+        if (score < SCORE_THRESH) continue;
+        fprintf(stderr, "[det] raw x1=%.1f y1=%.1f x2=%.1f y2=%.1f score=%.2f  (sx=%.2f sy=%.2f)\n",
+                dets[i*stride+0], dets[i*stride+1], dets[i*stride+2], dets[i*stride+3], score, sx, sy);
         DetectBox b;
         b.left   = (int)(dets[i * stride + 0] * sx);
         b.top    = (int)(dets[i * stride + 1] * sy);
         b.right  = (int)(dets[i * stride + 2] * sx);
         b.bottom = (int)(dets[i * stride + 3] * sy);
-        b.score  = dets[i * stride + 4];
+        b.score  = score;
         b.label  = labels[i];
         boxes.push_back(b);
     }
     std::sort(boxes.begin(), boxes.end(), BoxCompare);
-    return boxes.empty() ? DetectBox{} : boxes[0];
+
+    // NMS: suppress boxes with high IoU overlap against higher-scoring ones
+    std::vector<DetectBox> kept;
+    std::vector<bool> suppressed(boxes.size(), false);
+    for (int i = 0; i < (int)boxes.size(); i++) {
+        if (suppressed[i]) continue;
+        kept.push_back(boxes[i]);
+        for (int j = i + 1; j < (int)boxes.size(); j++) {
+            if (suppressed[j]) continue;
+            int ix = std::max(boxes[i].left,  boxes[j].left);
+            int iy = std::max(boxes[i].top,   boxes[j].top);
+            int ax = std::min(boxes[i].right,  boxes[j].right);
+            int ay = std::min(boxes[i].bottom, boxes[j].bottom);
+            if (ax > ix && ay > iy) {
+                float inter = (float)(ax-ix) * (float)(ay-iy);
+                float ua    = (float)(boxes[i].right-boxes[i].left) * (float)(boxes[i].bottom-boxes[i].top);
+                float ub    = (float)(boxes[j].right-boxes[j].left) * (float)(boxes[j].bottom-boxes[j].top);
+                if (inter / (ua + ub - inter) > NMS_IOU_THRESH)
+                    suppressed[j] = true;
+            }
+        }
+    }
+    return kept;
 }
 
 void RTMDetOnnxruntime::PrintModelInfo(Ort::Session& session)

@@ -29,16 +29,22 @@ static uint8_t           s_depth_pix[DW * DH * 3]{};
 static uint16_t          s_depth_raw[DW * DH]{};
 static uint8_t           s_video_pix[DW * DH * 3]{};
 static uint8_t           s_video_back[DW * DH * 3]{};
-static std::atomic<bool> s_depth_dirty{false}, s_video_dirty{false};
-static int               s_video_skip = 30;
-static std::atomic<bool> s_running{true};
+static std::atomic<bool>    s_depth_dirty{false}, s_video_dirty{false}, s_pose_video_dirty{false};
+static int                  s_video_skip = 30;
+static std::atomic<bool>    s_running{true};
+static std::atomic<int>     s_video_cb_count{0};   // total video_cb invocations
+static std::atomic<int>     s_video_frame_count{0}; // frames actually written
+static std::atomic<int>     s_depth_cb_count{0};   // total depth_cb invocations
 static GLFWwindow*       s_win = nullptr;
 
 // ── pose results ──────────────────────────────────────────────────────────────
+struct PersonPose {
+    DetectBox              box;
+    std::vector<PosePoint> kps;
+    std::vector<Joint3D>   joints;
+};
 static std::mutex              s_pose_mtx;
-static DetectBox               s_pose_box;
-static std::vector<PosePoint>  s_pose_kps;
-static std::vector<Joint3D>    s_pose_joints;
+static std::vector<PersonPose> s_persons;
 static std::atomic<bool>       s_pose_ready{false};
 
 // ── 3D scene shaders ──────────────────────────────────────────────────────────
@@ -74,10 +80,6 @@ static std::vector<SceneVert> g_scene_buf;
 
 // ── column-major 4×4 matrix ───────────────────────────────────────────────────
 struct M4 { float m[16]{}; };
-
-static M4 m4_identity() {
-    M4 r; r.m[0]=r.m[5]=r.m[10]=r.m[15]=1.f; return r;
-}
 
 static M4 m4_mul(const M4& a, const M4& b) {
     M4 c{};
@@ -209,7 +211,15 @@ static void init_scene3d() {
 }
 
 // Render skeleton to FBO. Returns MVP for text projection.
-static M4 render_scene3d(const std::vector<Joint3D>& joints) {
+static const float PERSON_COLORS[][3] = {
+    {0.9f, 0.9f, 0.9f},
+    {1.0f, 0.55f, 0.1f},
+    {0.2f, 0.85f, 1.0f},
+    {0.85f, 0.3f, 0.85f},
+};
+static const int NUM_PERSON_COLORS = (int)(sizeof(PERSON_COLORS)/sizeof(PERSON_COLORS[0]));
+
+static M4 render_scene3d(const std::vector<PersonPose>& persons) {
     float el=g_cam_el, az=g_cam_az, dist=g_cam_dist;
     float ex=dist*cosf(el)*sinf(az), ey=dist*sinf(el), ez=dist*cosf(el)*cosf(az);
     M4 view = m4_lookat(ex, ey, ez);
@@ -223,21 +233,26 @@ static M4 render_scene3d(const std::vector<Joint3D>& joints) {
     push_line(0,0,0, 0,200,0,  .2f,1.f,.2f);
     push_line(0,0,0, 0,0,-200, .2f,.2f,1.f);
 
-    if (!joints.empty()) {
-        Vec3 h{0,0,0};
-        if (joints[0].valid) h = joints[0].pos;
+    // Centre view on first person's head
+    Vec3 h{0,0,0};
+    if (!persons.empty() && !persons[0].joints.empty() && persons[0].joints[0].valid)
+        h = persons[0].joints[0].pos;
 
-        // Helper: kinect→display (center at head, flip Y, negate Z)
-        auto kd = [&](Vec3 p) -> Vec3 {
-            return { p.x-h.x, -(p.y-h.y), -(p.z-h.z) };
-        };
+    auto kd = [&](Vec3 p) -> Vec3 {
+        return { p.x-h.x, -(p.y-h.y), -(p.z-h.z) };
+    };
+
+    for (int pi = 0; pi < (int)persons.size(); pi++) {
+        const auto& joints = persons[pi].joints;
+        if (joints.empty()) continue;
+        const float* col = PERSON_COLORS[pi % NUM_PERSON_COLORS];
 
         // Bones
-        for (auto& [pi, ci] : COCO_BONES) {
-            if (pi>=(int)joints.size()||ci>=(int)joints.size()) continue;
-            if (!joints[pi].valid || !joints[ci].valid) continue;
-            Vec3 a=kd(joints[pi].pos), b=kd(joints[ci].pos);
-            push_line(a.x,a.y,a.z, b.x,b.y,b.z, .9f,.9f,.9f,.8f);
+        for (auto& [pa, ci] : COCO_BONES) {
+            if (pa>=(int)joints.size()||ci>=(int)joints.size()) continue;
+            if (!joints[pa].valid || !joints[ci].valid) continue;
+            Vec3 a=kd(joints[pa].pos), b=kd(joints[ci].pos);
+            push_line(a.x,a.y,a.z, b.x,b.y,b.z, col[0],col[1],col[2],.8f);
         }
 
         // Orientation disks at each valid joint
@@ -245,16 +260,13 @@ static M4 render_scene3d(const std::vector<Joint3D>& joints) {
             if (!joints[i].valid) continue;
             Vec3 p = kd(joints[i].pos);
 
-            // Bone axis in display space
             Vec3 ax_k = quat_apply(joints[i].orientation, {0,1,0});
             Vec3 ax = v3norm({ax_k.x, -ax_k.y, -ax_k.z});
-
-            // Orientation tangent in display space
             Vec3 t_k = quat_apply(joints[i].orientation, {1,0,0});
             Vec3 t = v3norm({t_k.x, -t_k.y, -t_k.z});
 
             push_disk(p.x,p.y,p.z, ax.x,ax.y,ax.z, t.x,t.y,t.z,
-                      40.f, .2f,.6f,1.f);
+                      40.f, col[0]*0.3f, col[1]*0.7f, col[2]*1.f);
         }
     }
 
@@ -287,6 +299,9 @@ static void sig_handler(int) {
 }
 
 static void depth_cb(freenect_device*, void* buf, uint32_t) {
+    int n = ++s_depth_cb_count;
+    if (n == 1) fprintf(stderr, "[depth] first callback received\n");
+
     auto* d = static_cast<uint16_t*>(buf);
     std::lock_guard<std::mutex> lk(s_depth_mtx);
     for (int i = 0; i < DW * DH; i++) {
@@ -300,21 +315,56 @@ static void depth_cb(freenect_device*, void* buf, uint32_t) {
     s_depth_dirty = true;
 }
 
-static void video_cb(freenect_device* dev, void* buf, uint32_t) {
-    if (s_video_skip > 0) { --s_video_skip; return; }
+static void video_cb(freenect_device* dev, void* buf, uint32_t timestamp) {
+    int n = ++s_video_cb_count;
+    if (n == 1) fprintf(stderr, "[video] first callback received (ts=%u)\n", timestamp);
+
+    if (s_video_skip > 0) {
+        int remaining = --s_video_skip;
+        if (remaining == 0)
+            fprintf(stderr, "[video] skip done at callback #%d, now writing frames\n", n);
+        return;
+    }
+
+    if (buf == nullptr) {
+        fprintf(stderr, "[video] WARNING: null buffer at callback #%d\n", n);
+        return;
+    }
+
     std::lock_guard<std::mutex> lk(s_video_mtx);
     memcpy(s_video_pix, buf, DW * DH * 3);
     freenect_set_video_buffer(dev, s_video_back);
-    s_video_dirty = true;
+    s_video_dirty       = true;
+    s_pose_video_dirty  = true;
+
+    int fc = ++s_video_frame_count;
+    if (fc == 1) fprintf(stderr, "[video] first frame written\n");
 }
 
 static void freenect_thread_fn(freenect_context* ctx) {
+    fprintf(stderr, "[freenect] event thread started\n");
     timeval tv{0, 100'000};
-    while (s_running)
-        freenect_process_events_timeout(ctx, &tv);
+    int iters = 0;
+    while (s_running) {
+        int ret = freenect_process_events_timeout(ctx, &tv);
+        if (ret < 0)
+            fprintf(stderr, "[freenect] process_events_timeout error: %d\n", ret);
+        ++iters;
+    }
+    fprintf(stderr, "[freenect] event thread exiting\n");
 }
 
 // ── pose inference thread ─────────────────────────────────────────────────────
+static float box_iou(const DetectBox& a, const DetectBox& b) {
+    int ix = std::max(a.left, b.left),   iy = std::max(a.top, b.top);
+    int ax = std::min(a.right, b.right), ay = std::min(a.bottom, b.bottom);
+    if (ax <= ix || ay <= iy) return 0.f;
+    float inter = (float)(ax-ix) * (float)(ay-iy);
+    float ua    = (float)(a.right-a.left) * (float)(a.bottom-a.top);
+    float ub    = (float)(b.right-b.left) * (float)(b.bottom-b.top);
+    return inter / (ua + ub - inter);
+}
+
 static void pose_thread_fn() {
     try {
         RTMPoseTrackerOnnxruntime tracker(
@@ -324,7 +374,18 @@ static void pose_thread_fn() {
         cv::Mat               frame(DH, DW, CV_8UC3);
         std::vector<uint16_t> depth(DW * DH);
 
+        // EMA state per tracked person (matched by box IoU across frames)
+        std::vector<std::vector<Joint3D>> smooth_joints;
+        std::vector<DetectBox>            smooth_boxes;
+        constexpr float EMA_ALPHA = 0.4f; // weight on new sample; lower = smoother
+
+        int pose_frame = 0;
         while (s_running) {
+            if (!s_pose_video_dirty.exchange(false)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+
             {
                 std::lock_guard<std::mutex> lk(s_video_mtx);
                 memcpy(frame.data, s_video_pix, DW * DH * 3);
@@ -335,14 +396,56 @@ static void pose_thread_fn() {
                 memcpy(depth.data(), s_depth_raw, sizeof(s_depth_raw));
             }
 
-            auto [box, kps] = tracker.Inference(frame);
-            auto joints     = lift_to_3d(kps, depth.data());
+            fprintf(stderr, "[pose] frame=%d video_frames=%d\n",
+                    ++pose_frame, s_video_frame_count.load());
+
+            auto detections = tracker.Inference(frame);
+            int  n_new  = (int)detections.size();
+            int  n_prev = (int)smooth_joints.size();
+
+            // Greedy IoU matching: new detection → previous smoothed slot
+            std::vector<int>  match(n_new, -1);
+            std::vector<bool> used(n_prev, false);
+            for (int i = 0; i < n_new; i++) {
+                float best = 0.3f; int best_j = -1;
+                for (int j = 0; j < n_prev; j++) {
+                    if (used[j]) continue;
+                    float iou = box_iou(detections[i].first, smooth_boxes[j]);
+                    if (iou > best) { best = iou; best_j = j; }
+                }
+                if (best_j >= 0) { match[i] = best_j; used[best_j] = true; }
+            }
+
+            std::vector<std::vector<Joint3D>> new_smooth(n_new);
+            std::vector<DetectBox>            new_boxes(n_new);
+            std::vector<PersonPose>           persons(n_new);
+
+            for (int i = 0; i < n_new; i++) {
+                auto& [box, kps] = detections[i];
+                auto joints = lift_to_3d(kps, depth.data());
+
+                if (match[i] >= 0) {
+                    const auto& prev = smooth_joints[match[i]];
+                    for (int k = 0; k < (int)joints.size() && k < (int)prev.size(); k++) {
+                        if (joints[k].valid && prev[k].valid) {
+                            joints[k].pos.x = EMA_ALPHA*joints[k].pos.x + (1.f-EMA_ALPHA)*prev[k].pos.x;
+                            joints[k].pos.y = EMA_ALPHA*joints[k].pos.y + (1.f-EMA_ALPHA)*prev[k].pos.y;
+                            joints[k].pos.z = EMA_ALPHA*joints[k].pos.z + (1.f-EMA_ALPHA)*prev[k].pos.z;
+                        }
+                    }
+                }
+
+                new_smooth[i] = joints;
+                new_boxes[i]  = box;
+                persons[i]    = { box, kps, std::move(joints) };
+            }
+
+            smooth_joints = std::move(new_smooth);
+            smooth_boxes  = std::move(new_boxes);
 
             {
                 std::lock_guard<std::mutex> lk(s_pose_mtx);
-                s_pose_box    = box;
-                s_pose_kps    = kps;
-                s_pose_joints = joints;
+                s_persons = std::move(persons);
             }
             s_pose_ready = true;
         }
@@ -376,7 +479,7 @@ int main() {
         fprintf(stderr, "freenect_init failed\n");
         return 1;
     }
-    freenect_set_log_level(ctx, FREENECT_LOG_WARNING);
+    freenect_set_log_level(ctx, FREENECT_LOG_DEBUG);
 
     if (freenect_num_devices(ctx) < 1) {
         fprintf(stderr, "No Kinect devices found\n");
@@ -391,7 +494,7 @@ int main() {
             ctx = nullptr;
             std::this_thread::sleep_for(std::chrono::milliseconds(800));
             if (freenect_init(&ctx, nullptr) < 0) break;
-            freenect_set_log_level(ctx, FREENECT_LOG_WARNING);
+            freenect_set_log_level(ctx, FREENECT_LOG_DEBUG);
             if (freenect_num_devices(ctx) < 1) continue;
         }
         if (freenect_open_device(ctx, &dev, 0) == 0) break;
@@ -409,8 +512,14 @@ int main() {
     freenect_set_depth_mode(dev, freenect_find_depth_mode(FREENECT_RESOLUTION_MEDIUM, FREENECT_DEPTH_11BIT));
     freenect_set_video_mode(dev, freenect_find_video_mode(FREENECT_RESOLUTION_MEDIUM, FREENECT_VIDEO_RGB));
     freenect_set_video_buffer(dev, s_video_back);
-    if (freenect_start_depth(dev) < 0) fprintf(stderr, "freenect_start_depth failed\n");
-    if (freenect_start_video(dev) < 0) fprintf(stderr, "freenect_start_video failed\n");
+    {
+        int r = freenect_start_depth(dev);
+        fprintf(stderr, "[init] freenect_start_depth: %s (ret=%d)\n", r < 0 ? "FAILED" : "ok", r);
+    }
+    {
+        int r = freenect_start_video(dev);
+        fprintf(stderr, "[init] freenect_start_video: %s (ret=%d)\n", r < 0 ? "FAILED" : "ok", r);
+    }
 
     std::thread fk_thread(freenect_thread_fn, ctx);
     std::thread pose_thread(pose_thread_fn);
@@ -423,7 +532,7 @@ int main() {
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 
     const int WIN_W = 3 * (DW + 16);
-    GLFWwindow* win = glfwCreateWindow(WIN_W, 560, "Kinect + RTMPose", nullptr, nullptr);
+    GLFWwindow* win = glfwCreateWindow(WIN_W, 640, "Kinect + RTMPose", nullptr, nullptr);
     if (!win) { glfwTerminate(); s_running = false; fk_thread.join(); pose_thread.join(); return 1; }
     s_win = win;
     signal(SIGINT,  sig_handler);
@@ -443,6 +552,11 @@ int main() {
     GLuint depth_tex = make_tex();
     GLuint video_tex = make_tex();
     init_scene3d();
+
+    // UI state
+    static bool  g_show_boxes    = true;
+    static bool  g_show_skeleton = true;
+    static float g_conf_thresh   = 0.3f;
 
     // Joint names for text overlay
     static const char* JNAMES[17] = {
@@ -464,18 +578,14 @@ int main() {
             upload_tex(video_tex, s_video_pix);
         }
 
-        DetectBox              pose_box;
-        std::vector<PosePoint> pose_kps;
-        std::vector<Joint3D>   pose_joints;
+        std::vector<PersonPose> persons;
         if (s_pose_ready) {
             std::lock_guard<std::mutex> lk(s_pose_mtx);
-            pose_box    = s_pose_box;
-            pose_kps    = s_pose_kps;
-            pose_joints = s_pose_joints;
+            persons = s_persons;
         }
 
         // Render 3D scene to FBO before starting ImGui frame
-        M4 scene_mvp = render_scene3d(pose_joints);
+        M4 scene_mvp = render_scene3d(persons);
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
@@ -494,23 +604,75 @@ int main() {
         ImGui::Begin("Video", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
         ImGui::Image((ImTextureID)(uintptr_t)video_tex, {DW, DH});
 
-        if (!pose_kps.empty()) {
+        if (!persons.empty()) {
+            static const ImU32 BOX_COLS[] = {
+                IM_COL32(0, 255, 80, 220),
+                IM_COL32(255, 180, 0, 220),
+                IM_COL32(50, 220, 255, 220),
+                IM_COL32(220, 75, 220, 220),
+            };
+            static const ImU32 KPS_BONE_COLS[] = {
+                IM_COL32(0, 220, 0, 220),
+                IM_COL32(255, 140, 25, 220),
+                IM_COL32(50, 220, 255, 220),
+                IM_COL32(220, 75, 220, 220),
+            };
+            static const ImU32 KPS_DOT_COLS[] = {
+                IM_COL32(255, 100, 0, 230),
+                IM_COL32(255, 200, 0, 230),
+                IM_COL32(0, 200, 255, 230),
+                IM_COL32(200, 0, 255, 230),
+            };
+            constexpr int N_COLS = 4;
             ImDrawList* dl  = ImGui::GetWindowDrawList();
             ImVec2      org = ImGui::GetItemRectMin();
 
-            for (auto& [a, b] : COCO_BONES) {
-                if (a >= (int)pose_kps.size() || b >= (int)pose_kps.size()) continue;
-                if (pose_kps[a].score < 0.3f || pose_kps[b].score < 0.3f) continue;
-                dl->AddLine({org.x + pose_kps[a].x, org.y + pose_kps[a].y},
-                             {org.x + pose_kps[b].x, org.y + pose_kps[b].y},
-                             IM_COL32(0, 220, 0, 220), 2.f);
-            }
-            for (auto& kp : pose_kps) {
-                if (kp.score < 0.3f) continue;
-                dl->AddCircleFilled({org.x + kp.x, org.y + kp.y},
-                                    4.f, IM_COL32(255, 100, 0, 230));
+            for (int pi = 0; pi < (int)persons.size(); pi++) {
+                const auto& box = persons[pi].box;
+                const auto& kps = persons[pi].kps;
+                ImU32 box_col  = BOX_COLS[pi % N_COLS];
+                ImU32 bone_col = KPS_BONE_COLS[pi % N_COLS];
+                ImU32 dot_col  = KPS_DOT_COLS[pi % N_COLS];
+
+                if (g_show_boxes && box.score >= g_conf_thresh) {
+                    dl->AddRect(
+                        {org.x + box.left,  org.y + box.top},
+                        {org.x + box.right, org.y + box.bottom},
+                        box_col, 0.f, 0, 2.f);
+                    char conf_buf[16];
+                    snprintf(conf_buf, sizeof(conf_buf), "%.0f%%", box.score * 100.f);
+                    float tx = org.x + box.left + 3.f;
+                    float ty = org.y + box.top  - 14.f;
+                    dl->AddText({tx+1, ty+1}, IM_COL32(0,0,0,200),     conf_buf);
+                    dl->AddText({tx,   ty},   box_col,                  conf_buf);
+                }
+
+                if (g_show_skeleton) {
+                    for (auto& [a, b] : COCO_BONES) {
+                        if (a >= (int)kps.size() || b >= (int)kps.size()) continue;
+                        if (kps[a].score < g_conf_thresh || kps[b].score < g_conf_thresh) continue;
+                        dl->AddLine({org.x + kps[a].x, org.y + kps[a].y},
+                                    {org.x + kps[b].x, org.y + kps[b].y},
+                                    bone_col, 2.f);
+                    }
+                    for (auto& kp : kps) {
+                        if (kp.score < g_conf_thresh) continue;
+                        dl->AddCircleFilled({org.x + kp.x, org.y + kp.y}, 4.f, dot_col);
+                    }
+                }
             }
         }
+        ImGui::End();
+
+        // ── controls panel ────────────────────────────────────────────────────
+        ImGui::SetNextWindowPos({DW + 16.f, DH + 36.f}, ImGuiCond_Always);
+        ImGui::SetNextWindowSize({DW + 16.f, 68.f}, ImGuiCond_Always);
+        ImGui::Begin("Controls", nullptr,
+            ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+        ImGui::Checkbox("Boxes",    &g_show_boxes);
+        ImGui::SameLine();
+        ImGui::Checkbox("Skeleton", &g_show_skeleton);
+        ImGui::SliderFloat("Confidence threshold", &g_conf_thresh, 0.f, 1.f, "%.2f");
         ImGui::End();
 
         // ── 3D skeleton scene ─────────────────────────────────────────────────
@@ -535,26 +697,26 @@ int main() {
         }
 
         // Floating confidence text overlay (billboarded via projection)
-        if (!pose_joints.empty()) {
+        if (!persons.empty()) {
             ImDrawList* dl = ImGui::GetWindowDrawList();
             Vec3 h{0,0,0};
-            if (pose_joints[0].valid) h = pose_joints[0].pos;
+            if (!persons[0].joints.empty() && persons[0].joints[0].valid)
+                h = persons[0].joints[0].pos;
 
+            // Only annotate first person to avoid clutter
+            const auto& pose_joints = persons[0].joints;
             for (int i=0; i<(int)pose_joints.size(); i++) {
                 if (!pose_joints[i].valid) continue;
 
-                // Display-space position (centered at head, Y-up)
                 float px = pose_joints[i].pos.x - h.x;
                 float py = -(pose_joints[i].pos.y - h.y);
                 float pz = -(pose_joints[i].pos.z - h.z);
 
-                // Project to clip space (column-major MVP * vec4(pos,1))
                 float cx = scene_mvp.m[0]*px + scene_mvp.m[4]*py + scene_mvp.m[8]*pz + scene_mvp.m[12];
                 float cy = scene_mvp.m[1]*px + scene_mvp.m[5]*py + scene_mvp.m[9]*pz + scene_mvp.m[13];
                 float cw = scene_mvp.m[3]*px + scene_mvp.m[7]*py + scene_mvp.m[11]*pz + scene_mvp.m[15];
                 if (cw <= 0.f) continue;
 
-                // NDC → screen pixel (flip Y to match UV-flipped display)
                 float sx = (cx/cw * 0.5f + 0.5f) * SCENE_W;
                 float sy = (-cy/cw * 0.5f + 0.5f) * SCENE_H;
 
