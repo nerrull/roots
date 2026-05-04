@@ -66,7 +66,7 @@ std::vector<PosePoint> RTMPoseOnnxruntime::Inference(const cv::Mat& input_mat,
         PosePoint p;
         p.x     = (int)(std::distance(rx, xi) / 2);
         p.y     = (int)(std::distance(ry, yi) / 2);
-        p.score = std::max(*xi, *yi);
+        p.score = (*xi + *yi) * 0.5f;
         result.push_back(p);
     }
 

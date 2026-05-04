@@ -319,15 +319,16 @@ static void video_cb(freenect_device* dev, void* buf, uint32_t timestamp) {
     int n = ++s_video_cb_count;
     if (n == 1) fprintf(stderr, "[video] first callback received (ts=%u)\n", timestamp);
 
+    if (buf == nullptr) {
+        fprintf(stderr, "[video] WARNING: null buffer at callback #%d\n", n);
+        freenect_set_video_buffer(dev, s_video_back);
+        return;
+    }
+
     if (s_video_skip > 0) {
         int remaining = --s_video_skip;
         if (remaining == 0)
             fprintf(stderr, "[video] skip done at callback #%d, now writing frames\n", n);
-        return;
-    }
-
-    if (buf == nullptr) {
-        fprintf(stderr, "[video] WARNING: null buffer at callback #%d\n", n);
         return;
     }
 
@@ -390,11 +391,11 @@ static void pose_thread_fn() {
                 std::lock_guard<std::mutex> lk(s_video_mtx);
                 memcpy(frame.data, s_video_pix, DW * DH * 3);
             }
-            cv::cvtColor(frame, frame, cv::COLOR_RGB2BGR);
             {
                 std::lock_guard<std::mutex> lk(s_depth_mtx);
                 memcpy(depth.data(), s_depth_raw, sizeof(s_depth_raw));
             }
+            cv::cvtColor(frame, frame, cv::COLOR_RGB2BGR);
 
             fprintf(stderr, "[pose] frame=%d video_frames=%d\n",
                     ++pose_frame, s_video_frame_count.load());
@@ -475,27 +476,21 @@ static void upload_tex(GLuint t, const uint8_t* rgb) {
 // ── main ──────────────────────────────────────────────────────────────────────
 int main() {
     freenect_context* ctx = nullptr;
-    if (freenect_init(&ctx, nullptr) < 0) {
-        fprintf(stderr, "freenect_init failed\n");
-        return 1;
-    }
-    freenect_set_log_level(ctx, FREENECT_LOG_DEBUG);
-
-    if (freenect_num_devices(ctx) < 1) {
-        fprintf(stderr, "No Kinect devices found\n");
-        freenect_shutdown(ctx);
-        return 1;
-    }
-
-    freenect_device* dev = nullptr;
+    freenect_device*  dev = nullptr;
     for (int i = 0; i < 5; i++) {
         if (i > 0) {
-            freenect_shutdown(ctx);
-            ctx = nullptr;
+            if (ctx) { freenect_shutdown(ctx); ctx = nullptr; }
             std::this_thread::sleep_for(std::chrono::milliseconds(800));
-            if (freenect_init(&ctx, nullptr) < 0) break;
-            freenect_set_log_level(ctx, FREENECT_LOG_DEBUG);
-            if (freenect_num_devices(ctx) < 1) continue;
+        }
+        if (freenect_init(&ctx, nullptr) < 0) {
+            fprintf(stderr, "freenect_init failed (attempt %d/5)\n", i + 1);
+            ctx = nullptr;
+            continue;
+        }
+        freenect_set_log_level(ctx, FREENECT_LOG_DEBUG);
+        if (freenect_num_devices(ctx) < 1) {
+            fprintf(stderr, "No Kinect devices found (attempt %d/5), retrying...\n", i + 1);
+            continue;
         }
         if (freenect_open_device(ctx, &dev, 0) == 0) break;
         fprintf(stderr, "Open attempt %d/5 failed, retrying...\n", i + 1);
