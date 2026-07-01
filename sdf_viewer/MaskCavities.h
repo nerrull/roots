@@ -43,14 +43,17 @@ private:
     double r0_, r1_, r2_;
 };
 
-// --- downward cone container (apex at z=-h, base radius R0 at z=0) ----------
+// --- downward cone container: apex (tip) at z=0 -- where the seed grows from --
+// -- widening to base radius R0 at z=-h (deepest). The root system starts as a
+// single point at the tip and gets more room to spread out the deeper it grows,
+// matching how a taproot naturally fans out with depth.
 class SDF_Cone : public SignedDistanceFunction {
 public:
     SDF_Cone(double baseRadius, double height, const Vector3d& axisXY = Vector3d(0, 0, 0))
         : R0_(baseRadius), h_(height), cxy_(axisXY) {}
 
     double getDist(const Vector3d& v) const override {
-        double t = v.z + h_;                     // 0 at apex (z=-h) .. h at base (z=0)
+        double t = -v.z;                          // 0 at apex/tip (z=0) .. h at base (z=-h)
         double allowedR = R0_ * (t / h_);
         double dx = v.x - cxy_.x, dy = v.y - cxy_.y;
         double radial = std::sqrt(dx * dx + dy * dy);
@@ -71,8 +74,8 @@ struct MaskNode {
     double r_depth, r_width, r_height;   // ellipsoid radii along (normal, tangent, bitangent)
 };
 
-// Phyllotaxis on the lateral surface of a downward cone.
-//   baseRadius R0 at z=0 (top), apex at z=-height. maskR sets cavity size.
+// Phyllotaxis on the lateral surface of the downward cone (apex/seed at z=0).
+//   radius grows from 0 at the tip to baseRadius R0 at z=-height (deepest).
 inline std::vector<MaskNode> conePhyllotaxis(int n, double baseRadius, double height,
                                              double maskR, double startFrac = 0.12,
                                              double endFrac = 0.9) {
@@ -80,15 +83,15 @@ inline std::vector<MaskNode> conePhyllotaxis(int n, double baseRadius, double he
     std::vector<MaskNode> out;
     out.reserve(n);
     for (int i = 0; i < n; ++i) {
-        double t = startFrac + (endFrac - startFrac) * ((i + 0.5) / n);   // 0(top)..1(apex)
+        double t = startFrac + (endFrac - startFrac) * ((i + 0.5) / n);   // 0(tip)..1(deep/wide)
         double z = -t * height;
-        double radius = baseRadius * (1.0 - t);
+        double radius = baseRadius * t;
         double phi = i * golden;
         double cp = std::cos(phi), sp = std::sin(phi);
 
         MaskNode m;
         m.pos = Vector3d(radius * cp, radius * sp, z);
-        // cone surface normal: radial component + upward slope (dr/dz = R0/height).
+        // cone surface normal: radial component + slope back up toward the tip.
         m.normal = Vector3d(cp, sp, baseRadius / height).normalized();
         m.tangent = Vector3d(-sp, cp, 0.0);                       // horizontal, around
         m.bitangent = m.normal.cross(m.tangent).normalized();     // up the surface
