@@ -14,6 +14,7 @@
 #include "RootSystem.h"
 #include "SegmentAnalyser.h"
 #include "MaskCavities.h"
+#include "RootAttractors.h"
 
 using namespace CPlantBox;
 using namespace maskcav;
@@ -25,14 +26,22 @@ int main(int argc, char** argv) {
     std::string outPath = (argc > 2) ? argv[2] : "mask_column.txt";
     int N = (argc > 3) ? std::atoi(argv[3]) : 14;
     double days = (argc > 4) ? std::atof(argv[4]) : 45.0;
+    bool attract = (argc > 5) ? (std::atoi(argv[5]) != 0) : false;
+    double weight = (argc > 6) ? std::atof(argv[6]) : 0.5;
     double R0 = 8.0, H = 26.0, maskR = 2.6;
 
     auto masks = conePhyllotaxis(N, R0, H, maskR, 0.10, 0.92);
 
     auto rs = std::make_shared<RootSystem>();
     rs->readParameters(param, "plant", true, false);
-    rs->setGeometry(buildCavityGeometry(masks, R0, H, true, 2.0));
+    auto geom = buildCavityGeometry(masks, R0, H, true, 2.0);
+    rs->setGeometry(geom);
     rs->initialize(false);
+    if (attract) {
+        auto attrs = rimAttractors(masks, 3, 1.0, 3.0, 1.15);
+        auto base = std::make_shared<Gravitropism>(rs, 1.0, 0.2);
+        rs->setTropism(combinedAttraction(rs, base, attrs, 6.0, 0.25, weight, geom), -1);
+    }
     rs->simulate(days, false);
 
     SegmentAnalyser ana(*rs);
