@@ -112,4 +112,53 @@ inline std::vector<Attractor> rimAttractors(const std::vector<MaskNode>& masks,
     return out;
 }
 
+// Delegates tropismObjective() to one of two sub-tropisms based on the
+// growing organ's order (0 = the primary/main axis grown straight from the
+// seed; 1+ = laterals/offshoots branching off it) -- lets the main root and
+// its offshoots be pulled toward attractors with different strength, e.g. a
+// weaker travel weight for the main axis so it wanders more organically
+// between masks, while laterals stay strongly attracted for dense wrapping.
+//
+// Note: dicing intensity (n trials, sigma angular spread) is this instance's
+// own -- inherited from Tropism -- since Tropism::getHeading()/getUCHeading()
+// use `this->n`/`this->sigma` regardless of which sub-tropism's objective
+// ends up being evaluated. Only the objective *shape* (and thus which
+// direction is preferred) differs between main and lateral.
+class OrderSplitTropism : public Tropism {
+public:
+    OrderSplitTropism(std::shared_ptr<Organism> plant, double n, double sigma,
+                      std::shared_ptr<Tropism> mainTropism, std::shared_ptr<Tropism> lateralTropism)
+        : Tropism(plant, n, sigma), main_(mainTropism), lateral_(lateralTropism) {}
+
+    std::shared_ptr<Tropism> copy(std::shared_ptr<Organism> plant) override {
+        auto nt = std::make_shared<OrderSplitTropism>(*this);
+        nt->plant = plant;
+        nt->main_ = main_->copy(plant);
+        nt->lateral_ = lateral_->copy(plant);
+        return nt;
+    }
+
+    double tropismObjective(const Vector3d& pos, const Matrix3d& old, double a, double b, double dx,
+                            const std::shared_ptr<Organ> o = nullptr) override {
+        int order = o ? (int) o->getParameter("order") : 0;
+        return (order <= 0 ? main_ : lateral_)->tropismObjective(pos, old, a, b, dx, o);
+    }
+
+private:
+    std::shared_ptr<Tropism> main_, lateral_;
+};
+
+// Convenience: builds two combinedAttraction() tropisms (one per weight) and
+// wraps them in an OrderSplitTropism, so the caller doesn't have to.
+inline std::shared_ptr<Tropism> combinedAttractionSplit(
+    std::shared_ptr<Organism> plant, std::shared_ptr<Tropism> base, std::vector<Attractor> attractors,
+    double n, double sigma, double mainWeight, double lateralWeight,
+    std::shared_ptr<SignedDistanceFunction> geometry = nullptr) {
+    auto mainT = combinedAttraction(plant, base, attractors, n, sigma, mainWeight, geometry);
+    auto latT = combinedAttraction(plant, base, attractors, n, sigma, lateralWeight, geometry);
+    auto split = std::make_shared<OrderSplitTropism>(plant, n, sigma, mainT, latT);
+    if (geometry) split->setGeometry(geometry);
+    return split;
+}
+
 }  // namespace maskcav

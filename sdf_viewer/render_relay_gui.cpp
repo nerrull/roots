@@ -190,7 +190,9 @@ struct Params {
     float Hh         = 52.0f;
     float startFrac  = 0.15f;
     float dwellDays  = 18.0f;
-    float weight     = 0.55f;   // travel attraction strength (lower = more organic wander)
+    float weight        = 0.55f;   // main-root travel attraction (lower = more organic wander)
+    float lateralWeight = 0.80f;   // offshoot/lateral travel attraction -- usually kept higher
+                                    // so laterals still cling for wrapping density
     float dwellWeight= 0.92f;
     float sigma      = 0.35f;   // angular jitter -- higher = less railroaded/straight paths
     float viewCylLen = 8.0f;
@@ -317,8 +319,9 @@ int main(int argc, char** argv) {
         ImGui::SliderFloat("Tip start frac", &pending.startFrac, 0.05f, 0.3f);
         ImGui::Separator();
         ImGui::SliderFloat("Dwell days", &pending.dwellDays, 2.0f, 40.0f, "%.1f");
-        ImGui::SliderFloat("Attraction (travel)", &pending.weight, 0.2f, 0.9f, "%.2f");
-        ImGui::SliderFloat("Attraction (dwell)", &pending.dwellWeight, 0.5f, 0.99f, "%.2f");
+        ImGui::SliderFloat("Attraction: main root", &pending.weight, 0.2f, 0.9f, "%.2f");
+        ImGui::SliderFloat("Attraction: offshoots", &pending.lateralWeight, 0.2f, 0.95f, "%.2f");
+        ImGui::SliderFloat("Attraction (dwell, both)", &pending.dwellWeight, 0.5f, 0.99f, "%.2f");
         ImGui::SliderFloat("Angular jitter", &pending.sigma, 0.1f, 0.7f, "%.2f");
         ImGui::SliderFloat("View-clear cylinder", &pending.viewCylLen, 0.0f, 16.0f, "%.1f cm");
         ImGui::Separator();
@@ -395,14 +398,20 @@ int main(int argc, char** argv) {
                 localTargetNode.pos = localTarget;
 
                 auto base = std::make_shared<Gravitropism>(rs, 1.0, params.sigma);
-                auto rebuildTropism = [&](double w) {
+                // travel: main axis and offshoots pull toward the target with
+                // different strength (mainW usually lower -- lets the primary
+                // axis wander instead of beelining, while laterals still cling
+                // for wrapping density). dwell: both pulled equally hard, since
+                // by then everything should be curling tightly around the mask.
+                auto rebuildTropism = [&](double mainW, double lateralW) {
                     auto geom = buildCavityGeometry(localRevealed, params.R0, params.Hh, false, 2.0,
                                                     tipRadius, params.viewCylLen);
                     rs->setGeometry(geom);
                     auto attrs = rimAttractors({localTargetNode}, 6, 1.0, 3.0, 1.15);
-                    rs->setTropism(combinedAttraction(rs, base, attrs, 6.0, params.sigma, w, geom), -1);
+                    rs->setTropism(combinedAttractionSplit(rs, base, attrs, 6.0, params.sigma,
+                                                           mainW, lateralW, geom), -1);
                 };
-                rebuildTropism(params.weight);
+                rebuildTropism(params.weight, params.lateralWeight);
 
                 double day = 0.0, reachedDay = -1.0;
                 bool reached = false;
@@ -421,7 +430,7 @@ int main(int argc, char** argv) {
                             reached = true; reachedDay = day;
                             localRevealed.push_back(localTargetNode);
                             revealed.push_back(masks[hop]);
-                            rebuildTropism(params.dwellWeight);
+                            rebuildTropism(params.dwellWeight, params.dwellWeight);
                         }
                     }
                     if (reached && day - reachedDay > params.dwellDays) break;
