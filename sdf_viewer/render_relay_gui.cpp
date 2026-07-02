@@ -81,7 +81,14 @@ static std::vector<int> cropOvalTris(const std::vector<float>& v, const std::vec
 struct FaceGL {
     GLuint prog = 0, vao = 0, vbo = 0;
     int uViewProj = -1, uEye = -1, uLightDir = -1;
+    int uLightIntensity = -1, uLightFalloff = -1, uSpecStrength = -1;
+    int uVeinColor = -1, uVeinScale = -1, uVeinStrength = -1;
     int vertCount = 0;
+
+    // material knobs -- set from Params before each draw() call.
+    float lightIntensity = 3.2f, lightFalloff = 0.012f, specStrength = 1.2f;
+    float veinColor[3] = {0.55f, 0.53f, 0.50f};
+    float veinScale = 0.6f, veinStrength = 0.5f;
 
     static GLuint compile(GLenum type, const std::string& src) {
         GLuint s = glCreateShader(type);
@@ -108,6 +115,12 @@ struct FaceGL {
         uViewProj = glGetUniformLocation(prog, "u_viewProj");
         uEye      = glGetUniformLocation(prog, "u_eye");
         uLightDir = glGetUniformLocation(prog, "u_lightDir");
+        uLightIntensity = glGetUniformLocation(prog, "u_lightIntensity");
+        uLightFalloff   = glGetUniformLocation(prog, "u_lightFalloff");
+        uSpecStrength   = glGetUniformLocation(prog, "u_specStrength");
+        uVeinColor      = glGetUniformLocation(prog, "u_veinColor");
+        uVeinScale      = glGetUniformLocation(prog, "u_veinScale");
+        uVeinStrength   = glGetUniformLocation(prog, "u_veinStrength");
         glGenVertexArrays(1, &vao);
         glGenBuffers(1, &vbo);
     }
@@ -134,6 +147,12 @@ struct FaceGL {
         glUniformMatrix4fv(uViewProj, 1, GL_FALSE, viewProj);
         glUniform3fv(uEye, 1, eye);
         glUniform3fv(uLightDir, 1, lightDir);
+        glUniform1f(uLightIntensity, lightIntensity);
+        glUniform1f(uLightFalloff, lightFalloff);
+        glUniform1f(uSpecStrength, specStrength);
+        glUniform3fv(uVeinColor, 1, veinColor);
+        glUniform1f(uVeinScale, veinScale);
+        glUniform1f(uVeinStrength, veinStrength);
         glBindVertexArray(vao);
         glDrawArrays(GL_TRIANGLES, 0, vertCount);
         glBindVertexArray(0);
@@ -141,12 +160,11 @@ struct FaceGL {
     }
 };
 
-static float MARBLE[3] = {0.86f, 0.83f, 0.78f};
 static Vector3d toYup(const Vector3d& v) { return Vector3d(v.x, -v.z, v.y); }
 
 static std::vector<float> buildFaceVertexData(const std::vector<MaskNode>& revealed,
                                               const std::vector<float>& fv, const std::vector<int>& ftris,
-                                              float faceScale, float lightDist = 5.0f) {
+                                              float faceScale, float lightDist, const float* maskColor) {
     std::vector<float> out;
     for (const auto& m0 : revealed) {
         Vector3d n = toYup(m0.normal), t = toYup(m0.tangent), b = toYup(m0.bitangent);
@@ -170,7 +188,7 @@ static std::vector<float> buildFaceVertexData(const std::vector<MaskNode>& revea
             for (int k = 0; k < 3; k++) {
                 out.push_back((float) verts3[k].x); out.push_back((float) verts3[k].y); out.push_back((float) verts3[k].z);
                 out.push_back((float) fn.x); out.push_back((float) fn.y); out.push_back((float) fn.z);
-                out.push_back(MARBLE[0]); out.push_back(MARBLE[1]); out.push_back(MARBLE[2]);
+                out.push_back(maskColor[0]); out.push_back(maskColor[1]); out.push_back(maskColor[2]);
                 out.push_back((float) lightPos.x); out.push_back((float) lightPos.y); out.push_back((float) lightPos.z);
             }
         }
@@ -211,6 +229,33 @@ struct Params {
     float maxHopDays = 60.0f;
     float reachMult  = 1.6f;
     bool invertMode  = false;   // black bg, white roots, overlaps XOR-toggle
+
+    // --- lighting & material -------------------------------------------
+    float rootColor[3]  = {0.55f, 0.40f, 0.26f};
+    float rootAmbient   = 0.18f;
+    float rootMetallic  = 0.18f;
+    float rootRoughness = 0.42f;
+    float lightAzimuth   = 0.55f;   // radians -- key light direction
+    float lightElevation = 0.95f;
+    float maskColor[3]   = {0.86f, 0.83f, 0.78f};
+    float faceLightIntensity = 3.2f;
+    float faceLightFalloff   = 0.012f;   // lower = light reaches further
+    float faceLightDist      = 0.6f;     // multiplier on viewCylLen
+    float faceSpecStrength   = 1.2f;
+    float veinColor[3] = {0.55f, 0.53f, 0.50f};
+    float veinScale    = 0.6f;
+    float veinStrength = 0.5f;
+    // fog -- default falloff 0 avoids an axis mismatch: fog.frag's falloff
+    // term decays along native "z", which after our Y-up coordinate remap for
+    // rendering doesn't correspond to height or camera depth anymore, so a
+    // nonzero falloff makes density vary with what's really a horizontal
+    // world axis -- as the camera orbits through the "thicker" side it reads
+    // as the whole scene dimming over time. Uniform density (falloff=0)
+    // sidesteps that; raise it deliberately if you want directional fog.
+    float fogDensity = 0.05f;
+    float fogFalloff = 0.0f;
+    float fogNoiseStrength = 0.6f;
+    float fogColor[3] = {0.05f, 0.035f, 0.03f};
 };
 
 static const std::vector<std::pair<std::string, std::string>> g_species = {
@@ -373,6 +418,35 @@ int main(int argc, char** argv) {
         ImGui::Checkbox("Invert mode (black/white, overlaps XOR)", &pending.invertMode);
         ImGui::TextDisabled("Applies live -- works during growth too.");
 
+        if (ImGui::CollapsingHeader("Lighting & Material")) {
+            ImGui::Text("Root material (PBR)");
+            ImGui::ColorEdit3("Root color", pending.rootColor);
+            ImGui::SliderFloat("Root ambient", &pending.rootAmbient, 0.0f, 0.6f, "%.2f");
+            ImGui::SliderFloat("Root metallic", &pending.rootMetallic, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Root roughness", &pending.rootRoughness, 0.02f, 1.0f, "%.2f");
+            ImGui::Spacing();
+            ImGui::Text("Key light");
+            ImGui::SliderFloat("Light azimuth", &pending.lightAzimuth, -3.14f, 3.14f, "%.2f");
+            ImGui::SliderFloat("Light elevation", &pending.lightElevation, -1.4f, 1.4f, "%.2f");
+            ImGui::Spacing();
+            ImGui::Text("Mask material (marble)");
+            ImGui::ColorEdit3("Mask base color", pending.maskColor);
+            ImGui::ColorEdit3("Mask vein color", pending.veinColor);
+            ImGui::SliderFloat("Vein scale", &pending.veinScale, 0.05f, 3.0f, "%.2f");
+            ImGui::SliderFloat("Vein strength", &pending.veinStrength, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Face light intensity", &pending.faceLightIntensity, 0.0f, 8.0f, "%.2f");
+            ImGui::SliderFloat("Face light falloff", &pending.faceLightFalloff, 0.001f, 0.1f, "%.3f");
+            ImGui::SliderFloat("Face light distance", &pending.faceLightDist, 0.1f, 2.0f, "%.2f");
+            ImGui::SliderFloat("Face specular", &pending.faceSpecStrength, 0.0f, 4.0f, "%.2f");
+            ImGui::Spacing();
+            ImGui::Text("Fog");
+            ImGui::SliderFloat("Fog density", &pending.fogDensity, 0.0f, 0.3f, "%.3f");
+            ImGui::SliderFloat("Fog falloff", &pending.fogFalloff, 0.0f, 0.1f, "%.3f");
+            ImGui::SliderFloat("Fog noise", &pending.fogNoiseStrength, 0.0f, 1.0f, "%.2f");
+            ImGui::ColorEdit3("Fog color", pending.fogColor);
+            ImGui::TextDisabled("All of the above apply live -- no regrow needed.");
+        }
+
         ImGui::Spacing();
         if (growing) {
             ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1), "Growing...");
@@ -392,21 +466,50 @@ int main(int argc, char** argv) {
         glfwPollEvents();
     };
 
-    // live edits (thickness, shading mode) apply without a full regrow.
+    float lightDir[3] = {0.5f, 0.8f, 0.35f};
+
+    // live edits (material, lighting, fog, shading mode) apply without a full
+    // regrow -- everything here is either a plain RootRenderer member or fed
+    // straight into the face shader each frame.
     auto applyLiveRenderParams = [&]() {
         renderer.radiusScale = pending.radiusScale;
         renderer.radiusMin = pending.radiusMin;
         renderer.radiusMax = pending.radiusMax;
+        renderer.mat.baseColor[0] = pending.rootColor[0];
+        renderer.mat.baseColor[1] = pending.rootColor[1];
+        renderer.mat.baseColor[2] = pending.rootColor[2];
+        renderer.mat.ambient = pending.rootAmbient;
+        renderer.pbr.metallic = pending.rootMetallic;
+        renderer.pbr.roughness = pending.rootRoughness;
+
+        float cosEl = cosf(pending.lightElevation), sinEl = sinf(pending.lightElevation);
+        lightDir[0] = cosEl * sinf(pending.lightAzimuth);
+        lightDir[1] = sinEl;
+        lightDir[2] = cosEl * cosf(pending.lightAzimuth);
+
+        renderer.fog.falloff = pending.fogFalloff;
+        renderer.fog.noiseStrength = pending.fogNoiseStrength;
+        renderer.fog.color[0] = pending.fogColor[0];
+        renderer.fog.color[1] = pending.fogColor[1];
+        renderer.fog.color[2] = pending.fogColor[2];
+
+        faceGL.lightIntensity = pending.faceLightIntensity;
+        faceGL.lightFalloff = pending.faceLightFalloff;
+        faceGL.specStrength = pending.faceSpecStrength;
+        faceGL.veinColor[0] = pending.veinColor[0];
+        faceGL.veinColor[1] = pending.veinColor[1];
+        faceGL.veinColor[2] = pending.veinColor[2];
+        faceGL.veinScale = pending.veinScale;
+        faceGL.veinStrength = pending.veinStrength;
+
         if (pending.invertMode) {
             renderer.shaderMode = RootRenderer::ShaderMode::Invert;
             renderer.fog.density = 0.0f;   // fog would muddy the pure black/white toggle
         } else {
             renderer.shaderMode = RootRenderer::ShaderMode::PBR;
-            renderer.fog.density = 0.010f;
+            renderer.fog.density = pending.fogDensity;
         }
     };
-
-    float lightDir[3] = {0.5f, 0.8f, 0.35f};
 
     while (!glfwWindowShouldClose(window)) {
         if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) glfwSetWindowShouldClose(window, GLFW_TRUE);
@@ -500,7 +603,7 @@ int main(int argc, char** argv) {
                     for (double r : radii) radAll.push_back(r);
                     renderer.uploadSegments(nodesYup, segsAll, radAll);
 
-                    auto faceData = buildFaceVertexData(revealed, fv, ftris, 0.85f, std::max(3.0f, params.viewCylLen * 0.6f));
+                    auto faceData = buildFaceVertexData(revealed, fv, ftris, 0.85f, std::max(3.0f, params.viewCylLen * pending.faceLightDist), pending.maskColor);
                     faceGL.upload(faceData);
 
                     std::vector<Vector3d> fitNodes;
@@ -555,7 +658,7 @@ int main(int argc, char** argv) {
             base_idx += (int) fh.nodes.size();
         }
         renderer.uploadSegments(nodesYup, segsAll, radAll);
-        auto faceData = buildFaceVertexData(revealed, fv, ftris, 0.85f, std::max(3.0f, params.viewCylLen * 0.6f));
+        auto faceData = buildFaceVertexData(revealed, fv, ftris, 0.85f, std::max(3.0f, params.viewCylLen * pending.faceLightDist), pending.maskColor);
         faceGL.upload(faceData);
 
         Vector3d lo = nodesYup.empty() ? Vector3d(0, 0, 0) : nodesYup[0], hi = lo;
