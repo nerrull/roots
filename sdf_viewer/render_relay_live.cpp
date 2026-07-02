@@ -12,6 +12,7 @@
 #include "MaskCavities.h"
 #include "RootAttractors.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -21,6 +22,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace CPlantBox;
@@ -195,6 +197,7 @@ int main(int argc, char** argv) {
     double startFrac = (argc > 14) ? std::atof(argv[14]) : 0.15;
     double dwellWeight = (argc > 15) ? std::atof(argv[15]) : 0.92;
     double viewCylLen = (argc > 16) ? std::atof(argv[16]) : 8.0;   // 0 disables
+    int frameDelayMs = (argc > 17) ? std::atoi(argv[17]) : 90;     // paces playback beyond vsync
 
     double maskR = 2.6;
     double tipRadius = 0.22 * R0;
@@ -213,7 +216,13 @@ int main(int argc, char** argv) {
     glewExperimental = GL_TRUE;
     if (glewInit() != GLEW_OK) { std::cerr << "glewInit failed\n"; return 1; }
 
-    RootRenderer renderer(W, H);
+    // On Retina/HiDPI displays the actual framebuffer is larger (e.g. 2x) than
+    // the window size passed to glfwCreateWindow (which is in logical/point
+    // units). Render at the real pixel size, or the output only fills a
+    // corner of the window (the rest of the framebuffer never gets drawn to).
+    int fbW, fbH;
+    glfwGetFramebufferSize(window, &fbW, &fbH);
+    RootRenderer renderer(fbW, fbH);
     renderer.mat.baseColor[0] = 0.55f; renderer.mat.baseColor[1] = 0.40f; renderer.mat.baseColor[2] = 0.26f;
     renderer.mat.ambient = 0.18f;
     renderer.mat.diffuse = 0.75f;
@@ -250,7 +259,7 @@ int main(int argc, char** argv) {
 
     auto present = [&]() {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glViewport(0, 0, W, H);
+        glViewport(0, 0, fbW, fbH);
         glUseProgram(blitProg);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, renderer.colorTex());
@@ -380,6 +389,7 @@ int main(int argc, char** argv) {
             renderer.render(azimuth, 0.12f, radius, target3, 0.5f, lightDir,
                             [&](const float* vp, const float* eye) { faceGL.draw(vp, eye, lightDir); });
             present();
+            if (frameDelayMs > 0) std::this_thread::sleep_for(std::chrono::milliseconds(frameDelayMs));
 
             if (frame % 20 == 0) std::cout << "  frame " << frame << " day " << day
                                            << " segs(total) " << segsAll.size() << "\n";
