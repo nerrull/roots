@@ -193,7 +193,8 @@ struct Params {
     float weight        = 0.55f;   // main-root travel attraction (lower = more organic wander)
     float lateralWeight = 0.80f;   // offshoot/lateral travel attraction -- usually kept higher
                                     // so laterals still cling for wrapping density
-    float dwellWeight= 0.92f;
+    float dwellWeight        = 0.92f;   // main-root dwell attraction
+    float dwellLateralWeight = 0.92f;   // offshoot/lateral dwell attraction
     float sigma      = 0.35f;   // angular jitter -- higher = less railroaded/straight paths
     float viewCylLen = 8.0f;
     float radiusScale= 1.4f;
@@ -321,7 +322,8 @@ int main(int argc, char** argv) {
         ImGui::SliderFloat("Dwell days", &pending.dwellDays, 2.0f, 40.0f, "%.1f");
         ImGui::SliderFloat("Attraction: main root", &pending.weight, 0.2f, 0.9f, "%.2f");
         ImGui::SliderFloat("Attraction: offshoots", &pending.lateralWeight, 0.2f, 0.95f, "%.2f");
-        ImGui::SliderFloat("Attraction (dwell, both)", &pending.dwellWeight, 0.5f, 0.99f, "%.2f");
+        ImGui::SliderFloat("Attraction (dwell): main root", &pending.dwellWeight, 0.5f, 0.99f, "%.2f");
+        ImGui::SliderFloat("Attraction (dwell): offshoots", &pending.dwellLateralWeight, 0.5f, 0.99f, "%.2f");
         ImGui::SliderFloat("Angular jitter", &pending.sigma, 0.1f, 0.7f, "%.2f");
         ImGui::SliderFloat("View-clear cylinder", &pending.viewCylLen, 0.0f, 16.0f, "%.1f cm");
         ImGui::Separator();
@@ -430,7 +432,7 @@ int main(int argc, char** argv) {
                             reached = true; reachedDay = day;
                             localRevealed.push_back(localTargetNode);
                             revealed.push_back(masks[hop]);
-                            rebuildTropism(params.dwellWeight, params.dwellWeight);
+                            rebuildTropism(params.dwellWeight, params.dwellLateralWeight);
                         }
                     }
                     if (reached && day - reachedDay > params.dwellDays) break;
