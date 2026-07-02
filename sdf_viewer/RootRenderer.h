@@ -8,7 +8,7 @@ namespace CPlantBox { class Vector3d; class Vector2i; }
 
 class RootRenderer {
 public:
-    enum class ShaderMode { Phong = 0, PBR = 1 };
+    enum class ShaderMode { Phong = 0, PBR = 1, Invert = 2 };
 
     struct Material {
         float baseColor[3] = {0.60f, 0.55f, 0.45f};

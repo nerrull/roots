@@ -113,16 +113,18 @@ struct FaceGL {
     }
 
     void upload(const std::vector<float>& data) {
-        vertCount = (int) (data.size() / 9);
+        vertCount = (int) (data.size() / 12);   // pos3, normal3, color3, lightPos3
         glBindVertexArray(vao);
         glBindBuffer(GL_ARRAY_BUFFER, vbo);
         glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_DYNAMIC_DRAW);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*) 0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 12 * sizeof(float), (void*) 0);
         glEnableVertexAttribArray(0);
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*) (3 * sizeof(float)));
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 12 * sizeof(float), (void*) (3 * sizeof(float)));
         glEnableVertexAttribArray(1);
-        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*) (6 * sizeof(float)));
+        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 12 * sizeof(float), (void*) (6 * sizeof(float)));
         glEnableVertexAttribArray(2);
+        glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 12 * sizeof(float), (void*) (9 * sizeof(float)));
+        glEnableVertexAttribArray(3);
         glBindVertexArray(0);
     }
 
@@ -144,12 +146,17 @@ static Vector3d toYup(const Vector3d& v) { return Vector3d(v.x, -v.z, v.y); }
 
 static std::vector<float> buildFaceVertexData(const std::vector<MaskNode>& revealed,
                                               const std::vector<float>& fv, const std::vector<int>& ftris,
-                                              float faceScale) {
+                                              float faceScale, float lightDist = 5.0f) {
     std::vector<float> out;
     for (const auto& m0 : revealed) {
         Vector3d n = toYup(m0.normal), t = toYup(m0.tangent), b = toYup(m0.bitangent);
         Vector3d p = toYup(m0.pos).minus(n.times(m0.r_depth * 0.5));
         float scale = faceScale * (float) std::min(m0.r_width, m0.r_height);
+        // a small point light floating in front of the face, in the same
+        // direction the view-clear cylinder keeps open -- so it lights the
+        // face directly instead of relying on whatever the scene-wide
+        // directional light happens to be doing from the current orbit angle.
+        Vector3d lightPos = p.plus(n.times((double) lightDist));
         for (size_t i = 0; i < ftris.size(); i += 3) {
             Vector3d verts3[3];
             for (int k = 0; k < 3; k++) {
@@ -164,6 +171,7 @@ static std::vector<float> buildFaceVertexData(const std::vector<MaskNode>& revea
                 out.push_back((float) verts3[k].x); out.push_back((float) verts3[k].y); out.push_back((float) verts3[k].z);
                 out.push_back((float) fn.x); out.push_back((float) fn.y); out.push_back((float) fn.z);
                 out.push_back(MARBLE[0]); out.push_back(MARBLE[1]); out.push_back(MARBLE[2]);
+                out.push_back((float) lightPos.x); out.push_back((float) lightPos.y); out.push_back((float) lightPos.z);
             }
         }
     }
@@ -202,6 +210,7 @@ struct Params {
     float radiusMax  = 0.35f;
     float maxHopDays = 60.0f;
     float reachMult  = 1.6f;
+    bool invertMode  = false;   // black bg, white roots, overlaps XOR-toggle
 };
 
 static const std::vector<std::pair<std::string, std::string>> g_species = {
@@ -221,13 +230,24 @@ int main(int argc, char** argv) {
           "modelparameter/structural/rootsystem/";
     int W = (argc > 2) ? std::atoi(argv[2]) : 1100;
     int H = (argc > 3) ? std::atoi(argv[3]) : 1000;
+    bool fullscreen = (argc > 4) ? (std::atoi(argv[4]) != 0) : true;
 
     if (!glfwInit()) { std::cerr << "glfwInit failed\n"; return 1; }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
-    GLFWwindow* window = glfwCreateWindow(W, H, "jardins_racine -- mask relay", nullptr, nullptr);
+
+    GLFWmonitor* monitor = fullscreen ? glfwGetPrimaryMonitor() : nullptr;
+    if (monitor) {
+        const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+        W = mode->width; H = mode->height;
+        glfwWindowHint(GLFW_RED_BITS, mode->redBits);
+        glfwWindowHint(GLFW_GREEN_BITS, mode->greenBits);
+        glfwWindowHint(GLFW_BLUE_BITS, mode->blueBits);
+        glfwWindowHint(GLFW_REFRESH_RATE, mode->refreshRate);
+    }
+    GLFWwindow* window = glfwCreateWindow(W, H, "jardins_racine -- mask relay", monitor, nullptr);
     if (!window) { std::cerr << "glfwCreateWindow failed\n"; return 1; }
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
@@ -246,7 +266,21 @@ int main(int argc, char** argv) {
     renderer.mat.baseColor[0] = 0.55f; renderer.mat.baseColor[1] = 0.40f; renderer.mat.baseColor[2] = 0.26f;
     renderer.mat.ambient = 0.18f;
     renderer.mat.diffuse = 0.75f;
-    renderer.fog.density = 0.0f;
+
+    // Cheap render-quality wins, already built into RootRenderer, just unused
+    // until now: PBR shading (Cook-Torrance/GGX) gives roots real specular
+    // response as the camera orbits instead of a flat matte Phong look, and a
+    // touch of metallic reads as wet/waxy root fiber. Subtle fog with drifting
+    // noise adds depth cueing so the mass reads as occupying real space
+    // instead of a flat silhouette. No wisps -- see the per-face point light
+    // added to face.vert/.frag instead, below.
+    renderer.shaderMode = RootRenderer::ShaderMode::PBR;
+    renderer.pbr.metallic = 0.18f;
+    renderer.pbr.roughness = 0.42f;
+    renderer.fog.density = 0.010f;
+    renderer.fog.falloff = 0.045f;
+    renderer.fog.noiseStrength = 0.6f;
+    renderer.fog.color[0] = 0.05f; renderer.fog.color[1] = 0.035f; renderer.fog.color[2] = 0.03f;
     renderer.wispCount = 0;
 
     FaceGL faceGL;
@@ -335,6 +369,10 @@ int main(int argc, char** argv) {
         ImGui::SliderFloat("Reach threshold", &pending.reachMult, 1.0f, 3.0f, "%.2f");
         ImGui::EndDisabled();
 
+        ImGui::Separator();
+        ImGui::Checkbox("Invert mode (black/white, overlaps XOR)", &pending.invertMode);
+        ImGui::TextDisabled("Applies live -- works during growth too.");
+
         ImGui::Spacing();
         if (growing) {
             ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1), "Growing...");
@@ -354,16 +392,24 @@ int main(int argc, char** argv) {
         glfwPollEvents();
     };
 
-    // live root-thickness edits should apply without a full regrow.
+    // live edits (thickness, shading mode) apply without a full regrow.
     auto applyLiveRenderParams = [&]() {
         renderer.radiusScale = pending.radiusScale;
         renderer.radiusMin = pending.radiusMin;
         renderer.radiusMax = pending.radiusMax;
+        if (pending.invertMode) {
+            renderer.shaderMode = RootRenderer::ShaderMode::Invert;
+            renderer.fog.density = 0.0f;   // fog would muddy the pure black/white toggle
+        } else {
+            renderer.shaderMode = RootRenderer::ShaderMode::PBR;
+            renderer.fog.density = 0.010f;
+        }
     };
 
     float lightDir[3] = {0.5f, 0.8f, 0.35f};
 
     while (!glfwWindowShouldClose(window)) {
+        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) glfwSetWindowShouldClose(window, GLFW_TRUE);
         applyLiveRenderParams();
 
         if (growing) {
@@ -454,7 +500,7 @@ int main(int argc, char** argv) {
                     for (double r : radii) radAll.push_back(r);
                     renderer.uploadSegments(nodesYup, segsAll, radAll);
 
-                    auto faceData = buildFaceVertexData(revealed, fv, ftris, 0.85f);
+                    auto faceData = buildFaceVertexData(revealed, fv, ftris, 0.85f, std::max(3.0f, params.viewCylLen * 0.6f));
                     faceGL.upload(faceData);
 
                     std::vector<Vector3d> fitNodes;
@@ -471,6 +517,7 @@ int main(int argc, char** argv) {
                     float extent = (float) std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
                     float radius = extent * 0.9f + 10.0f;
                     float azimuth = 0.8f + 2.0f * (float) M_PI * 0.5f * (frame / 260.0f);
+                    renderer.fog.driftTime += 0.02f;
 
                     renderer.render(azimuth, 0.12f, radius, target3, 0.5f, lightDir,
                                     [&](const float* vp, const float* eye) { faceGL.draw(vp, eye, lightDir); });
@@ -508,7 +555,7 @@ int main(int argc, char** argv) {
             base_idx += (int) fh.nodes.size();
         }
         renderer.uploadSegments(nodesYup, segsAll, radAll);
-        auto faceData = buildFaceVertexData(revealed, fv, ftris, 0.85f);
+        auto faceData = buildFaceVertexData(revealed, fv, ftris, 0.85f, std::max(3.0f, params.viewCylLen * 0.6f));
         faceGL.upload(faceData);
 
         Vector3d lo = nodesYup.empty() ? Vector3d(0, 0, 0) : nodesYup[0], hi = lo;

@@ -352,12 +352,18 @@ void RootRenderer::render(float azimuth, float elevation, float radius,
     // -----------------------------------------------------------------------
     // Pass 1: geometry — shading, no fog
     // -----------------------------------------------------------------------
+    bool invert = (shaderMode == ShaderMode::Invert);
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
     glViewport(0, 0, m_w, m_h);
-    glClearColor(0.12f, 0.08f, 0.05f, 1.f);
+    glClearColor(invert ? 0.f : 0.12f, invert ? 0.f : 0.08f, invert ? 0.f : 0.05f, 1.f);
     glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LESS);
+    // Invert mode relaxes the depth test to GL_ALWAYS (depth is still written,
+    // just doesn't gate which fragments draw) so every capsule covering a
+    // pixel gets a chance to XOR it, not just the nearest one -- that's what
+    // produces the "each overlap flips the color" effect.
+    glDepthFunc(invert ? GL_ALWAYS : GL_LESS);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    if (invert) { glEnable(GL_COLOR_LOGIC_OP); glLogicOp(GL_XOR); }
 
     glUseProgram(m_prog);
 
@@ -396,6 +402,12 @@ void RootRenderer::render(float azimuth, float elevation, float radius,
     glBindVertexArray(m_vao);
     glDrawArraysInstanced(GL_TRIANGLES, 0, 6, m_segCount);
     glUseProgram(0);
+
+    // Logic-op XOR is specific to the root capsule pass -- turn it off before
+    // any extra geometry (face meshes) draws normally on top, and restore a
+    // real depth test so that geometry composites sensibly against whatever
+    // depth values the invert pass happened to leave behind.
+    if (invert) { glDisable(GL_COLOR_LOGIC_OP); glDepthFunc(GL_LESS); }
 
     // m_fbo (color+depth) is still bound, GL_DEPTH_TEST still on, so extra
     // triangle geometry drawn here (e.g. face meshes) depth-composites

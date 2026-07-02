@@ -122,7 +122,14 @@ void main() {
 
     vec3 color;
 
-    if (u_shaderMode == 0) {
+    if (u_shaderMode == 2) {
+        // --- Invert/XOR silhouette: solid white on hit. Combined with
+        // glLogicOp(GL_XOR) and depth testing relaxed to GL_ALWAYS (set by
+        // the caller), every capsule whose analytic surface covers a pixel
+        // toggles it, instead of only the nearest one winning. ---
+        fragColor = vec4(1.0, 1.0, 1.0, 1.0);
+        return;
+    } else if (u_shaderMode == 0) {
         // --- Phong ---
         float diff = max(dot(n, u_lightDir), 0.0);
         vec3  h    = normalize(u_lightDir + V);
