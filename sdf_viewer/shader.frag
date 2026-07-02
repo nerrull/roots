@@ -184,12 +184,20 @@ void main() {
         color = albedo * u_ambient;
         color += pbrBRDF(n, V, u_lightDir, albedo, u_metallic, u_roughness);
 
+        // Cheap Blinn-Phong approximation for wisp/accent lights instead of
+        // full Cook-Torrance -- with up to MAX_WISPS simultaneous point
+        // lights now feeding in from every revealed face, a full pbrBRDF()
+        // per wisp per pixel (several pow/sqrt each) was the actual cause of
+        // a severe framerate regression once mask count grew past a handful.
         for (int wi = 0; wi < u_wispCount; wi++) {
             vec3  lv    = u_wispPos[wi] - p;
             float dist2 = dot(lv, lv);
             vec3  ldir  = lv * inversesqrt(dist2);
             float att   = u_wispIntensity[wi] / (1.0 + dist2 * 0.008);
-            color += att * u_wispColor[wi] * pbrBRDF(n, V, ldir, albedo, u_metallic, u_roughness);
+            float ndotl = max(dot(n, ldir), 0.0);
+            vec3  wh    = normalize(ldir + V);
+            float wspec = pow(max(dot(n, wh), 0.0), 32.0) * (0.2 + 0.8 * u_metallic);
+            color += att * u_wispColor[wi] * (albedo * ndotl * (1.0 - u_metallic) + vec3(wspec));
         }
     }
 

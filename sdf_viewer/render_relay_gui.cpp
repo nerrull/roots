@@ -563,10 +563,18 @@ int main(int argc, char** argv) {
         // (as RootRenderer "wisps"), using the exact same position each face
         // shader itself lights from -- so roots near a mask actually pick up
         // some of that light instead of it only affecting the face mesh.
-        int wc = std::min((int) revealed.size(), RootRenderer::MAX_WISPS);
+        // Capped well below MAX_WISPS -- even with the cheap Blinn-Phong wisp
+        // shading (see shader.frag), N simultaneous point lights means N
+        // extra light evaluations per hit pixel across potentially tens of
+        // thousands of capsule fragments. 6 is plenty to read as "nearby
+        // faces light nearby roots" without the per-pixel cost scaling with
+        // total mask count.
+        int wc = std::min({(int) revealed.size(), 6, RootRenderer::MAX_WISPS});
         renderer.wispCount = wc;
+        int wStart = (int) revealed.size() - wc;   // most-recently-revealed masks --
+                                                    // nearest the active growth frontier
         for (int i = 0; i < wc; i++) {
-            const auto& m = revealed[i];
+            const auto& m = revealed[wStart + i];
             Vector3d n = toYup(m.normal);
             Vector3d p = toYup(m.pos).minus(n.times(m.r_depth * 0.5));
             Vector3d lp = p.plus(n.times((double) std::max(3.0f, params.viewCylLen * pending.faceLightDist)));
