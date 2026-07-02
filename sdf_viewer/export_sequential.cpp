@@ -1,10 +1,13 @@
 // Sequential mask reveal: instead of placing every mask cavity/attractor up
 // front, grow toward ONE target mask at a time. Once the root system's growth
 // front reaches it (a node lands within `reachMult` * mask-radius of its
-// centre), that mask's cavity is added to the confining geometry (so future
-// growth routes around it) and the *next* mask in the phyllotaxis sequence
-// becomes the attraction target. Repeats until every mask has been revealed
-// (plus a short tail so the last mask gets properly wrapped).
+// centre), that mask's cavity is folded into the confining geometry right away
+// (so it can't be grown through) but attraction *keeps targeting it* for
+// `dwellDays` more -- roots already in the area keep converging and wrapping
+// around the now-solid cavity instead of instantly moving on. Only after the
+// dwell period does attraction retarget to the next mask in the phyllotaxis
+// sequence. Repeats until every mask has been revealed (plus a short tail so
+// the last mask gets properly wrapped too).
 //
 // Output format (frame-per-simulate-step, so it can be rendered as a video
 // where masks visibly pop in as they're reached):
@@ -43,6 +46,8 @@ int main(int argc, char** argv) {
     double dt = (argc > 6) ? std::atof(argv[6]) : 0.75;    // simulate step (days) -> also frame rate
     double reachMult = (argc > 7) ? std::atof(argv[7]) : 1.3;
     double tailDays = (argc > 8) ? std::atof(argv[8]) : 6.0;   // extra growth after the last reveal
+    double dwellDays = (argc > 9) ? std::atof(argv[9]) : 5.0;  // keep attracting after first contact
+    int rimN = (argc > 10) ? std::atoi(argv[10]) : 6;          // rim attractor points (fuller wrap)
 
     double R0 = 9.0, H = 34.0, maskR = 2.6;
     double tipRadius = 0.22 * R0;   // frustum: open a bit at the seed instead of a bare point
@@ -61,7 +66,7 @@ int main(int argc, char** argv) {
         auto geom = buildCavityGeometry(revealed, R0, H, true, 2.0, tipRadius);
         rs->setGeometry(geom);
         if (target < (int) masks.size()) {
-            auto attrs = rimAttractors({masks[target]}, 4, 1.0, 3.0, 1.15);
+            auto attrs = rimAttractors({masks[target]}, rimN, 1.0, 3.0, 1.15);
             rs->setTropism(combinedAttraction(rs, base, attrs, 6.0, 0.25, weight, geom), -1);
         } else {
             rs->setTropism(base, -1);   // all masks revealed -- just fall
@@ -71,21 +76,30 @@ int main(int argc, char** argv) {
 
     std::ofstream out(outPath);
     double day = 0.0, tailStart = -1.0;
+    bool dwelling = false;
+    double reachedDay = 0.0;
     int frame = 0;
     while (day < maxDays) {
         rs->simulate(dt, false);
         day += dt;
 
-        if (target < (int) masks.size()) {
+        if (target < (int) masks.size() && !dwelling) {
             double d = minDistToMask(rs->getNodes(), masks[target]);
             double thr = reachMult * std::max({masks[target].r_width, masks[target].r_height});
             if (d < thr) {
-                std::cout << "day " << day << ": reached mask " << target << " (dist=" << d << ")\n";
-                revealed.push_back(masks[target]);
-                target++;
-                if (target >= (int) masks.size()) tailStart = day;
-                applyState();
+                std::cout << "day " << day << ": reached mask " << target << " (dist=" << d
+                          << "), dwelling " << dwellDays << " days\n";
+                revealed.push_back(masks[target]);   // solid now -- can't be grown through
+                dwelling = true;
+                reachedDay = day;
+                applyState();                        // geometry updated; attraction stays on `target`
             }
+        } else if (dwelling && day - reachedDay > dwellDays) {
+            std::cout << "day " << day << ": done wrapping mask " << target << ", advancing\n";
+            target++;
+            dwelling = false;
+            if (target >= (int) masks.size()) tailStart = day;
+            applyState();                            // attraction retargets to the next mask
         }
         if (tailStart > 0 && day - tailStart > tailDays) break;
 
