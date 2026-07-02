@@ -43,6 +43,26 @@ private:
     double r0_, r1_, r2_;
 };
 
+// --- finite cylinder (a "keep-clear" tube in front of a mask, so roots can
+// ball up around/behind it but not obscure the face from the front) --------
+class SDF_Cylinder : public SignedDistanceFunction {
+public:
+    SDF_Cylinder(const Vector3d& center, const Vector3d& axis, double radius, double halfLength)
+        : c_(center), axis_(axis.normalized()), r_(radius), hl_(halfLength) {}
+
+    double getDist(const Vector3d& v) const override {
+        Vector3d w = v.minus(c_);
+        double axial = w.times(axis_);
+        Vector3d radialVec = w.minus(axis_.times(axial));
+        double radial = radialVec.length();
+        return std::max(radial - r_, std::fabs(axial) - hl_);   // < 0 inside the cylinder
+    }
+    std::string toString() const override { return "SDF_Cylinder"; }
+private:
+    Vector3d c_, axis_;
+    double r_, hl_;
+};
+
 // --- downward cone/frustum container: the seed grows from z=0, widening to
 // base radius R0 at z=-h (deepest). tipRadius (default 0) lets the seed start
 // somewhere already-open on the cone rather than pinched to a literal point --
@@ -109,9 +129,15 @@ inline std::vector<MaskNode> conePhyllotaxis(int n, double baseRadius, double he
 // `nodes` may be empty (e.g. before the first mask is revealed in sequential
 // growth) -- handled explicitly since SDF_Union/SDF_Difference index sdfs[0]
 // unconditionally and would crash on an empty cavity list.
+//
+// viewCylLen > 0 adds a "keep-clear" cylinder projecting outward from each
+// mask along its normal -- roots can still ball up around the sides/back of
+// the cavity, but stay out of the tube directly in front of it, so the face
+// remains visible instead of getting buried under a wrapped knot.
 inline std::shared_ptr<SignedDistanceFunction>
 buildCavityGeometry(const std::vector<MaskNode>& nodes, double baseRadius, double height,
-                    bool coneContainer = true, double coneMargin = 2.0, double tipRadius = 0.0) {
+                    bool coneContainer = true, double coneMargin = 2.0, double tipRadius = 0.0,
+                    double viewCylLen = 0.0, double viewCylRadiusMult = 0.9) {
     std::shared_ptr<SignedDistanceFunction> cone = coneContainer
         ? std::make_shared<SDF_Cone>(baseRadius + coneMargin, height + coneMargin, tipRadius)
         : nullptr;
@@ -121,6 +147,11 @@ buildCavityGeometry(const std::vector<MaskNode>& nodes, double baseRadius, doubl
     for (const auto& m : nodes) {
         cavities.push_back(std::make_shared<SDF_Ellipsoid>(
             m.pos, m.normal, m.tangent, m.bitangent, m.r_depth, m.r_width, m.r_height));
+        if (viewCylLen > 0) {
+            double r = viewCylRadiusMult * std::max(m.r_width, m.r_height);
+            Vector3d cylCenter = m.pos.plus(m.normal.times(viewCylLen * 0.5));
+            cavities.push_back(std::make_shared<SDF_Cylinder>(cylCenter, m.normal, r, viewCylLen * 0.5));
+        }
     }
     auto obstacles = std::make_shared<CPlantBox::SDF_Union>(cavities);
     if (cone)
