@@ -320,10 +320,10 @@ int main(int argc, char** argv) {
         ImGui::SliderFloat("Tip start frac", &pending.startFrac, 0.05f, 0.3f);
         ImGui::Separator();
         ImGui::SliderFloat("Dwell days", &pending.dwellDays, 2.0f, 40.0f, "%.1f");
-        ImGui::SliderFloat("Attraction: main root", &pending.weight, 0.2f, 0.9f, "%.2f");
-        ImGui::SliderFloat("Attraction: offshoots", &pending.lateralWeight, 0.2f, 0.95f, "%.2f");
-        ImGui::SliderFloat("Attraction (dwell): main root", &pending.dwellWeight, 0.5f, 0.99f, "%.2f");
-        ImGui::SliderFloat("Attraction (dwell): offshoots", &pending.dwellLateralWeight, 0.5f, 0.99f, "%.2f");
+        ImGui::SliderFloat("Attraction: main root", &pending.weight, 0.0f, 0.9f, "%.2f");
+        ImGui::SliderFloat("Attraction: offshoots", &pending.lateralWeight, 0.0f, 0.95f, "%.2f");
+        ImGui::SliderFloat("Attraction (dwell): main root", &pending.dwellWeight, 0.0f, 0.99f, "%.2f");
+        ImGui::SliderFloat("Attraction (dwell): offshoots", &pending.dwellLateralWeight, 0.0f, 0.99f, "%.2f");
         ImGui::SliderFloat("Angular jitter", &pending.sigma, 0.1f, 0.7f, "%.2f");
         ImGui::SliderFloat("View-clear cylinder", &pending.viewCylLen, 0.0f, 16.0f, "%.1f cm");
         ImGui::Separator();
