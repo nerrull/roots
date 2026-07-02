@@ -278,7 +278,7 @@ void RootRenderer::uploadSegments(const std::vector<CPlantBox::Vector3d>& nodes,
 
 void RootRenderer::render(float azimuth, float elevation, float radius,
                            const float* target3, float fov,
-                           const float* lightDir3) {
+                           const float* lightDir3, const MidHook& midGeometryHook) {
     float cosEl = cosf(elevation), sinEl = sinf(elevation);
     float cosAz = cosf(azimuth),   sinAz = sinf(azimuth);
 
@@ -391,9 +391,15 @@ void RootRenderer::render(float azimuth, float elevation, float radius,
 
     glBindVertexArray(m_vao);
     glDrawArraysInstanced(GL_TRIANGLES, 0, 6, m_segCount);
+    glUseProgram(0);
+
+    // m_fbo (color+depth) is still bound, GL_DEPTH_TEST still on, so extra
+    // triangle geometry drawn here (e.g. face meshes) depth-composites
+    // correctly against the sphere-traced root capsules and is included when
+    // the fog pass below reads m_colorTex/m_depthTex.
+    if (midGeometryHook) { float eye[3] = {ex, ey, ez}; midGeometryHook(vp, eye); }
 
     glDisable(GL_DEPTH_TEST);
-    glUseProgram(0);
 
     // -----------------------------------------------------------------------
     // Pass 2: fog — fullscreen triangle reads colour + depth, writes to fogFbo

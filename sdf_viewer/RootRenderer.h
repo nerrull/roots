@@ -1,6 +1,7 @@
 #pragma once
 
 #include <GL/glew.h>
+#include <functional>
 #include <vector>
 
 namespace CPlantBox { class Vector3d; class Vector2i; }
@@ -59,8 +60,16 @@ public:
 
     void resize(int w, int h);
 
+    // midGeometryHook runs after the root capsules are sphere-traced (with
+    // their real depth already in the shared depth buffer) but before the fog
+    // post-process pass -- so a caller can rasterize extra triangle geometry
+    // (e.g. the face meshes) into the same FBO, correctly depth-composited
+    // against the roots and included in the fog pass that follows. Called with
+    // the 4x4 view-projection matrix (16 floats, column-major) and eye pos.
+    using MidHook = std::function<void(const float* viewProj, const float* eye3)>;
     void render(float azimuth, float elevation, float radius,
-                const float* target3, float fov, const float* lightDir3);
+                const float* target3, float fov, const float* lightDir3,
+                const MidHook& midGeometryHook = nullptr);
 
     GLuint colorTex() const { return m_fogColorTex; }
     int    width()    const { return m_w; }
