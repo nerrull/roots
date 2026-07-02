@@ -24,9 +24,9 @@ uniform int   u_showGrid;
 uniform float u_gridSpacing;
 
 uniform int   u_wispCount;
-uniform vec3  u_wispPos[4];
-uniform vec3  u_wispColor[4];
-uniform float u_wispIntensity[4];
+uniform vec3  u_wispPos[16];
+uniform vec3  u_wispColor[16];
+uniform float u_wispIntensity[16];
 
 in vec2  v_uv;
 out vec4 fragColor;

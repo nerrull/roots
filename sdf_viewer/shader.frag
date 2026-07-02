@@ -21,13 +21,17 @@ uniform float u_metallic;
 uniform float u_roughness;
 
 uniform int   u_wispCount;
-uniform vec3  u_wispPos[4];
-uniform vec3  u_wispColor[4];
-uniform float u_wispIntensity[4];
+uniform vec3  u_wispPos[16];
+uniform vec3  u_wispColor[16];
+uniform float u_wispIntensity[16];
 
 uniform float u_radiusScale;
 uniform float u_radiusMin;
 uniform float u_radiusMax;
+
+uniform vec3  u_baseColor2;        // second color, blended in by noise
+uniform float u_colorNoiseScale;   // spatial frequency of the mottling
+uniform float u_colorNoiseStrength;
 
 flat in int  v_segIdx;
 in vec2      v_ndc;
@@ -35,6 +39,26 @@ in vec2      v_ndc;
 out vec4 fragColor;
 
 const float PI = 3.14159265359;
+
+// cheap 3-octave value noise for root-surface color mottling -- breaks the
+// flat single-color "3D pipes screensaver" look without needing a texture.
+float _rhash(vec3 p) {
+    p = fract(p * vec3(443.897, 397.297, 491.187));
+    p += dot(p, p.zyx + 19.19);
+    return fract((p.x + p.y) * p.z);
+}
+float _rnoise(vec3 p) {
+    vec3 i = floor(p), f = fract(p);
+    vec3 u = f * f * (3.0 - 2.0 * f);
+    return mix(
+        mix(mix(_rhash(i),             _rhash(i+vec3(1,0,0)), u.x),
+            mix(_rhash(i+vec3(0,1,0)), _rhash(i+vec3(1,1,0)), u.x), u.y),
+        mix(mix(_rhash(i+vec3(0,0,1)), _rhash(i+vec3(1,0,1)), u.x),
+            mix(_rhash(i+vec3(0,1,1)), _rhash(i+vec3(1,1,1)), u.x), u.y), u.z);
+}
+float _rfbm(vec3 p) {
+    return 0.55 * _rnoise(p) + 0.30 * _rnoise(p * 2.11) + 0.15 * _rnoise(p * 4.37);
+}
 
 float capsuleSDF(vec3 p, vec3 a, vec3 b, float r) {
     vec3  ab = b - a;
@@ -129,12 +153,21 @@ void main() {
         // toggles it, instead of only the nearest one winning. ---
         fragColor = vec4(1.0, 1.0, 1.0, 1.0);
         return;
-    } else if (u_shaderMode == 0) {
+    }
+
+    // Mottled albedo: blend base/second color by world-space noise instead of
+    // a single flat color -- the single biggest lever against the uniform
+    // "3D pipes screensaver" look, since it breaks up the material itself
+    // rather than just the lighting on top of it.
+    float cn = _rfbm(p * u_colorNoiseScale);
+    vec3 albedo = mix(u_baseColor, u_baseColor2, smoothstep(0.3, 0.7, cn) * u_colorNoiseStrength);
+
+    if (u_shaderMode == 0) {
         // --- Phong ---
         float diff = max(dot(n, u_lightDir), 0.0);
         vec3  h    = normalize(u_lightDir + V);
         float spec = pow(max(dot(n, h), 0.0), u_shininess);
-        color = u_baseColor * (u_ambient + u_diffuse * diff) + u_specColor * spec;
+        color = albedo * (u_ambient + u_diffuse * diff) + u_specColor * spec;
 
         for (int wi = 0; wi < u_wispCount; wi++) {
             vec3  lv    = u_wispPos[wi] - p;
@@ -144,19 +177,19 @@ void main() {
             float wd    = max(dot(n, ldir), 0.0);
             vec3  wh    = normalize(ldir + V);
             float ws    = pow(max(dot(n, wh), 0.0), u_shininess);
-            color += att * u_wispColor[wi] * (u_baseColor * u_diffuse * wd + u_specColor * ws);
+            color += att * u_wispColor[wi] * (albedo * u_diffuse * wd + u_specColor * ws);
         }
     } else {
         // --- PBR ---
-        color = u_baseColor * u_ambient;
-        color += pbrBRDF(n, V, u_lightDir, u_baseColor, u_metallic, u_roughness);
+        color = albedo * u_ambient;
+        color += pbrBRDF(n, V, u_lightDir, albedo, u_metallic, u_roughness);
 
         for (int wi = 0; wi < u_wispCount; wi++) {
             vec3  lv    = u_wispPos[wi] - p;
             float dist2 = dot(lv, lv);
             vec3  ldir  = lv * inversesqrt(dist2);
             float att   = u_wispIntensity[wi] / (1.0 + dist2 * 0.008);
-            color += att * u_wispColor[wi] * pbrBRDF(n, V, ldir, u_baseColor, u_metallic, u_roughness);
+            color += att * u_wispColor[wi] * pbrBRDF(n, V, ldir, albedo, u_metallic, u_roughness);
         }
     }
 

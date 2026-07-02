@@ -133,6 +133,9 @@ void RootRenderer::buildShader() {
         m_uRes      = glGetUniformLocation(m_prog, "u_res");
         m_uViewProj  = glGetUniformLocation(m_prog, "u_viewProj");
         m_uBaseColor = glGetUniformLocation(m_prog, "u_baseColor");
+        m_uBaseColor2 = glGetUniformLocation(m_prog, "u_baseColor2");
+        m_uColorNoiseScale = glGetUniformLocation(m_prog, "u_colorNoiseScale");
+        m_uColorNoiseStrength = glGetUniformLocation(m_prog, "u_colorNoiseStrength");
         m_uAmbient   = glGetUniformLocation(m_prog, "u_ambient");
         m_uDiffuse   = glGetUniformLocation(m_prog, "u_diffuse");
         m_uSpecColor = glGetUniformLocation(m_prog, "u_specColor");
@@ -381,6 +384,9 @@ void RootRenderer::render(float azimuth, float elevation, float radius,
     glUniform2f(m_uRes,      static_cast<float>(m_w), static_cast<float>(m_h));
     glUniformMatrix4fv(m_uViewProj, 1, GL_FALSE, vp);
     glUniform3fv(m_uBaseColor, 1, mat.baseColor);
+    glUniform3fv(m_uBaseColor2, 1, mat.baseColor2);
+    glUniform1f(m_uColorNoiseScale, mat.colorNoiseScale);
+    glUniform1f(m_uColorNoiseStrength, mat.colorNoiseStrength);
     glUniform1f (m_uAmbient,      mat.ambient);
     glUniform1f (m_uDiffuse,      mat.diffuse);
     glUniform3fv(m_uSpecColor, 1, mat.specColor);

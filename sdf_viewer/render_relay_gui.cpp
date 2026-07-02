@@ -252,10 +252,25 @@ struct Params {
     // world axis -- as the camera orbits through the "thicker" side it reads
     // as the whole scene dimming over time. Uniform density (falloff=0)
     // sidesteps that; raise it deliberately if you want directional fog.
-    float fogDensity = 0.05f;
+    // Density is a per-unit-path attenuation coefficient, and our camera
+    // sits 15-40 units out -- 0.05 was accumulating to near-total haze over
+    // that distance. 0.015 stays visible without drowning everything.
+    float fogDensity = 0.015f;
     float fogFalloff = 0.0f;
     float fogNoiseStrength = 0.6f;
+    float fogNoiseScale = 0.15f;   // was hardcoded at 0.05 (never exposed) -- too
+                                    // low a spatial frequency to read as texture
+                                    // over our scene's scale, looked like nothing.
     float fogColor[3] = {0.05f, 0.035f, 0.03f};
+
+    // root material abstraction -- second color blended in by world-space
+    // noise, breaking up the flat single-tone "pipes" look.
+    float rootColor2[3] = {0.30f, 0.42f, 0.38f};
+    float colorNoiseScale = 0.4f;
+    float colorNoiseStrength = 0.6f;
+
+    // camera: -1 = whole-scene orbit, >=0 = focus on that revealed mask index.
+    int cameraFaceIdx = -1;
 };
 
 static const std::vector<std::pair<std::string, std::string>> g_species = {
@@ -424,6 +439,10 @@ int main(int argc, char** argv) {
             ImGui::SliderFloat("Root ambient", &pending.rootAmbient, 0.0f, 0.6f, "%.2f");
             ImGui::SliderFloat("Root metallic", &pending.rootMetallic, 0.0f, 1.0f, "%.2f");
             ImGui::SliderFloat("Root roughness", &pending.rootRoughness, 0.02f, 1.0f, "%.2f");
+            ImGui::ColorEdit3("Root color (variant)", pending.rootColor2);
+            ImGui::SliderFloat("Root mottling scale", &pending.colorNoiseScale, 0.05f, 2.0f, "%.2f");
+            ImGui::SliderFloat("Root mottling strength", &pending.colorNoiseStrength, 0.0f, 1.0f, "%.2f");
+            ImGui::TextDisabled("Mottling blends the two root colors by noise --\nthe main lever against the flat \"pipes\" look.");
             ImGui::Spacing();
             ImGui::Text("Key light");
             ImGui::SliderFloat("Light azimuth", &pending.lightAzimuth, -3.14f, 3.14f, "%.2f");
@@ -442,9 +461,33 @@ int main(int argc, char** argv) {
             ImGui::Text("Fog");
             ImGui::SliderFloat("Fog density", &pending.fogDensity, 0.0f, 0.3f, "%.3f");
             ImGui::SliderFloat("Fog falloff", &pending.fogFalloff, 0.0f, 0.1f, "%.3f");
-            ImGui::SliderFloat("Fog noise", &pending.fogNoiseStrength, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Fog noise strength", &pending.fogNoiseStrength, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Fog noise scale", &pending.fogNoiseScale, 0.01f, 1.0f, "%.2f");
             ImGui::ColorEdit3("Fog color", pending.fogColor);
             ImGui::TextDisabled("All of the above apply live -- no regrow needed.");
+        }
+
+        if (ImGui::CollapsingHeader("Camera")) {
+            const char* whole = "Whole scene";
+            const char* label = whole;
+            std::string faceLabel;
+            if (pending.cameraFaceIdx >= 0 && pending.cameraFaceIdx < (int) revealed.size()) {
+                faceLabel = "Face " + std::to_string(pending.cameraFaceIdx);
+                label = faceLabel.c_str();
+            }
+            if (ImGui::BeginCombo("Focus", label)) {
+                bool sel = pending.cameraFaceIdx < 0;
+                if (ImGui::Selectable(whole, sel)) pending.cameraFaceIdx = -1;
+                if (sel) ImGui::SetItemDefaultFocus();
+                for (int i = 0; i < (int) revealed.size(); i++) {
+                    std::string item = "Face " + std::to_string(i);
+                    bool s2 = (pending.cameraFaceIdx == i);
+                    if (ImGui::Selectable(item.c_str(), s2)) pending.cameraFaceIdx = i;
+                    if (s2) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::TextDisabled("Applies once growth is finished (idle orbit).");
         }
 
         ImGui::Spacing();
@@ -481,6 +524,11 @@ int main(int argc, char** argv) {
         renderer.mat.ambient = pending.rootAmbient;
         renderer.pbr.metallic = pending.rootMetallic;
         renderer.pbr.roughness = pending.rootRoughness;
+        renderer.mat.baseColor2[0] = pending.rootColor2[0];
+        renderer.mat.baseColor2[1] = pending.rootColor2[1];
+        renderer.mat.baseColor2[2] = pending.rootColor2[2];
+        renderer.mat.colorNoiseScale = pending.colorNoiseScale;
+        renderer.mat.colorNoiseStrength = pending.colorNoiseStrength;
 
         float cosEl = cosf(pending.lightElevation), sinEl = sinf(pending.lightElevation);
         lightDir[0] = cosEl * sinf(pending.lightAzimuth);
@@ -489,6 +537,7 @@ int main(int argc, char** argv) {
 
         renderer.fog.falloff = pending.fogFalloff;
         renderer.fog.noiseStrength = pending.fogNoiseStrength;
+        renderer.fog.noiseScale = pending.fogNoiseScale;
         renderer.fog.color[0] = pending.fogColor[0];
         renderer.fog.color[1] = pending.fogColor[1];
         renderer.fog.color[2] = pending.fogColor[2];
@@ -508,6 +557,27 @@ int main(int argc, char** argv) {
         } else {
             renderer.shaderMode = RootRenderer::ShaderMode::PBR;
             renderer.fog.density = pending.fogDensity;
+        }
+
+        // Feed every revealed face's point light into the root shader too
+        // (as RootRenderer "wisps"), using the exact same position each face
+        // shader itself lights from -- so roots near a mask actually pick up
+        // some of that light instead of it only affecting the face mesh.
+        int wc = std::min((int) revealed.size(), RootRenderer::MAX_WISPS);
+        renderer.wispCount = wc;
+        for (int i = 0; i < wc; i++) {
+            const auto& m = revealed[i];
+            Vector3d n = toYup(m.normal);
+            Vector3d p = toYup(m.pos).minus(n.times(m.r_depth * 0.5));
+            Vector3d lp = p.plus(n.times((double) std::max(3.0f, params.viewCylLen * pending.faceLightDist)));
+            renderer.wisps[i].basePos[0] = (float) lp.x;
+            renderer.wisps[i].basePos[1] = (float) lp.y;
+            renderer.wisps[i].basePos[2] = (float) lp.z;
+            renderer.wisps[i].color[0] = pending.veinColor[0] * 0.4f + 0.6f;
+            renderer.wisps[i].color[1] = pending.veinColor[1] * 0.4f + 0.6f;
+            renderer.wisps[i].color[2] = pending.veinColor[2] * 0.4f + 0.6f;
+            renderer.wisps[i].intensity = pending.faceLightIntensity * 0.5f;
+            renderer.wisps[i].driftRadius = 0.0f;   // static -- these ARE the face lights, not atmosphere
         }
     };
 
@@ -661,14 +731,23 @@ int main(int argc, char** argv) {
         auto faceData = buildFaceVertexData(revealed, fv, ftris, 0.85f, std::max(3.0f, params.viewCylLen * pending.faceLightDist), pending.maskColor);
         faceGL.upload(faceData);
 
-        Vector3d lo = nodesYup.empty() ? Vector3d(0, 0, 0) : nodesYup[0], hi = lo;
-        for (const auto& n : nodesYup) {
-            lo = Vector3d(std::min(lo.x, n.x), std::min(lo.y, n.y), std::min(lo.z, n.z));
-            hi = Vector3d(std::max(hi.x, n.x), std::max(hi.y, n.y), std::max(hi.z, n.z));
+        float target3[3];
+        float radius;
+        if (pending.cameraFaceIdx >= 0 && pending.cameraFaceIdx < (int) revealed.size()) {
+            // focused on one mask: center on it and frame tight.
+            Vector3d fp = toYup(revealed[pending.cameraFaceIdx].pos);
+            target3[0] = (float) fp.x; target3[1] = (float) fp.y; target3[2] = (float) fp.z;
+            radius = std::max(revealed[pending.cameraFaceIdx].r_width, revealed[pending.cameraFaceIdx].r_height) * 3.5f + 4.0f;
+        } else {
+            Vector3d lo = nodesYup.empty() ? Vector3d(0, 0, 0) : nodesYup[0], hi = lo;
+            for (const auto& n : nodesYup) {
+                lo = Vector3d(std::min(lo.x, n.x), std::min(lo.y, n.y), std::min(lo.z, n.z));
+                hi = Vector3d(std::max(hi.x, n.x), std::max(hi.y, n.y), std::max(hi.z, n.z));
+            }
+            target3[0] = (float) (lo.x + hi.x) * 0.5f; target3[1] = (float) (lo.y + hi.y) * 0.5f; target3[2] = (float) (lo.z + hi.z) * 0.5f;
+            float extent = nodesYup.empty() ? 10.0f : (float) std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
+            radius = extent * 0.75f + 12.0f;
         }
-        float target3[3] = {(float) (lo.x + hi.x) * 0.5f, (float) (lo.y + hi.y) * 0.5f, (float) (lo.z + hi.z) * 0.5f};
-        float extent = nodesYup.empty() ? 10.0f : (float) std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
-        float radius = extent * 0.75f + 12.0f;
         float azimuth = 0.8f + 0.15f * (float) frame / 60.0f;
 
         renderer.render(azimuth, 0.15f, radius, target3, 0.5f, lightDir,

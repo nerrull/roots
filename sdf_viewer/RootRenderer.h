@@ -11,7 +11,10 @@ public:
     enum class ShaderMode { Phong = 0, PBR = 1, Invert = 2 };
 
     struct Material {
-        float baseColor[3] = {0.60f, 0.55f, 0.45f};
+        float baseColor[3]  = {0.60f, 0.55f, 0.45f};
+        float baseColor2[3] = {0.35f, 0.28f, 0.22f};   // blended in by color noise
+        float colorNoiseScale    = 0.4f;
+        float colorNoiseStrength = 0.0f;               // 0 = flat single color
         float ambient      = 0.03f;
         float diffuse      = 0.30f;
         float specColor[3] = {1.00f, 0.95f, 0.85f};
@@ -49,7 +52,7 @@ public:
         float driftSpeed  = 0.5f;
         float phase[3]    = {};
     };
-    static constexpr int MAX_WISPS = 4;
+    static constexpr int MAX_WISPS = 16;
 
     RootRenderer(int w, int h);
     ~RootRenderer();
@@ -114,6 +117,7 @@ private:
     int m_uNodes = -1, m_uSegs = -1, m_uRads = -1, m_uSegCount = -1;
     int m_uEye = -1, m_uCam = -1, m_uFov = -1, m_uRes = -1, m_uViewProj = -1;
     int m_uBaseColor = -1, m_uAmbient = -1, m_uDiffuse = -1;
+    int m_uBaseColor2 = -1, m_uColorNoiseScale = -1, m_uColorNoiseStrength = -1;
     int m_uSpecColor = -1, m_uShininess = -1, m_uLightDir = -1;
     int m_uShaderMode = -1, m_uMetallic = -1, m_uRoughness = -1;
     int m_uWispCount = -1, m_uWispPos = -1, m_uWispColor = -1, m_uWispIntensity = -1;
