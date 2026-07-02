@@ -84,6 +84,8 @@ public:
     int        wispCount    = 2;
     float      wispTime     = 0.0f;  // advance by dt each frame
     float      radiusScale  = 1.0f;
+    float      radiusMin    = 0.0f;   // 0 = no floor clamp
+    float      radiusMax    = 0.0f;   // 0 = no ceiling clamp
 
 private:
     void buildFBO();
@@ -115,7 +117,7 @@ private:
     int m_uSpecColor = -1, m_uShininess = -1, m_uLightDir = -1;
     int m_uShaderMode = -1, m_uMetallic = -1, m_uRoughness = -1;
     int m_uWispCount = -1, m_uWispPos = -1, m_uWispColor = -1, m_uWispIntensity = -1;
-    int m_uRadiusScale = -1;
+    int m_uRadiusScale = -1, m_uRadiusMin = -1, m_uRadiusMax = -1;
 
     // Fog pass
     int m_fpColorTex = -1, m_fpDepthTex = -1;

@@ -146,6 +146,8 @@ void RootRenderer::buildShader() {
         m_uWispColor     = glGetUniformLocation(m_prog, "u_wispColor[0]");
         m_uWispIntensity = glGetUniformLocation(m_prog, "u_wispIntensity[0]");
         m_uRadiusScale   = glGetUniformLocation(m_prog, "u_radiusScale");
+        m_uRadiusMin     = glGetUniformLocation(m_prog, "u_radiusMin");
+        m_uRadiusMax     = glGetUniformLocation(m_prog, "u_radiusMax");
     }
 
     // --- Fog post-process pass ---
@@ -388,6 +390,8 @@ void RootRenderer::render(float azimuth, float elevation, float radius,
         glUniform1fv(m_uWispIntensity, activeWisps, wispIntArr);
     }
     glUniform1f(m_uRadiusScale, radiusScale);
+    glUniform1f(m_uRadiusMin, radiusMin);
+    glUniform1f(m_uRadiusMax, radiusMax);
 
     glBindVertexArray(m_vao);
     glDrawArraysInstanced(GL_TRIANGLES, 0, 6, m_segCount);

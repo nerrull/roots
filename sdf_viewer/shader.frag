@@ -26,6 +26,8 @@ uniform vec3  u_wispColor[4];
 uniform float u_wispIntensity[4];
 
 uniform float u_radiusScale;
+uniform float u_radiusMin;
+uniform float u_radiusMax;
 
 flat in int  v_segIdx;
 in vec2      v_ndc;
@@ -93,6 +95,8 @@ void main() {
     vec3  a   = texelFetch(u_nodes, seg.x).xyz;
     vec3  b   = texelFetch(u_nodes, seg.y).xyz;
     float r   = texelFetch(u_radii, v_segIdx).r * u_radiusScale;
+    if (u_radiusMin > 0.0) r = max(r, u_radiusMin);
+    if (u_radiusMax > 0.0) r = min(r, u_radiusMax);
 
     const int   MAX_STEPS = 32;
     const float HIT_EPS   = 0.001;

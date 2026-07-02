@@ -7,6 +7,8 @@ uniform mat4           u_viewProj;
 uniform float          u_fov;
 uniform vec2           u_res;
 uniform float          u_radiusScale;
+uniform float          u_radiusMin;   // clamp, 0 = no floor
+uniform float          u_radiusMax;   // clamp, 0 = no ceiling
 
 flat out int  v_segIdx;
 out vec2      v_ndc;
@@ -19,6 +21,8 @@ void main() {
     vec3  a   = texelFetch(u_nodes, seg.x).xyz;
     vec3  b   = texelFetch(u_nodes, seg.y).xyz;
     float r   = texelFetch(u_radii, i).r * u_radiusScale;
+    if (u_radiusMin > 0.0) r = max(r, u_radiusMin);
+    if (u_radiusMax > 0.0) r = min(r, u_radiusMax);
 
     vec4 ca = u_viewProj * vec4(a, 1.0);
     vec4 cb = u_viewProj * vec4(b, 1.0);
