@@ -194,16 +194,16 @@ int main(int argc, char** argv) {
     double dt = (argc > 6) ? std::atof(argv[6]) : 0.75;
     double reachMult = (argc > 7) ? std::atof(argv[7]) : 1.3;
     double tailDays = (argc > 8) ? std::atof(argv[8]) : 6.0;
-    double dwellDays = (argc > 9) ? std::atof(argv[9]) : 5.0;
+    double dwellDays = (argc > 9) ? std::atof(argv[9]) : 9.0;  // keep attracting after first contact
     int rimN = (argc > 10) ? std::atoi(argv[10]) : 6;
     int W = (argc > 11) ? std::atoi(argv[11]) : 800;
     int H = (argc > 12) ? std::atoi(argv[12]) : 1000;
     double spin = (argc > 13) ? std::atof(argv[13]) : 0.5;
 
     // ---- geometry / growth setup (same mechanics as export_sequential.cpp) --
-    double R0 = 9.0, Hh = 34.0, maskR = 2.6;
+    double R0 = 12.0, Hh = 48.0, maskR = 2.6;
     double tipRadius = 0.22 * R0;
-    auto masks = conePhyllotaxis(N, R0, Hh, maskR, 0.10, 0.94, tipRadius);
+    auto masks = conePhyllotaxis(N, R0, Hh, maskR, 0.14, 0.94, tipRadius);
 
     auto rs = std::make_shared<RootSystem>();
     rs->readParameters(param, "plant", true, false);
