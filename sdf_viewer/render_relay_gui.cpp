@@ -215,6 +215,20 @@ struct Params {
     float R0         = 13.0f;
     float Hh         = 52.0f;
     float startFrac  = 0.15f;
+    // mask distribution: angle/distance between consecutive masks, independent
+    // of N -- see conePhyllotaxis() in MaskCavities.h. angleStepGoldenMult is
+    // a multiplier on the golden angle (~137.5deg) rather than an absolute
+    // value, so 1.0 is the classic non-repeating phyllotactic spiral and
+    // small departures from it (0.9, 1.1, ...) still look organic rather than
+    // snapping into a regular repeating pattern the way an arbitrary absolute
+    // angle would. distStepFrac <=0 falls back to spreading N masks evenly
+    // over the cone (the old behavior).
+    float angleStepGoldenMult = 1.0f;
+    float distStepFrac = 0.0f;   // 0 = auto (spread N evenly), else explicit step
+    // 1.0 = straight cone. <1 opens up fast near the tip and stays close to
+    // full width for most of the length (cylinder-ish). >1 stays narrow
+    // longer and flares sharply near the base (spike-ish).
+    float taperPower = 1.0f;
     float dwellDays  = 18.0f;
     float weight        = 0.55f;   // main-root travel attraction (lower = more organic wander)
     float lateralWeight = 0.80f;   // offshoot/lateral travel attraction -- usually kept higher
@@ -245,6 +259,10 @@ struct Params {
     float veinColor[3] = {0.55f, 0.53f, 0.50f};
     float veinScale    = 0.6f;
     float veinStrength = 0.5f;
+    // color of the face-light-fed wisps that illuminate nearby roots --
+    // previously mistakenly reused veinColor for this (a copy/paste bug),
+    // coupling the mask marble veining color to the root accent lighting.
+    float faceLightColorForRoots[3] = {1.0f, 0.92f, 0.78f};
     // fog -- default falloff 0 avoids an axis mismatch: fog.frag's falloff
     // term decays along native "z", which after our Y-up coordinate remap for
     // rendering doesn't correspond to height or camera depth anymore, so a
@@ -269,8 +287,11 @@ struct Params {
     float colorNoiseScale = 0.4f;
     float colorNoiseStrength = 0.6f;
 
-    // camera: -1 = whole-scene orbit, >=0 = focus on that revealed mask index.
+    // camera: -1 = whole-scene orbit, >=0 = focus on that revealed mask index
+    // (fixed/non-rotating -- see idle-orbit code). orbitSpeed only affects
+    // the whole-scene orbit; 0 = frozen.
     int cameraFaceIdx = -1;
+    float orbitSpeed = 1.0f;
 
     // internal render resolution as a fraction of the real framebuffer.
     // Confirmed with GPU-synchronized profiling (glFinish, not just wall-clock
@@ -398,6 +419,11 @@ int main(int argc, char** argv) {
     std::vector<MaskNode> revealed;
     std::vector<FrozenHop> frozen;
     int frame = 0;
+    int orbitFrame = 0;       // separate counter for the whole-scene orbit --
+                              // doesn't advance while focused on a mask, so
+                              // resuming "Whole scene" doesn't jump/speed up.
+    float frozenAzimuth = 0.8f;   // captured live azimuth while orbiting,
+                                  // held fixed while focused on a mask.
     bool growing = profileMode;
     std::string status = "Press \"Regrow\" to start.";
 
@@ -437,10 +463,15 @@ int main(int argc, char** argv) {
             }
             ImGui::EndCombo();
         }
-        ImGui::SliderInt("Masks", &pending.N, 3, 14);
+        ImGui::SliderInt("Masks", &pending.N, 1, 50);
         ImGui::SliderFloat("Cone radius", &pending.R0, 6.0f, 24.0f, "%.1f cm");
         ImGui::SliderFloat("Cone height (spacing)", &pending.Hh, 24.0f, 96.0f, "%.1f cm");
+        ImGui::SliderFloat("Cone taper", &pending.taperPower, 0.25f, 4.0f, "%.2f");
+        ImGui::TextDisabled("1 = straight cone. <1 opens up fast (cylinder-\nish). >1 stays narrow, flares near the base.");
         ImGui::SliderFloat("Tip start frac", &pending.startFrac, 0.05f, 0.3f);
+        ImGui::SliderFloat("Angle step (x golden angle)", &pending.angleStepGoldenMult, 0.5f, 3.0f, "%.3f");
+        ImGui::SliderFloat("Distance step per mask", &pending.distStepFrac, 0.0f, 0.15f, "%.3f");
+        ImGui::TextDisabled("Distance step 0 = auto (spread N masks evenly\nover the cone). Set explicitly to make mask\ncount and spacing independent.");
         ImGui::Separator();
         ImGui::SliderFloat("Dwell days", &pending.dwellDays, 2.0f, 40.0f, "%.1f");
         ImGui::SliderFloat("Attraction: main root", &pending.weight, 0.0f, 0.9f, "%.2f");
@@ -486,6 +517,8 @@ int main(int argc, char** argv) {
             ImGui::SliderFloat("Face light falloff", &pending.faceLightFalloff, 0.001f, 0.1f, "%.3f");
             ImGui::SliderFloat("Face light distance", &pending.faceLightDist, 0.1f, 2.0f, "%.2f");
             ImGui::SliderFloat("Face specular", &pending.faceSpecStrength, 0.0f, 4.0f, "%.2f");
+            ImGui::ColorEdit3("Face light color (on roots)", pending.faceLightColorForRoots);
+            ImGui::TextDisabled("Was accidentally tied to vein color -- now\nindependent.");
             ImGui::Spacing();
             ImGui::Text("Fog");
             ImGui::SliderFloat("Fog density", &pending.fogDensity, 0.0f, 0.3f, "%.3f");
@@ -521,7 +554,9 @@ int main(int argc, char** argv) {
                 }
                 ImGui::EndCombo();
             }
-            ImGui::TextDisabled("Applies once growth is finished (idle orbit).");
+            ImGui::TextDisabled("Applies once growth is finished (idle orbit).\nFocusing on a face freezes rotation --\nit no longer orbits behind it.");
+            ImGui::SliderFloat("Orbit speed", &pending.orbitSpeed, 0.0f, 3.0f, "%.2f");
+            ImGui::TextDisabled("Whole-scene orbit only -- a focused face\nalready holds still regardless of this.");
         }
 
         ImGui::Spacing();
@@ -629,9 +664,9 @@ int main(int argc, char** argv) {
             renderer.wisps[i].basePos[0] = (float) lp.x;
             renderer.wisps[i].basePos[1] = (float) lp.y;
             renderer.wisps[i].basePos[2] = (float) lp.z;
-            renderer.wisps[i].color[0] = pending.veinColor[0] * 0.4f + 0.6f;
-            renderer.wisps[i].color[1] = pending.veinColor[1] * 0.4f + 0.6f;
-            renderer.wisps[i].color[2] = pending.veinColor[2] * 0.4f + 0.6f;
+            renderer.wisps[i].color[0] = pending.faceLightColorForRoots[0];
+            renderer.wisps[i].color[1] = pending.faceLightColorForRoots[1];
+            renderer.wisps[i].color[2] = pending.faceLightColorForRoots[2];
             renderer.wisps[i].intensity = pending.faceLightIntensity * 0.5f;
             renderer.wisps[i].driftRadius = 0.0f;   // static -- these ARE the face lights, not atmosphere
         }
@@ -645,11 +680,19 @@ int main(int argc, char** argv) {
             revealed.clear();
             frozen.clear();
             frame = 0;
+            // explicit reset -- don't rely on the wisp-feed loop naturally
+            // shrinking to 0 on the next applyLiveRenderParams() call (it
+            // does, but only once revealed.size()==0 is actually observed;
+            // being explicit here avoids any stale-light flash on Regrow).
+            renderer.wispCount = 0;
             std::string param = paramDir + g_species[params.speciesIdx].second;
             double maskR = 2.6;
             double tipRadius = 0.22 * params.R0;
+            const double goldenRad = M_PI * (3.0 - std::sqrt(5.0));
             auto masks = conePhyllotaxis(params.N, params.R0, params.Hh, maskR,
-                                         params.startFrac, 0.94, tipRadius);
+                                         params.startFrac, 0.94, tipRadius,
+                                         params.angleStepGoldenMult * goldenRad, params.distStepFrac,
+                                         params.taperPower);
             Vector3d prevPos(0, 0, 0);
             bool quit = false;
 
@@ -682,7 +725,7 @@ int main(int argc, char** argv) {
                 // by then everything should be curling tightly around the mask.
                 auto rebuildTropism = [&](double mainW, double lateralW) {
                     auto geom = buildCavityGeometry(localRevealed, params.R0, params.Hh, false, 2.0,
-                                                    tipRadius, params.viewCylLen);
+                                                    tipRadius, params.viewCylLen, 0.9, params.taperPower);
                     rs->setGeometry(geom);
                     auto attrs = rimAttractors({localTargetNode}, 6, 1.0, 3.0, 1.15);
                     rs->setTropism(combinedAttractionSplit(rs, base, attrs, 6.0, params.sigma,
@@ -749,7 +792,7 @@ int main(int argc, char** argv) {
                     float target3[3] = {(float) (lo.x + hi.x) * 0.5f, (float) (lo.y + hi.y) * 0.5f, (float) (lo.z + hi.z) * 0.5f};
                     float extent = (float) std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
                     float radius = extent * 0.9f + 10.0f;
-                    float azimuth = 0.8f + 2.0f * (float) M_PI * 0.5f * (frame / 260.0f);
+                    float azimuth = 0.8f + 2.0f * (float) M_PI * 0.5f * pending.orbitSpeed * (frame / 260.0f);
                     renderer.fog.driftTime += 0.02f;
 
                     renderer.render(azimuth, 0.12f, radius, target3, 0.5f, lightDir,
@@ -803,11 +846,16 @@ int main(int argc, char** argv) {
 
         float target3[3];
         float radius;
-        if (pending.cameraFaceIdx >= 0 && pending.cameraFaceIdx < (int) revealed.size()) {
-            // focused on one mask: center on it and frame tight.
+        float azimuth;
+        bool focused = pending.cameraFaceIdx >= 0 && pending.cameraFaceIdx < (int) revealed.size();
+        if (focused) {
+            // focused on one mask: center on it, frame tight, and hold still --
+            // no more orbiting past/behind it. Keeps whatever angle the
+            // whole-scene orbit last had, rather than snapping to a fixed view.
             Vector3d fp = toYup(revealed[pending.cameraFaceIdx].pos);
             target3[0] = (float) fp.x; target3[1] = (float) fp.y; target3[2] = (float) fp.z;
             radius = std::max(revealed[pending.cameraFaceIdx].r_width, revealed[pending.cameraFaceIdx].r_height) * 3.5f + 4.0f;
+            azimuth = frozenAzimuth;
         } else {
             Vector3d lo = nodesYup.empty() ? Vector3d(0, 0, 0) : nodesYup[0], hi = lo;
             for (const auto& n : nodesYup) {
@@ -817,8 +865,10 @@ int main(int argc, char** argv) {
             target3[0] = (float) (lo.x + hi.x) * 0.5f; target3[1] = (float) (lo.y + hi.y) * 0.5f; target3[2] = (float) (lo.z + hi.z) * 0.5f;
             float extent = nodesYup.empty() ? 10.0f : (float) std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
             radius = extent * 0.75f + 12.0f;
+            azimuth = 0.8f + 0.15f * pending.orbitSpeed * (float) orbitFrame / 60.0f;
+            frozenAzimuth = azimuth;
+            orbitFrame++;
         }
-        float azimuth = 0.8f + 0.15f * (float) frame / 60.0f;
 
         renderer.render(azimuth, 0.15f, radius, target3, 0.5f, lightDir,
                         [&](const float* vp, const float* eye) { faceGL.draw(vp, eye, lightDir); });

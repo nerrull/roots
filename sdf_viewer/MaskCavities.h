@@ -68,22 +68,28 @@ private:
 // somewhere already-open on the cone rather than pinched to a literal point --
 // a frustum whose *virtual* apex is below z=0, so there's room right at the
 // root's start instead of forcing everything through a single point.
+// taperPower bends the radius profile away from a straight cone: 1.0 = linear
+// cone (radius grows steadily from tip to base). <1.0 opens up fast near the
+// tip and stays close to full width for most of the length -- closer to a
+// cylinder. >1.0 stays narrow for most of the length and flares sharply near
+// the base -- more spike-like.
 class SDF_Cone : public SignedDistanceFunction {
 public:
     SDF_Cone(double baseRadius, double height, double tipRadius = 0.0,
-            const Vector3d& axisXY = Vector3d(0, 0, 0))
-        : R0_(baseRadius), h_(height), tipR_(tipRadius), cxy_(axisXY) {}
+            const Vector3d& axisXY = Vector3d(0, 0, 0), double taperPower = 1.0)
+        : R0_(baseRadius), h_(height), tipR_(tipRadius), cxy_(axisXY), taper_(taperPower) {}
 
     double getDist(const Vector3d& v) const override {
         double t = -v.z;                          // 0 at tip (z=0) .. h at base (z=-h)
-        double allowedR = tipR_ + (R0_ - tipR_) * (t / h_);
+        double frac = std::pow(std::clamp(t / h_, 0.0, 1.0), taper_);
+        double allowedR = tipR_ + (R0_ - tipR_) * frac;
         double dx = v.x - cxy_.x, dy = v.y - cxy_.y;
         double radial = std::sqrt(dx * dx + dy * dy);
         return std::max({radial - allowedR, t - h_, -t});   // < 0 inside the cone
     }
     std::string toString() const override { return "SDF_Cone"; }
 private:
-    double R0_, h_, tipR_;
+    double R0_, h_, tipR_, taper_;
     Vector3d cxy_;
 };
 
@@ -98,23 +104,44 @@ struct MaskNode {
 
 // Phyllotaxis on the lateral surface of the downward cone/frustum (seed at z=0).
 //   radius grows from tipRadius at z=0 to baseRadius R0 at z=-height (deepest).
+//
+// angleStepRad: angular offset between consecutive masks (default: the golden
+// angle, ~137.5deg, for the classic non-repeating phyllotactic spiral -- pass
+// something else for a more regular/repeating pattern).
+// distStepFrac: how far along the cone (as a fraction of total height) each
+// successive mask advances (default: spreads the requested count evenly
+// across [startFrac, endFrac], the old behavior). Set explicitly to make
+// mask count and mask spacing independent -- e.g. a fixed distStepFrac means
+// requesting more masks just continues the spiral further rather than
+// compressing the existing ones closer together.
+// taperPower: see SDF_Cone -- must match whatever confinement geometry the
+// masks are actually being placed on, or masks won't sit on the real surface.
 inline std::vector<MaskNode> conePhyllotaxis(int n, double baseRadius, double height,
                                              double maskR, double startFrac = 0.12,
-                                             double endFrac = 0.9, double tipRadius = 0.0) {
+                                             double endFrac = 0.9, double tipRadius = 0.0,
+                                             double angleStepRad = -1.0, double distStepFrac = -1.0,
+                                             double taperPower = 1.0) {
     const double golden = M_PI * (3.0 - std::sqrt(5.0));   // ~137.5 deg
+    double angStep = angleStepRad > 0.0 ? angleStepRad : golden;
+    double dStep = distStepFrac > 0.0 ? distStepFrac : (n > 0 ? (endFrac - startFrac) / n : 0.0);
     std::vector<MaskNode> out;
     out.reserve(n);
     for (int i = 0; i < n; ++i) {
-        double t = startFrac + (endFrac - startFrac) * ((i + 0.5) / n);   // 0(tip)..1(deep/wide)
+        double t = std::min(1.0, startFrac + dStep * (i + 0.5));   // 0(tip)..1(deep/wide)
+        double tp = std::pow(std::max(t, 1e-6), taperPower);
         double z = -t * height;
-        double radius = tipRadius + (baseRadius - tipRadius) * t;
-        double phi = i * golden;
+        double radius = tipRadius + (baseRadius - tipRadius) * tp;
+        double phi = i * angStep;
         double cp = std::cos(phi), sp = std::sin(phi);
+
+        // local surface slope dradius/dz, accounting for the taper curve --
+        // a straight cone (taperPower=1) reduces to the old constant slope.
+        double slope = taperPower * (baseRadius - tipRadius) * std::pow(std::max(t, 1e-6), taperPower - 1.0) / height;
 
         MaskNode m;
         m.pos = Vector3d(radius * cp, radius * sp, z);
         // cone surface normal: radial component + slope back up toward the tip.
-        m.normal = Vector3d(cp, sp, (baseRadius - tipRadius) / height).normalized();
+        m.normal = Vector3d(cp, sp, slope).normalized();
         m.tangent = Vector3d(-sp, cp, 0.0);                       // horizontal, around
         m.bitangent = m.normal.cross(m.tangent).normalized();     // up the surface
         m.r_depth = maskR * 0.55;    // shallow into the surface
@@ -137,9 +164,10 @@ inline std::vector<MaskNode> conePhyllotaxis(int n, double baseRadius, double he
 inline std::shared_ptr<SignedDistanceFunction>
 buildCavityGeometry(const std::vector<MaskNode>& nodes, double baseRadius, double height,
                     bool coneContainer = true, double coneMargin = 2.0, double tipRadius = 0.0,
-                    double viewCylLen = 0.0, double viewCylRadiusMult = 0.9) {
+                    double viewCylLen = 0.0, double viewCylRadiusMult = 0.9, double taperPower = 1.0) {
     std::shared_ptr<SignedDistanceFunction> cone = coneContainer
-        ? std::make_shared<SDF_Cone>(baseRadius + coneMargin, height + coneMargin, tipRadius)
+        ? std::make_shared<SDF_Cone>(baseRadius + coneMargin, height + coneMargin, tipRadius,
+                                     Vector3d(0, 0, 0), taperPower)
         : nullptr;
     if (nodes.empty())
         return cone ? cone : std::make_shared<SignedDistanceFunction>();   // unconstrained
