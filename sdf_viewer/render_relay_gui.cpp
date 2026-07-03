@@ -645,6 +645,30 @@ int main(int argc, char** argv) {
         glfwPollEvents();
     };
 
+    // Read back the composited color texture (the fog FBO output) and write it
+    // as a binary PPM. Used both for single-frame visual A/B (MASK_RELAY_DUMP)
+    // and for the orbit video sequence (MASK_RELAY_SEQDIR).
+    auto dumpFrame = [&](const std::string& path) {
+        int dw = renderer.width(), dh = renderer.height();
+        std::vector<unsigned char> px((size_t) dw * dh * 4);
+        glBindTexture(GL_TEXTURE_2D, renderer.colorTex());
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        glBindTexture(GL_TEXTURE_2D, 0);
+        std::ofstream out(path, std::ios::binary);
+        out << "P6\n" << dw << " " << dh << "\n255\n";
+        for (int y = 0; y < dh; y++)   // FBO is top-down already for this pipeline
+            for (int x = 0; x < dw; x++)
+                out.write((const char*) &px[((size_t) y * dw + x) * 4], 3);
+    };
+
+    // Orbit-video mode: when MASK_RELAY_SEQDIR is set, the idle loop sweeps a
+    // full turn over MASK_RELAY_FRAMES frames (default 180), dumping each to
+    // SEQDIR/fNNNN.ppm, then exits -- so an external ffmpeg pass can encode a
+    // clean 360-degree turntable independent of the interactive orbit speed.
+    std::string seqDir = std::getenv("MASK_RELAY_SEQDIR") ? std::getenv("MASK_RELAY_SEQDIR") : "";
+    int seqFrames = std::getenv("MASK_RELAY_FRAMES") ? std::atoi(std::getenv("MASK_RELAY_FRAMES")) : 180;
+    int seqDumped = 0;
+
     float lightDir[3] = {0.5f, 0.8f, 0.35f};
 
     // --- cached segment geometry -----------------------------------------
@@ -1063,29 +1087,36 @@ int main(int argc, char** argv) {
             orbitFrame++;
         }
 
+        // video mode overrides the orbit with an even full-turn sweep
+        if (!seqDir.empty() && !focused)
+            azimuth = 0.8f + 2.0f * (float) M_PI * (float) seqDumped / (float) seqFrames;
+
         auto _i1 = std::chrono::steady_clock::now();
         renderer.render(azimuth, 0.15f, radius, target3, 0.5f, lightDir,
                         [&](const float* vp, const float* eye) { faceGL.draw(vp, eye, lightDir); });
         auto _i2 = std::chrono::steady_clock::now();
         present();
         auto _i3 = std::chrono::steady_clock::now();
+
+        // orbit-video sequence dump: one PPM per frame across a full turn
+        if (!seqDir.empty()) {
+            char name[64];
+            std::snprintf(name, sizeof(name), "/f%04d.ppm", seqDumped);
+            dumpFrame(seqDir + name);
+            if (++seqDumped >= seqFrames) {
+                std::cout << "PROFILE: wrote " << seqDumped << " video frames to " << seqDir << "\n";
+                break;
+            }
+            frame++;
+            continue;   // skip the profiling/exit-after-60 logic below
+        }
+
         if (profileMode) {
-            // visual regression check: dump the composited frame (fog FBO
-            // color texture) to a PPM once the idle orbit has settled, so
-            // shader optimizations can be A/B-diffed on identical seeded
-            // geometry without OS screenshot permissions.
+            // visual regression check: dump the composited frame once the idle
+            // orbit has settled, for shader A/B on identical seeded geometry.
             if (profileIdleFrames == 30) {
                 if (const char* dumpPath = std::getenv("MASK_RELAY_DUMP")) {
-                    int dw = renderer.width(), dh = renderer.height();
-                    std::vector<unsigned char> px((size_t) dw * dh * 4);
-                    glBindTexture(GL_TEXTURE_2D, renderer.colorTex());
-                    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-                    glBindTexture(GL_TEXTURE_2D, 0);
-                    std::ofstream out(dumpPath, std::ios::binary);
-                    out << "P6\n" << dw << " " << dh << "\n255\n";
-                    for (int y = 0; y < dh; y++)   // FBO is top-down already for this pipeline
-                        for (int x = 0; x < dw; x++)
-                            out.write((const char*) &px[((size_t) y * dw + x) * 4], 3);
+                    dumpFrame(dumpPath);
                     std::cout << "PROFILE: dumped frame to " << dumpPath << "\n";
                 }
             }
