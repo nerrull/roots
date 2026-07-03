@@ -245,8 +245,12 @@ struct Params {
                                       // travel -- higher = more candidate headings
                                       // tried per step, more reliably finds one that
                                       // actually points at the target
-    float lateralWeight = 0.80f;   // offshoot/lateral travel attraction -- usually kept higher
-                                    // so laterals still cling for wrapping density
+    float lateralWeight = 0.20f;   // offshoot/lateral travel attraction -- kept LOW: during
+                                    // travel only the main axis should home on the target;
+                                    // laterals branch off and dangle/wander naturally instead
+                                    // of all converging on the same point. Wrapping density is
+                                    // supplied later by dwellLateralWeight once the main root
+                                    // arrives, not by pulling laterals inward during travel.
     float dwellWeight        = 0.92f;   // main-root dwell attraction
     float dwellLateralWeight = 0.92f;   // offshoot/lateral dwell attraction
     float sigma      = 0.35f;   // angular jitter -- higher = less railroaded/straight paths
@@ -520,6 +524,7 @@ int main(int argc, char** argv) {
         ImGui::SliderFloat("Main root trials (n)", &pending.mainTravelTrials, 4.0f, 30.0f, "%.0f");
         ImGui::TextDisabled("More trials = more candidate headings tried\nper step -- at high attraction, this is what\nactually makes it reliably point at the target.");
         ImGui::SliderFloat("Attraction: offshoots", &pending.lateralWeight, 0.0f, 0.95f, "%.2f");
+        ImGui::TextDisabled("Keep low: during travel only the main axis homes\non the target -- laterals should branch and dangle,\nnot converge. Wrapping comes from the dwell weights.");
         ImGui::SliderFloat("Attraction (dwell): main root", &pending.dwellWeight, 0.0f, 0.99f, "%.2f");
         ImGui::SliderFloat("Attraction (dwell): offshoots", &pending.dwellLateralWeight, 0.0f, 0.99f, "%.2f");
         ImGui::SliderFloat("Angular jitter", &pending.sigma, 0.1f, 0.7f, "%.2f");
