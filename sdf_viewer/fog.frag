@@ -185,6 +185,26 @@ void main() {
     vec3  sceneColor  = texture(u_colorTex, v_uv).rgb;
     float depthSample = texture(u_depthTex,  v_uv).r;
 
+    // Cheap edge-aware smoothing (FXAA-lite): the root capsules are sphere-
+    // traced with a hard discard at the silhouette, not rasterized triangle
+    // edges, so hardware MSAA wouldn't help even if we had it (GL 4.1 has no
+    // compute shaders to build a proper AA solution either). This runs at
+    // u_res -- the INTERNAL render resolution (renderScale, can be well below
+    // the window's real size) -- so it's cheap regardless of final output
+    // size, and matters more than usual here since upscaling a lower-res
+    // render otherwise just blows up its jaggies rather than smoothing them.
+    {
+        vec2 texel = 1.0 / u_res;
+        vec3 nW = texture(u_colorTex, v_uv + vec2(-texel.x, 0.0)).rgb;
+        vec3 nE = texture(u_colorTex, v_uv + vec2( texel.x, 0.0)).rgb;
+        vec3 nN = texture(u_colorTex, v_uv + vec2(0.0,  texel.y)).rgb;
+        vec3 nS = texture(u_colorTex, v_uv + vec2(0.0, -texel.y)).rgb;
+        vec3 avg = (nW + nE + nN + nS) * 0.25;
+        float contrast = length(sceneColor - avg);
+        float blend = smoothstep(0.04, 0.22, contrast) * 0.65;
+        sceneColor = mix(sceneColor, avg, blend);
+    }
+
     // Reconstruct world-space ray (mirrors the geometry shader)
     vec2 ndc = v_uv * 2.0 - 1.0;
     ndc.x *= u_res.x / u_res.y;

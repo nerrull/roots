@@ -272,10 +272,13 @@ struct Params {
     // camera: -1 = whole-scene orbit, >=0 = focus on that revealed mask index.
     int cameraFaceIdx = -1;
 
-    // internal render resolution as a fraction of the real framebuffer --
-    // present() cost (blit+swap) scales with pixel count, this is the direct
-    // lever on it. 1.0 = native, lower = faster but softer (bilinear upscale).
-    float renderScale = 0.65f;
+    // internal render resolution as a fraction of the real framebuffer.
+    // Confirmed with GPU-synchronized profiling (glFinish, not just wall-clock
+    // around async GL submission -- see git log) that render cost is strongly
+    // resolution-bound: ~78ms/frame at 0.65 scale on a 4K display, ~14ms/frame
+    // at 0.25. 0.35 is a compromise default; raise it via the Performance
+    // panel if your GPU has headroom.
+    float renderScale = 0.35f;
 };
 
 static const std::vector<std::pair<std::string, std::string>> g_species = {
@@ -298,6 +301,7 @@ int main(int argc, char** argv) {
     bool fullscreen = (argc > 4) ? (std::atoi(argv[4]) != 0) : true;
     bool profileMode = (argc > 5) ? (std::atoi(argv[5]) != 0) : false;   // autostart growth, exit after, print PROFILE lines
     bool profileHidden = (argc > 6) ? (std::atoi(argv[6]) != 0) : true;  // profileMode window visibility (isolate swap-cost variable)
+    float cliRenderScale = (argc > 7) ? std::atof(argv[7]) : -1.0f;      // override Params default, for isolating renderScale's effect
 
     if (!glfwInit()) { std::cerr << "glfwInit failed\n"; return 1; }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -344,7 +348,7 @@ int main(int argc, char** argv) {
     // window), so rendering fewer pixels internally is a direct, real lever
     // on the actual bottleneck (not the sphere-tracer itself, which profiled
     // at under 1ms regardless of resolution).
-    float renderScale = 0.65f;
+    float renderScale = cliRenderScale > 0.0f ? cliRenderScale : 0.35f;
     int rw = std::max(1, (int) (fbW * renderScale)), rh = std::max(1, (int) (fbH * renderScale));
     RootRenderer renderer(rw, rh);
     renderer.mat.baseColor[0] = 0.55f; renderer.mat.baseColor[1] = 0.40f; renderer.mat.baseColor[2] = 0.26f;
@@ -398,6 +402,7 @@ int main(int argc, char** argv) {
     std::string status = "Press \"Regrow\" to start.";
 
     Params params, pending = params;
+    if (cliRenderScale > 0.0f) { params.renderScale = cliRenderScale; pending.renderScale = cliRenderScale; }
 
     auto blit = [&]() {
         int w2, h2; glfwGetFramebufferSize(window, &w2, &h2);
@@ -531,7 +536,17 @@ int main(int argc, char** argv) {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     };
 
+    // profileMode + hidden window: skip presenting entirely. Profiling showed
+    // glfwSwapBuffers() on an invisible window is *slower* than a visible one
+    // at the same resolution on this machine (macOS apparently falls back to
+    // a slower composite/software path for offscreen swaps) -- so a hidden
+    // window doesn't give a meaningful "headless" number for the actual
+    // render work. glFinish() instead forces the GPU to actually complete the
+    // frame before the timer stops, so PROFILE numbers reflect real render()
+    // cost without the window-system swap confound at all.
+    bool skipPresent = profileMode && profileHidden;
     auto present = [&]() {
+        if (skipPresent) { glFinish(); return; }
         blit();
         drawPanel();
         glfwSwapBuffers(window);
