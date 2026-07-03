@@ -4,6 +4,7 @@
 
 #include <GL/glew.h>
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -70,6 +71,81 @@ static void makeTBO(GLuint& buf, GLuint& tex) {
     glBindBuffer(GL_TEXTURE_BUFFER, 0);
 }
 
+// ---------------------------------------------------------------------------
+// Tiling 3D value-noise fBm, baked once on the CPU.
+//
+// Profiling (glFinish-synced per-pass timers, 4K, ~82k segments) showed the
+// fog pass at ~199ms/frame of a ~208ms total -- ~96% of the entire frame --
+// and nearly all of it was the procedural noise: fogFbm() evaluated a
+// 4-octave value fBm (32 hash calls) at each of 16 raymarch steps per pixel,
+// ~512 hashes/pixel, ~4 billion/frame at 4K. Baking the same fBm into a
+// small tiling 3D texture turns each of those 32-hash evaluations into one
+// trilinear texture fetch. The bake uses lattice-period-wrapped noise so the
+// texture tiles seamlessly under GL_REPEAT; octave frequencies are the
+// power-of-two ones (2/4/8) rather than the original irrational-ish
+// 2.03/4.07/8.11, which is visually indistinguishable for fog.
+// ---------------------------------------------------------------------------
+
+// world-space size (in the shader's noise coordinate units) of one texture
+// tile -- shaders must multiply noise coords by 1/NOISE_TILE_PERIOD.
+static constexpr float NOISE_TILE_PERIOD = 8.0f;
+
+static float latticeHash(int x, int y, int z) {
+    uint32_t h = (uint32_t) x * 374761393u + (uint32_t) y * 668265263u
+               + (uint32_t) z * 1274126177u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return (float) ((h ^ (h >> 16)) & 0xFFFFFFu) / (float) 0x1000000u;
+}
+
+// smoothstep-filtered trilinear value noise, integer lattice wrapped at `per`
+static float tilingValueNoise(float px, float py, float pz, int per) {
+    int ix = (int) std::floor(px), iy = (int) std::floor(py), iz = (int) std::floor(pz);
+    float fx = px - ix, fy = py - iy, fz = pz - iz;
+    float ux = fx * fx * (3.f - 2.f * fx);
+    float uy = fy * fy * (3.f - 2.f * fy);
+    float uz = fz * fz * (3.f - 2.f * fz);
+    auto wrap = [per](int v) { return ((v % per) + per) % per; };
+    float c[2][2][2];
+    for (int dz = 0; dz < 2; dz++)
+        for (int dy = 0; dy < 2; dy++)
+            for (int dx = 0; dx < 2; dx++)
+                c[dz][dy][dx] = latticeHash(wrap(ix + dx), wrap(iy + dy), wrap(iz + dz));
+    auto lerp = [](float a, float b, float t) { return a + (b - a) * t; };
+    float x00 = lerp(c[0][0][0], c[0][0][1], ux), x10 = lerp(c[0][1][0], c[0][1][1], ux);
+    float x01 = lerp(c[1][0][0], c[1][0][1], ux), x11 = lerp(c[1][1][0], c[1][1][1], ux);
+    return lerp(lerp(x00, x10, uy), lerp(x01, x11, uy), uz);
+}
+
+void RootRenderer::buildNoiseTexture() {
+    const int N = 128;   // 128^3 R8 = 2MB; highest octave gets 2 voxels/cell
+    std::vector<unsigned char> vox((size_t) N * N * N);
+    const float basePer = NOISE_TILE_PERIOD;   // base octave: 8 lattice cells/tile
+    for (int z = 0; z < N; z++) {
+        for (int y = 0; y < N; y++) {
+            for (int x = 0; x < N; x++) {
+                float px = (float) x / N * basePer;
+                float py = (float) y / N * basePer;
+                float pz = (float) z / N * basePer;
+                float v = 0.5000f * tilingValueNoise(px,      py,      pz,      (int) basePer)
+                        + 0.2500f * tilingValueNoise(px * 2,  py * 2,  pz * 2,  (int) basePer * 2)
+                        + 0.1250f * tilingValueNoise(px * 4,  py * 4,  pz * 4,  (int) basePer * 4)
+                        + 0.0625f * tilingValueNoise(px * 8,  py * 8,  pz * 8,  (int) basePer * 8);
+                v *= 1.0f / 0.9375f;   // -> [0,1], mean ~0.5, matches old fogFbm()
+                vox[((size_t) z * N + y) * N + x] = (unsigned char) (v * 255.0f + 0.5f);
+            }
+        }
+    }
+    glGenTextures(1, &m_noiseTex);
+    glBindTexture(GL_TEXTURE_3D, m_noiseTex);
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, N, N, N, 0, GL_RED, GL_UNSIGNED_BYTE, vox.data());
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
+    glBindTexture(GL_TEXTURE_3D, 0);
+}
+
 // ===========================================================================
 // RootRenderer
 // ===========================================================================
@@ -77,6 +153,7 @@ static void makeTBO(GLuint& buf, GLuint& tex) {
 RootRenderer::RootRenderer(int w, int h) : m_w(w), m_h(h) {
     buildShader();
     buildFBO();
+    buildNoiseTexture();
 
     makeTBO(m_nodeBuf, m_nodeTex);
     makeTBO(m_segBuf,  m_segTex);
@@ -111,6 +188,7 @@ RootRenderer::~RootRenderer() {
     glDeleteTextures(1, &m_nodeTex);
     glDeleteTextures(1, &m_segTex);
     glDeleteTextures(1, &m_radTex);
+    glDeleteTextures(1, &m_noiseTex);
 }
 
 void RootRenderer::buildShader() {
@@ -151,6 +229,7 @@ void RootRenderer::buildShader() {
         m_uRadiusScale   = glGetUniformLocation(m_prog, "u_radiusScale");
         m_uRadiusMin     = glGetUniformLocation(m_prog, "u_radiusMin");
         m_uRadiusMax     = glGetUniformLocation(m_prog, "u_radiusMax");
+        m_uNoiseTex      = glGetUniformLocation(m_prog, "u_noiseTex");
     }
 
     // --- Fog post-process pass ---
@@ -185,6 +264,7 @@ void RootRenderer::buildShader() {
         m_fpWispPos          = glGetUniformLocation(m_fogProg, "u_wispPos[0]");
         m_fpWispColor        = glGetUniformLocation(m_fogProg, "u_wispColor[0]");
         m_fpWispIntensity    = glGetUniformLocation(m_fogProg, "u_wispIntensity[0]");
+        m_fpNoiseTex         = glGetUniformLocation(m_fogProg, "u_noiseTex");
     }
 }
 
@@ -355,6 +435,10 @@ void RootRenderer::render(float azimuth, float elevation, float radius,
     // -----------------------------------------------------------------------
     // Pass 1: geometry — shading, no fog
     // -----------------------------------------------------------------------
+    auto passClock = [] { return std::chrono::steady_clock::now(); };
+    std::chrono::steady_clock::time_point tp0;
+    if (profilePasses) { glFinish(); tp0 = passClock(); }
+
     bool invert = (shaderMode == ShaderMode::Invert);
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
     glViewport(0, 0, m_w, m_h);
@@ -373,10 +457,12 @@ void RootRenderer::render(float azimuth, float elevation, float radius,
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_BUFFER, m_nodeTex);
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_BUFFER, m_segTex);
     glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_BUFFER, m_radTex);
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_3D,     m_noiseTex);
 
     glUniform1i(m_uNodes,    0);
     glUniform1i(m_uSegs,     1);
     glUniform1i(m_uRads,     2);
+    glUniform1i(m_uNoiseTex, 3);
     glUniform1i(m_uSegCount, m_segCount);
     glUniform3f(m_uEye,      ex, ey, ez);
     glUniformMatrix3fv(m_uCam, 1, GL_FALSE, cam);
@@ -421,6 +507,12 @@ void RootRenderer::render(float azimuth, float elevation, float radius,
     // the fog pass below reads m_colorTex/m_depthTex.
     if (midGeometryHook) { float eye[3] = {ex, ey, ez}; midGeometryHook(vp, eye); }
 
+    std::chrono::steady_clock::time_point tp1;
+    if (profilePasses) {
+        glFinish(); tp1 = passClock();
+        lastGeomMs = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
+    }
+
     glDisable(GL_DEPTH_TEST);
 
     // -----------------------------------------------------------------------
@@ -434,9 +526,11 @@ void RootRenderer::render(float azimuth, float elevation, float radius,
 
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_colorTex);
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_depthTex);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_3D, m_noiseTex);
 
     glUniform1i(m_fpColorTex, 0);
     glUniform1i(m_fpDepthTex, 1);
+    glUniform1i(m_fpNoiseTex, 2);
     glUniform3f(m_fpEye,  ex, ey, ez);
     glUniformMatrix3fv(m_fpCam, 1, GL_FALSE, cam);
     glUniform1f(m_fpFov,  fov);
@@ -467,4 +561,9 @@ void RootRenderer::render(float azimuth, float elevation, float radius,
 
     glUseProgram(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    if (profilePasses) {
+        glFinish();
+        lastFogMs = std::chrono::duration<double, std::milli>(passClock() - tp1).count();
+    }
 }

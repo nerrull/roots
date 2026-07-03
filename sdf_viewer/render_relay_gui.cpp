@@ -319,11 +319,13 @@ struct Params {
     float orbitSpeed = 1.0f;
 
     // internal render resolution as a fraction of the real framebuffer.
-    // Confirmed with GPU-synchronized profiling (glFinish, not just wall-clock
-    // around async GL submission -- see git log) that render cost is strongly
-    // resolution-bound: ~78ms/frame at 0.65 scale on a 4K display, ~14ms/frame
-    // at 0.25. 0.35 is a compromise default; raise it via the Performance
-    // panel if your GPU has headroom.
+    // History: 0.35 was chosen when the fog pass computed a 4-octave
+    // procedural fBm 16x per pixel (~96% of frame time; ~78ms/frame at 0.65
+    // scale). After moving that noise into a baked 3D texture, replacing the
+    // capsule sphere-trace with an analytic intersection, and caching the
+    // CPU-side geometry rebuilds, per-pass GPU profiling measures ~8.6ms/frame
+    // at FULL scale on a 5120x2880 framebuffer (was ~92ms) -- so 1.0 is now
+    // comfortably interactive and this default is just a headroom choice.
     float renderScale = 0.35f;
 };
 
@@ -399,6 +401,7 @@ int main(int argc, char** argv) {
     float renderScale = cliRenderScale > 0.0f ? cliRenderScale : 0.35f;
     int rw = std::max(1, (int) (fbW * renderScale)), rh = std::max(1, (int) (fbH * renderScale));
     RootRenderer renderer(rw, rh);
+    renderer.profilePasses = profileMode;
     renderer.mat.baseColor[0] = 0.55f; renderer.mat.baseColor[1] = 0.40f; renderer.mat.baseColor[2] = 0.26f;
     renderer.mat.ambient = 0.18f;
     renderer.mat.diffuse = 0.75f;
@@ -451,6 +454,7 @@ int main(int argc, char** argv) {
                               // separate so switching between the two doesn't
                               // jump or change speed, but both keep spinning.
     bool growing = profileMode;
+    int profileIdleFrames = 0;   // idle-orbit frames measured after growth in profileMode
     std::string status = "Press \"Regrow\" to start.";
 
     Params params, pending = params;
@@ -563,7 +567,7 @@ int main(int argc, char** argv) {
 
         if (ImGui::CollapsingHeader("Performance")) {
             ImGui::SliderFloat("Render scale", &pending.renderScale, 0.25f, 1.0f, "%.2f");
-            ImGui::TextDisabled("Internal render resolution vs. the real window/\nscreen size. Profiling showed frame cost tracks\npixel count almost exactly, not scene complexity --\nlower this first if it's heavy. Applies live.");
+            ImGui::TextDisabled("Internal render resolution vs. the real window/\nscreen size. Applies live. After the fog/capsule\nshader optimizations, 1.0 runs at ~8ms/frame on\na 5K framebuffer -- raise this for sharpness.");
         }
 
         if (ImGui::CollapsingHeader("Camera")) {
@@ -621,6 +625,59 @@ int main(int argc, char** argv) {
     };
 
     float lightDir[3] = {0.5f, 0.8f, 0.35f};
+
+    // --- cached segment geometry -----------------------------------------
+    // The frozen hops' contribution to the render buffers only changes when a
+    // hop completes (or on Regrow), but it was being rebuilt -- toYup over
+    // every node of every frozen hop -- on every growth step AND on every
+    // idle-orbit frame, then re-uploaded to the GPU each idle frame too
+    // (~1.3ms/frame of pure waste at ~82k segments). Cache the frozen prefix;
+    // growth steps just truncate back to it and append the live system.
+    std::vector<Vector3d> segNodes;
+    std::vector<Vector2i> segSegs;
+    std::vector<double>   segRads;
+    size_t segPrefixHops  = (size_t) -1;   // frozen.size() the prefix was built from
+    size_t segPrefixNodes = 0, segPrefixSegs = 0;
+    auto refreshFrozenPrefix = [&]() {
+        if (segPrefixHops == frozen.size()) return false;
+        segNodes.clear(); segSegs.clear(); segRads.clear();
+        int base_idx = 0;
+        for (const auto& fh : frozen) {
+            for (const auto& n : fh.nodes) segNodes.push_back(toYup(n));
+            for (const auto& s : fh.segs) segSegs.push_back(Vector2i(s.x + base_idx, s.y + base_idx));
+            for (double r : fh.radii) segRads.push_back(r);
+            base_idx += (int) fh.nodes.size();
+        }
+        segPrefixHops  = frozen.size();
+        segPrefixNodes = segNodes.size();
+        segPrefixSegs  = segSegs.size();
+        return true;
+    };
+
+    // --- cached face mesh vertex data -------------------------------------
+    // Was rebuilt (every revealed mask x every face triangle, CPU-side) and
+    // re-uploaded every growth step and every idle frame; it only actually
+    // changes when a mask is revealed or a live-editable face param moves.
+    size_t faceCacheCount = (size_t) -1;
+    float  faceCacheLightDist = -1.0f;
+    float  faceCacheColor[3] = {-1.0f, -1.0f, -1.0f};
+    auto refreshFaceData = [&]() {
+        float ld = std::max(3.0f, params.viewCylLen * pending.faceLightDist);
+        if (faceCacheCount == revealed.size() && faceCacheLightDist == ld
+            && faceCacheColor[0] == pending.maskColor[0]
+            && faceCacheColor[1] == pending.maskColor[1]
+            && faceCacheColor[2] == pending.maskColor[2]) return;
+        faceGL.upload(buildFaceVertexData(revealed, fv, ftris, 0.85f, ld, pending.maskColor));
+        faceCacheCount = revealed.size();
+        faceCacheLightDist = ld;
+        faceCacheColor[0] = pending.maskColor[0];
+        faceCacheColor[1] = pending.maskColor[1];
+        faceCacheColor[2] = pending.maskColor[2];
+    };
+
+    // idle-orbit camera fit, recomputed only when the geometry changes
+    float idleCenter[3] = {0, 0, 0};
+    float idleExtent = 10.0f;
 
     // live edits (material, lighting, fog, shading mode) apply without a full
     // regrow -- everything here is either a plain RootRenderer member or fed
@@ -736,6 +793,10 @@ int main(int argc, char** argv) {
 
                 auto rs = std::make_shared<RootSystem>();
                 rs->readParameters(param, "plant", true, false);
+                // deterministic geometry in profile mode -- before/after
+                // benchmark runs must render the exact same root mass for
+                // per-pass timings to be comparable.
+                if (profileMode) rs->setSeed(42u + (unsigned) hop);
                 rs->initialize(false);
                 auto seedNodes = rs->getNodes();
                 Vector3d localSeed = seedNodes.empty() ? Vector3d(0, 0, 0) : seedNodes[0];
@@ -830,25 +891,19 @@ int main(int argc, char** argv) {
                     auto _t0 = std::chrono::steady_clock::now();
                     SegmentAnalyser ana(*rs);
                     auto radii = ana.getParameter("radius");
-                    std::vector<Vector3d> nodesYup;
-                    std::vector<Vector2i> segsAll;
-                    std::vector<double> radAll;
-                    int base_idx = 0;
-                    for (const auto& fh : frozen) {
-                        for (const auto& n : fh.nodes) nodesYup.push_back(toYup(n));
-                        for (const auto& s : fh.segs) segsAll.push_back(Vector2i(s.x + base_idx, s.y + base_idx));
-                        for (double r : fh.radii) radAll.push_back(r);
-                        base_idx += (int) fh.nodes.size();
-                    }
-                    for (const auto& n : ana.nodes) nodesYup.push_back(toYup(n.plus(offset)));
-                    for (const auto& s : ana.segments) segsAll.push_back(Vector2i(s.x + base_idx, s.y + base_idx));
-                    for (double r : radii) radAll.push_back(r);
+                    refreshFrozenPrefix();
+                    segNodes.resize(segPrefixNodes);
+                    segSegs.resize(segPrefixSegs);
+                    segRads.resize(segPrefixSegs);
+                    int base_idx = (int) segPrefixNodes;
+                    for (const auto& n : ana.nodes) segNodes.push_back(toYup(n.plus(offset)));
+                    for (const auto& s : ana.segments) segSegs.push_back(Vector2i(s.x + base_idx, s.y + base_idx));
+                    for (double r : radii) segRads.push_back(r);
                     auto _t1 = std::chrono::steady_clock::now();
-                    renderer.uploadSegments(nodesYup, segsAll, radAll);
+                    renderer.uploadSegments(segNodes, segSegs, segRads);
                     auto _t2 = std::chrono::steady_clock::now();
 
-                    auto faceData = buildFaceVertexData(revealed, fv, ftris, 0.85f, std::max(3.0f, params.viewCylLen * pending.faceLightDist), pending.maskColor);
-                    faceGL.upload(faceData);
+                    refreshFaceData();
                     auto _t3 = std::chrono::steady_clock::now();
 
                     std::vector<Vector3d> fitNodes;
@@ -875,10 +930,14 @@ int main(int argc, char** argv) {
 
                     if (frame % 10 == 0) {
                         auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
-                        std::cout << "PROFILE frame=" << frame << " segs=" << segsAll.size()
+                        std::cout << "PROFILE frame=" << frame << " segs=" << segSegs.size()
                                   << " rebuild=" << ms(_t0, _t1) << "ms upload=" << ms(_t1, _t2)
                                   << "ms faceBuild+upload=" << ms(_t2, _t3) << "ms render=" << ms(_t3, _t4)
-                                  << "ms present=" << ms(_t4, _t5) << "ms TOTAL=" << ms(_t0, _t5) << "ms\n";
+                                  << "ms present=" << ms(_t4, _t5) << "ms TOTAL=" << ms(_t0, _t5) << "ms";
+                        if (renderer.profilePasses)
+                            std::cout << " geomPass=" << renderer.lastGeomMs
+                                      << "ms fogPass=" << renderer.lastFogMs << "ms";
+                        std::cout << "\n";
                     }
                     frame++;
                 }
@@ -897,24 +956,33 @@ int main(int argc, char** argv) {
             growing = false;
             status = quit ? "Stopped." : "Done -- " + g_species[params.speciesIdx].first
                      + ", " + std::to_string((int) revealed.size()) + "/" + std::to_string(params.N) + " masks.";
-            if (profileMode) { std::cout << "PROFILE: growth complete, exiting\n"; break; }
+            if (profileMode) std::cout << "PROFILE: growth complete, measuring idle orbit\n";
             continue;   // re-enter loop in idle-orbit mode
         }
 
         // ---- idle: orbit the finished result ----
-        std::vector<Vector3d> nodesYup;
-        std::vector<Vector2i> segsAll;
-        std::vector<double> radAll;
-        int base_idx = 0;
-        for (const auto& fh : frozen) {
-            for (const auto& n : fh.nodes) nodesYup.push_back(toYup(n));
-            for (const auto& s : fh.segs) segsAll.push_back(Vector2i(s.x + base_idx, s.y + base_idx));
-            for (double r : fh.radii) radAll.push_back(r);
-            base_idx += (int) fh.nodes.size();
+        auto _i0 = std::chrono::steady_clock::now();
+        // geometry is static here; rebuild + re-upload only when a growth
+        // session actually changed it (or the buffers still carry a live-
+        // growth tail past the frozen prefix from the last growth frame)
+        bool geomChanged = refreshFrozenPrefix() || segNodes.size() != segPrefixNodes;
+        if (geomChanged) {
+            segNodes.resize(segPrefixNodes);
+            segSegs.resize(segPrefixSegs);
+            segRads.resize(segPrefixSegs);
+            renderer.uploadSegments(segNodes, segSegs, segRads);
+            Vector3d lo = segNodes.empty() ? Vector3d(0, 0, 0) : segNodes[0], hi = lo;
+            for (const auto& n : segNodes) {
+                lo = Vector3d(std::min(lo.x, n.x), std::min(lo.y, n.y), std::min(lo.z, n.z));
+                hi = Vector3d(std::max(hi.x, n.x), std::max(hi.y, n.y), std::max(hi.z, n.z));
+            }
+            idleCenter[0] = (float) (lo.x + hi.x) * 0.5f;
+            idleCenter[1] = (float) (lo.y + hi.y) * 0.5f;
+            idleCenter[2] = (float) (lo.z + hi.z) * 0.5f;
+            idleExtent = segNodes.empty() ? 10.0f
+                       : (float) std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
         }
-        renderer.uploadSegments(nodesYup, segsAll, radAll);
-        auto faceData = buildFaceVertexData(revealed, fv, ftris, 0.85f, std::max(3.0f, params.viewCylLen * pending.faceLightDist), pending.maskColor);
-        faceGL.upload(faceData);
+        refreshFaceData();
 
         float target3[3];
         float radius;
@@ -932,21 +1000,45 @@ int main(int argc, char** argv) {
             azimuth = 0.8f + 0.15f * pending.orbitSpeed * (float) focusFrame / 60.0f;
             focusFrame++;
         } else {
-            Vector3d lo = nodesYup.empty() ? Vector3d(0, 0, 0) : nodesYup[0], hi = lo;
-            for (const auto& n : nodesYup) {
-                lo = Vector3d(std::min(lo.x, n.x), std::min(lo.y, n.y), std::min(lo.z, n.z));
-                hi = Vector3d(std::max(hi.x, n.x), std::max(hi.y, n.y), std::max(hi.z, n.z));
-            }
-            target3[0] = (float) (lo.x + hi.x) * 0.5f; target3[1] = (float) (lo.y + hi.y) * 0.5f; target3[2] = (float) (lo.z + hi.z) * 0.5f;
-            float extent = nodesYup.empty() ? 10.0f : (float) std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
-            radius = extent * 0.75f + 12.0f;
+            target3[0] = idleCenter[0]; target3[1] = idleCenter[1]; target3[2] = idleCenter[2];
+            radius = idleExtent * 0.75f + 12.0f;
             azimuth = 0.8f + 0.15f * pending.orbitSpeed * (float) orbitFrame / 60.0f;
             orbitFrame++;
         }
 
+        auto _i1 = std::chrono::steady_clock::now();
         renderer.render(azimuth, 0.15f, radius, target3, 0.5f, lightDir,
                         [&](const float* vp, const float* eye) { faceGL.draw(vp, eye, lightDir); });
+        auto _i2 = std::chrono::steady_clock::now();
         present();
+        auto _i3 = std::chrono::steady_clock::now();
+        if (profileMode) {
+            // visual regression check: dump the composited frame (fog FBO
+            // color texture) to a PPM once the idle orbit has settled, so
+            // shader optimizations can be A/B-diffed on identical seeded
+            // geometry without OS screenshot permissions.
+            if (profileIdleFrames == 30) {
+                if (const char* dumpPath = std::getenv("MASK_RELAY_DUMP")) {
+                    int dw = renderer.width(), dh = renderer.height();
+                    std::vector<unsigned char> px((size_t) dw * dh * 4);
+                    glBindTexture(GL_TEXTURE_2D, renderer.colorTex());
+                    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+                    glBindTexture(GL_TEXTURE_2D, 0);
+                    std::ofstream out(dumpPath, std::ios::binary);
+                    out << "P6\n" << dw << " " << dh << "\n255\n";
+                    for (int y = 0; y < dh; y++)   // FBO is top-down already for this pipeline
+                        for (int x = 0; x < dw; x++)
+                            out.write((const char*) &px[((size_t) y * dw + x) * 4], 3);
+                    std::cout << "PROFILE: dumped frame to " << dumpPath << "\n";
+                }
+            }
+            auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+            std::cout << "PROFILE-IDLE frame=" << profileIdleFrames << " segs=" << segSegs.size()
+                      << " rebuild+upload=" << ms(_i0, _i1) << "ms render=" << ms(_i1, _i2)
+                      << "ms present=" << ms(_i2, _i3) << "ms TOTAL=" << ms(_i0, _i3) << "ms"
+                      << " geomPass=" << renderer.lastGeomMs << "ms fogPass=" << renderer.lastFogMs << "ms\n";
+            if (++profileIdleFrames >= 60) { std::cout << "PROFILE: idle orbit done, exiting\n"; break; }
+        }
         frame++;
     }
 

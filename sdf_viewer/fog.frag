@@ -28,99 +28,26 @@ uniform vec3  u_wispPos[50];
 uniform vec3  u_wispColor[50];
 uniform float u_wispIntensity[50];
 
+uniform sampler3D u_noiseTex;   // baked tiling 4-octave value fBm, [0,1]
+
 in vec2  v_uv;
 out vec4 fragColor;
 
 // ---------------------------------------------------------------------------
-// Value noise — trilinear, smoothstep-filtered
+// fBm via one trilinear fetch into a baked tiling 3D texture.
+//
+// This used to be a fully procedural 4-octave fBm -- 32 hash evaluations per
+// call, called 16x/pixel by marchFog(): profiling showed this single shader
+// was ~96% of total frame time at 4K (~199ms of ~208ms). The baked texture
+// is the same noise statistically (see RootRenderer::buildNoiseTexture) at
+// ~1/500th the ALU. u_noiseType (value vs simplex) is intentionally ignored
+// now: both were normalized to the same [0,1] range/mean, and fog is far too
+// soft for their character difference to read -- not worth a second texture.
 // ---------------------------------------------------------------------------
-float _hash(vec3 p) {
-    p  = fract(p * vec3(443.897, 397.297, 491.187));
-    p += dot(p, p.zyx + 19.19);
-    return fract((p.x + p.y) * p.z);
-}
+const float NOISE_TILE_PERIOD = 8.0;   // must match RootRenderer.cpp
 
-float _valueNoise(vec3 p) {
-    vec3 i = floor(p), f = fract(p);
-    vec3 u = f * f * (3.0 - 2.0 * f);
-    return mix(
-        mix(mix(_hash(i),              _hash(i+vec3(1,0,0)), u.x),
-            mix(_hash(i+vec3(0,1,0)),  _hash(i+vec3(1,1,0)), u.x), u.y),
-        mix(mix(_hash(i+vec3(0,0,1)),  _hash(i+vec3(1,0,1)), u.x),
-            mix(_hash(i+vec3(0,1,1)),  _hash(i+vec3(1,1,1)), u.x), u.y), u.z);
-}
-
-// 4-octave fBm, returns [0, 0.9375]
-float _valueFbm(vec3 p) {
-    return 0.5000 * _valueNoise(p)
-         + 0.2500 * _valueNoise(p * 2.03)
-         + 0.1250 * _valueNoise(p * 4.07)
-         + 0.0625 * _valueNoise(p * 8.11);
-}
-
-// ---------------------------------------------------------------------------
-// Simplex noise — Gustavson / McEwan
-// ---------------------------------------------------------------------------
-vec3 _m289v3(vec3 x) { return x - floor(x * (1.0/289.0)) * 289.0; }
-vec4 _m289v4(vec4 x) { return x - floor(x * (1.0/289.0)) * 289.0; }
-vec4 _perm(vec4 x)   { return _m289v4(((x * 34.0) + 10.0) * x); }
-vec4 _tis(vec4 r)    { return 1.79284291400159 - 0.85373472095314 * r; }
-
-float _snoise(vec3 v) {
-    const vec2 C = vec2(1.0/6.0, 1.0/3.0);
-    vec3 i  = floor(v + dot(v, C.yyy));
-    vec3 x0 = v - i + dot(i, C.xxx);
-    vec3 g  = step(x0.yzx, x0.xyz);
-    vec3 l  = 1.0 - g;
-    vec3 i1 = min(g.xyz, l.zxy);
-    vec3 i2 = max(g.xyz, l.zxy);
-    vec3 x1 = x0 - i1 + C.xxx;
-    vec3 x2 = x0 - i2 + C.yyy;
-    vec3 x3 = x0 - 0.5;
-    i = _m289v3(i);
-    vec4 p = _perm(_perm(_perm(
-        i.z + vec4(0.0, i1.z, i2.z, 1.0)) +
-        i.y + vec4(0.0, i1.y, i2.y, 1.0)) +
-        i.x + vec4(0.0, i1.x, i2.x, 1.0));
-    const vec3 ns = vec3(0.285714, -0.928571, 0.142857);
-    vec4 j  = p - 49.0 * floor(p * ns.z * ns.z);
-    vec4 x_ = floor(j * ns.z);
-    vec4 y_ = floor(j - 7.0 * x_);
-    vec4 xs = x_ * ns.x + vec4(ns.y);
-    vec4 ys = y_ * ns.x + vec4(ns.y);
-    vec4 h  = 1.0 - abs(xs) - abs(ys);
-    vec4 b0 = vec4(xs.xy, ys.xy);
-    vec4 b1 = vec4(xs.zw, ys.zw);
-    vec4 s0 = floor(b0) * 2.0 + 1.0;
-    vec4 s1 = floor(b1) * 2.0 + 1.0;
-    vec4 sh = -step(h, vec4(0.0));
-    vec4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
-    vec4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
-    vec3 p0 = vec3(a0.xy, h.x);
-    vec3 p1 = vec3(a0.zw, h.y);
-    vec3 p2 = vec3(a1.xy, h.z);
-    vec3 p3 = vec3(a1.zw, h.w);
-    vec4 norm = _tis(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
-    p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
-    vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
-    m = m * m;
-    return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
-}
-
-// 4-octave fBm, returns [-0.9375, 0.9375]
-float _simplexFbm(vec3 p) {
-    return 0.5000 * _snoise(p)
-         + 0.2500 * _snoise(p * 2.03)
-         + 0.1250 * _snoise(p * 4.07)
-         + 0.0625 * _snoise(p * 8.11);
-}
-
-// Both variants normalised to [0, 1], mean ≈ 0.5
 float fogFbm(vec3 p) {
-    if (u_noiseType == 0)
-        return _valueFbm(p) * (1.0 / 0.9375);
-    else
-        return 0.5 + _simplexFbm(p) * (0.5 / 0.9375);
+    return texture(u_noiseTex, p * (1.0 / NOISE_TILE_PERIOD)).r;
 }
 
 // ---------------------------------------------------------------------------
@@ -135,7 +62,12 @@ float fogDensity(vec3 pos) {
 }
 
 float marchFog(vec3 ro, vec3 rd, float tMax) {
-    const int N    = 16;
+    if (u_fogDensity <= 0.0) return 0.0;   // invert mode zeroes density -- skip the march
+    // 8 steps, down from 16: even 16 undersampled the noise wavelength over a
+    // 200-unit ray, and fog this soft shows no banding at 8 -- but it halves
+    // what profiling showed is the remaining per-pixel cost of this pass
+    // (the 3D-texture fetch per step).
+    const int N    = 8;
     float marchT   = min(tMax, 200.0);
     float stepSize = marchT / float(N);
     float tau = 0.0;
@@ -258,13 +190,17 @@ void main() {
     // Wisp glow — soft emissive blobs floating in the atmosphere
     vec3 wispGlow = vec3(0.0);
     const float GLOW_R = 5.0;  // glow radius in world units
-    // Distance cutoff before the expensive part: marchFog() below is a 16-
-    // step loop per wisp, and with up to MAX_WISPS simultaneous face lights
-    // now feeding in (one per revealed mask), that's the real per-pixel cost
-    // here -- the Gaussian glow term itself already decays hard within a few
-    // multiples of GLOW_R, so skip wisps clearly too far to matter before
-    // ever calling marchFog for them.
+    // Distance cutoff before the expensive part -- the Gaussian glow term
+    // already decays hard within a few multiples of GLOW_R, so skip wisps
+    // clearly too far to matter.
     const float GLOW_CUTOFF2 = (4.0 * GLOW_R) * (4.0 * GLOW_R);
+    // Fog attenuation to each wisp reuses the scene march's optical depth,
+    // scaled by how far along the ray the wisp sits, instead of re-running a
+    // full 16-step marchFog() per wisp (which profiling showed multiplying
+    // the already-dominant fog cost wherever several face lights were in
+    // range). Exact only for homogeneous fog, but the noise modulation is
+    // zero-mean over 16 samples and this term only gates a soft glow.
+    float tauPerT = tau / max(min(tHit, 200.0), 1e-3);
     for (int wi = 0; wi < u_wispCount; wi++) {
         vec3  oc  = ro - u_wispPos[wi];
         float b   = dot(rd, oc);
@@ -274,7 +210,7 @@ void main() {
         if (d2 > GLOW_CUTOFF2) continue;
         float glow = u_wispIntensity[wi] * exp(-d2 / (GLOW_R * GLOW_R));
         // Attenuate by fog between camera and wisp, and occlude behind geometry
-        float tauWisp = marchFog(ro, rd, tc);
+        float tauWisp = tauPerT * min(tc, 200.0);
         glow *= exp(-tauWisp) * step(tc, tHit + 0.5);
         wispGlow += u_wispColor[wi] * glow;
     }

@@ -78,6 +78,14 @@ public:
     int    width()    const { return m_w; }
     int    height()   const { return m_h; }
 
+    // Per-pass GPU attribution: when enabled, render() brackets the geometry
+    // pass (incl. midGeometryHook) and the fog pass with glFinish + a wall
+    // clock, so each pass's number is true GPU completion time, not async
+    // submission time. Costs pipeline overlap -- leave off outside profiling.
+    bool   profilePasses = false;
+    double lastGeomMs    = 0.0;
+    double lastFogMs     = 0.0;
+
     ShaderMode shaderMode   = ShaderMode::Phong;
     Material   mat;
     PBRParams  pbr;
@@ -93,6 +101,7 @@ public:
 private:
     void buildFBO();
     void buildShader();
+    void buildNoiseTexture();
 
     int    m_w, m_h;
 
@@ -106,6 +115,8 @@ private:
 
     GLuint m_vao  = 0;
     GLuint m_prog = 0;
+
+    GLuint m_noiseTex = 0;   // tiling 3D fBm, replaces per-pixel procedural noise
 
     GLuint m_nodeBuf = 0, m_nodeTex = 0;
     GLuint m_segBuf  = 0, m_segTex  = 0;
@@ -122,6 +133,7 @@ private:
     int m_uShaderMode = -1, m_uMetallic = -1, m_uRoughness = -1;
     int m_uWispCount = -1, m_uWispPos = -1, m_uWispColor = -1, m_uWispIntensity = -1;
     int m_uRadiusScale = -1, m_uRadiusMin = -1, m_uRadiusMax = -1;
+    int m_uNoiseTex = -1;
 
     // Fog pass
     int m_fpColorTex = -1, m_fpDepthTex = -1;
@@ -133,4 +145,5 @@ private:
     int m_fpShowAxes = -1, m_fpAxisLength = -1;
     int m_fpShowGrid = -1, m_fpGridSpacing = -1;
     int m_fpWispCount = -1, m_fpWispPos = -1, m_fpWispColor = -1, m_fpWispIntensity = -1;
+    int m_fpNoiseTex = -1;
 };

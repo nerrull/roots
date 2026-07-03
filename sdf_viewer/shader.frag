@@ -33,6 +33,8 @@ uniform vec3  u_baseColor2;        // second color, blended in by noise
 uniform float u_colorNoiseScale;   // spatial frequency of the mottling
 uniform float u_colorNoiseStrength;
 
+uniform sampler3D u_noiseTex;   // baked tiling fBm (shared with fog pass)
+
 flat in int  v_segIdx;
 in vec2      v_ndc;
 
@@ -40,31 +42,44 @@ out vec4 fragColor;
 
 const float PI = 3.14159265359;
 
-// cheap 3-octave value noise for root-surface color mottling -- breaks the
-// flat single-color "3D pipes screensaver" look without needing a texture.
-float _rhash(vec3 p) {
-    p = fract(p * vec3(443.897, 397.297, 491.187));
-    p += dot(p, p.zyx + 19.19);
-    return fract((p.x + p.y) * p.z);
-}
-float _rnoise(vec3 p) {
-    vec3 i = floor(p), f = fract(p);
-    vec3 u = f * f * (3.0 - 2.0 * f);
-    return mix(
-        mix(mix(_rhash(i),             _rhash(i+vec3(1,0,0)), u.x),
-            mix(_rhash(i+vec3(0,1,0)), _rhash(i+vec3(1,1,0)), u.x), u.y),
-        mix(mix(_rhash(i+vec3(0,0,1)), _rhash(i+vec3(1,0,1)), u.x),
-            mix(_rhash(i+vec3(0,1,1)), _rhash(i+vec3(1,1,1)), u.x), u.y), u.z);
-}
+// root-surface color mottling: one fetch into the baked tiling fBm texture
+// (see RootRenderer::buildNoiseTexture) instead of the old 3-octave
+// procedural value noise (24 hash evaluations per shaded fragment -- and
+// with gl_FragDepth writes disabling early-z, every overlapping capsule's
+// fragments pay full shading, so per-fragment ALU here is multiplied by
+// overdraw). Same statistics, slightly different octave weights -- reads
+// identically as organic mottling.
+const float NOISE_TILE_PERIOD = 8.0;   // must match RootRenderer.cpp
+
 float _rfbm(vec3 p) {
-    return 0.55 * _rnoise(p) + 0.30 * _rnoise(p * 2.11) + 0.15 * _rnoise(p * 4.37);
+    return texture(u_noiseTex, p * (1.0 / NOISE_TILE_PERIOD)).r;
 }
 
-float capsuleSDF(vec3 p, vec3 a, vec3 b, float r) {
-    vec3  ab = b - a;
-    vec3  ap = p - a;
-    float t  = clamp(dot(ap, ab) / dot(ab, ab), 0.0, 1.0);
-    return length(ap - t * ab) - r;
+// Analytic ray-capsule intersection (Inigo Quilez) -- returns first positive
+// t, or -1. Replaces a 20-step sphere-trace loop: the march cost 20 SDF
+// evaluations per fragment per instance (multiplied by heavy overdraw in a
+// dense root mass), converged only to within HIT_EPS, and could even miss
+// thin capsules at glancing angles. One quadratic solve is exact and ~10x
+// less ALU.
+float rayCapsule(vec3 ro, vec3 rd, vec3 a, vec3 b, float r) {
+    vec3  ba   = b - a, oa = ro - a;
+    float baba = dot(ba, ba);
+    float bard = dot(ba, rd);
+    float baoa = dot(ba, oa);
+    float A    = baba - bard * bard;
+    float B    = baba * dot(rd, oa) - baoa * bard;
+    float C    = baba * dot(oa, oa) - baoa * baoa - r * r * baba;
+    float h    = B * B - A * C;
+    if (h < 0.0) return -1.0;
+    float t = (-B - sqrt(h)) / max(A, 1e-8);
+    float y = baoa + t * bard;
+    if (y > 0.0 && y < baba && t > 0.0) return t;     // cylinder body
+    vec3  oc = y <= 0.0 ? oa : ro - b;                 // pick nearest cap
+    float B2 = dot(rd, oc), C2 = dot(oc, oc) - r * r;
+    float h2 = B2 * B2 - C2;
+    if (h2 < 0.0) return -1.0;
+    t = -B2 - sqrt(h2);
+    return t > 0.0 ? t : -1.0;
 }
 
 vec3 capsuleNormal(vec3 p, vec3 a, vec3 b) {
@@ -122,25 +137,9 @@ void main() {
     if (u_radiusMin > 0.0) r = max(r, u_radiusMin);
     if (u_radiusMax > 0.0) r = min(r, u_radiusMax);
 
-    const int   MAX_STEPS = 20;   // capsule SDF converges fast; 32 was a safety
-                                  // ceiling rarely actually needed -- real cost
-                                  // saving given this runs per covered pixel
-                                  // per instance, and overdraw from thousands
-                                  // of overlapping instanced quads is the
-                                  // dominant per-frame cost in a dense mass.
-    const float HIT_EPS   = 0.001;
-    const float MAX_DIST  = 200.0;
-
-    float t   = 0.0;
-    float hit = -1.0;
-    for (int i = 0; i < MAX_STEPS; i++) {
-        float d = capsuleSDF(ro + rd * t, a, b, r);
-        if (d < HIT_EPS) { hit = t; break; }
-        t += d;
-        if (t > MAX_DIST) break;
-    }
-
-    if (hit < 0.0) discard;
+    const float MAX_DIST = 200.0;
+    float hit = rayCapsule(ro, rd, a, b, r);
+    if (hit < 0.0 || hit > MAX_DIST) discard;
 
     vec3 p = ro + rd * hit;
     vec3 n = capsuleNormal(p, a, b);
