@@ -177,15 +177,24 @@ private:
 // caller doesn't have to. lateralGeometry defaults to mainGeometry if not
 // given -- pass a looser (or absent) one to let offshoots roam beyond
 // whatever hard bound the main root is held to (e.g. a travel corridor).
+// mainN/lateralN: dicing trial counts, independent per order -- meaningful
+// now that OrderSplitTropism::getHeading() delegates the whole call (each
+// sub-tropism's own n actually gets used, unlike before that fix). A higher
+// mainN makes the main root's steering more reliably point at the target
+// each step (more candidate headings tried, more likely one aligns well),
+// which matters more than it might seem: at high attraction weight the
+// dicing objective is almost purely "does this candidate point at the
+// target", so trying more candidates directly improves how well it's
+// followed, not just how much it's preferred.
 inline std::shared_ptr<Tropism> combinedAttractionSplit(
     std::shared_ptr<Organism> plant, std::shared_ptr<Tropism> base, std::vector<Attractor> attractors,
-    double n, double sigma, double mainWeight, double lateralWeight,
+    double mainN, double lateralN, double sigma, double mainWeight, double lateralWeight,
     std::shared_ptr<SignedDistanceFunction> mainGeometry = nullptr,
     std::shared_ptr<SignedDistanceFunction> lateralGeometry = nullptr) {
     if (!lateralGeometry) lateralGeometry = mainGeometry;
-    auto mainT = combinedAttraction(plant, base, attractors, n, sigma, mainWeight, mainGeometry);
-    auto latT = combinedAttraction(plant, base, attractors, n, sigma, lateralWeight, lateralGeometry);
-    return std::make_shared<OrderSplitTropism>(plant, n, sigma, mainT, latT);
+    auto mainT = combinedAttraction(plant, base, attractors, mainN, sigma, mainWeight, mainGeometry);
+    auto latT = combinedAttraction(plant, base, attractors, lateralN, sigma, lateralWeight, lateralGeometry);
+    return std::make_shared<OrderSplitTropism>(plant, mainN, sigma, mainT, latT);
 }
 
 }  // namespace maskcav

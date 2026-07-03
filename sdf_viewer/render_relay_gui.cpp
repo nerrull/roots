@@ -230,7 +230,21 @@ struct Params {
     // longer and flares sharply near the base (spike-ish).
     float taperPower = 1.0f;
     float dwellDays  = 18.0f;
-    float weight        = 0.55f;   // main-root travel attraction (lower = more organic wander)
+    // Default pushed high: at low weight, gravity's residual pull competes
+    // with attraction on every dicing trial, and can drag the root off target
+    // over a long unconstrained stretch (that's the actual "way off course"
+    // mechanism, not just bad luck). At weight ~1.0 the dicing objective is
+    // *purely* alignment with the target -- gravity has no vote, so every
+    // trial is scored on how well it points at the mask. Organic-looking
+    // wander is still available via the "Angular jitter" (sigma) slider,
+    // which adds randomness independent of this weight, so reliability and
+    // some looseness aren't mutually exclusive the way they'd be if this were
+    // the only lever.
+    float weight        = 0.9f;    // main-root travel attraction
+    float mainTravelTrials = 14.0f;   // dicing trials (n) for the main root during
+                                      // travel -- higher = more candidate headings
+                                      // tried per step, more reliably finds one that
+                                      // actually points at the target
     float lateralWeight = 0.80f;   // offshoot/lateral travel attraction -- usually kept higher
                                     // so laterals still cling for wrapping density
     float dwellWeight        = 0.92f;   // main-root dwell attraction
@@ -242,13 +256,17 @@ struct Params {
     float radiusMax  = 0.35f;
     float maxHopDays = 60.0f;
     float reachMult  = 1.6f;
-    // hard geometric bound during travel -- a cylinder around the direct line
-    // from hop-start to hop-target that growth physically cannot leave,
-    // regardless of how attraction/gravity dicing happens to go. Prevents
-    // roots wandering far off course even at high attraction weight (that's
-    // a *soft* nudge, not a guarantee). Tight = more direct paths, loose =
-    // more room to wander while still bounded.
-    float travelCorridorRadius = 12.0f;
+    // Hard geometric bound during travel -- a cylinder around the direct line
+    // from hop-start to hop-target, as a LAST-RESORT backstop against a truly
+    // runaway root, not the primary steering mechanism (that's attraction
+    // weight/trials above). Important: CPlantBox's confinement "repair loop"
+    // -- what actually happens when a candidate heading would violate this --
+    // searches for a valid direction with a PURELY RANDOM beta, ignoring
+    // attraction entirely while repairing. A tight corridor the root presses
+    // against often means it spends much of its budget randomly bouncing off
+    // the wall instead of steering toward the target -- worse than no
+    // corridor at all. Keep this loose; let weight/trials do the real work.
+    float travelCorridorRadius = 25.0f;
     bool invertMode  = false;   // black bg, white roots, overlaps XOR-toggle
 
     // --- lighting & material -------------------------------------------
@@ -331,6 +349,7 @@ int main(int argc, char** argv) {
     bool profileHidden = (argc > 6) ? (std::atoi(argv[6]) != 0) : true;  // profileMode window visibility (isolate swap-cost variable)
     float cliRenderScale = (argc > 7) ? std::atof(argv[7]) : -1.0f;      // override Params default, for isolating renderScale's effect
     int cliN = (argc > 8) ? std::atoi(argv[8]) : -1;                     // override Params.N, for stress-testing mask count
+    float cliCorridorRadius = (argc > 9) ? std::atof(argv[9]) : -1.0f;   // override Params.travelCorridorRadius, for isolating its effect
 
     if (!glfwInit()) { std::cerr << "glfwInit failed\n"; return 1; }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -437,6 +456,7 @@ int main(int argc, char** argv) {
     Params params, pending = params;
     if (cliRenderScale > 0.0f) { params.renderScale = cliRenderScale; pending.renderScale = cliRenderScale; }
     if (cliN > 0) { params.N = cliN; pending.N = cliN; }
+    if (cliCorridorRadius > 0.0f) { params.travelCorridorRadius = cliCorridorRadius; pending.travelCorridorRadius = cliCorridorRadius; }
 
     auto blit = [&]() {
         int w2, h2; glfwGetFramebufferSize(window, &w2, &h2);
@@ -482,7 +502,9 @@ int main(int argc, char** argv) {
         ImGui::TextDisabled("Distance step 0 = auto (spread N masks evenly\nover the cone). Set explicitly to make mask\ncount and spacing independent.");
         ImGui::Separator();
         ImGui::SliderFloat("Dwell days", &pending.dwellDays, 2.0f, 40.0f, "%.1f");
-        ImGui::SliderFloat("Attraction: main root", &pending.weight, 0.0f, 0.9f, "%.2f");
+        ImGui::SliderFloat("Attraction: main root", &pending.weight, 0.0f, 0.99f, "%.2f");
+        ImGui::SliderFloat("Main root trials (n)", &pending.mainTravelTrials, 4.0f, 30.0f, "%.0f");
+        ImGui::TextDisabled("More trials = more candidate headings tried\nper step -- at high attraction, this is what\nactually makes it reliably point at the target.");
         ImGui::SliderFloat("Attraction: offshoots", &pending.lateralWeight, 0.0f, 0.95f, "%.2f");
         ImGui::SliderFloat("Attraction (dwell): main root", &pending.dwellWeight, 0.0f, 0.99f, "%.2f");
         ImGui::SliderFloat("Attraction (dwell): offshoots", &pending.dwellLateralWeight, 0.0f, 0.99f, "%.2f");
@@ -495,8 +517,8 @@ int main(int argc, char** argv) {
         ImGui::Separator();
         ImGui::SliderFloat("Max days/hop", &pending.maxHopDays, 20.0f, 120.0f, "%.0f");
         ImGui::SliderFloat("Reach threshold", &pending.reachMult, 1.0f, 3.0f, "%.2f");
-        ImGui::SliderFloat("Travel corridor radius", &pending.travelCorridorRadius, 3.0f, 30.0f, "%.1f cm");
-        ImGui::TextDisabled("Hard bound (main root only) around the direct\nline to the target -- can't wander off course\nno matter how attraction/gravity dicing goes.");
+        ImGui::SliderFloat("Travel corridor radius", &pending.travelCorridorRadius, 5.0f, 60.0f, "%.1f cm");
+        ImGui::TextDisabled("Last-resort backstop (main root only), not the\nprimary steering -- keep it loose. CPlantBox's\nconfinement repair loop searches for a valid\ndirection RANDOMLY when this boundary is hit,\nignoring attraction, so a tight corridor can\nmake wandering worse, not better.");
         ImGui::EndDisabled();
 
         ImGui::Separator();
@@ -764,21 +786,33 @@ int main(int argc, char** argv) {
                         : geom;
                     rs->setGeometry(geom);   // base/default for any organ order the split doesn't see (shouldn't happen)
                     auto attrs = rimAttractors({localTargetNode}, 6, 1.0, 3.0, 1.15);
-                    rs->setTropism(combinedAttractionSplit(rs, base, attrs, 6.0, params.sigma,
-                                                           mainW, lateralW, mainGeom, geom), -1);
+                    rs->setTropism(combinedAttractionSplit(rs, base, attrs, params.mainTravelTrials, 6.0,
+                                                           params.sigma, mainW, lateralW, mainGeom, geom), -1);
                 };
                 rebuildTropism(params.weight, params.lateralWeight, true);
+
+                // Scale the day budget by how far this hop actually has to
+                // travel: in a golden-angle spiral, masks near the wide end
+                // of the cone sit at large radius, so the ARC LENGTH between
+                // consecutive masks (~radius * angle) grows with radius --
+                // late hops can genuinely need to cover several times the
+                // distance early ones do, but were getting the same flat
+                // budget. This was the real cause of late-hop failures
+                // (confirmed: they persisted identically with the travel
+                // corridor effectively disabled, so it wasn't a corridor/
+                // repair-loop problem -- just not enough time to get there).
+                double hopMaxDays = params.maxHopDays * std::max(1.0, corridorLen / std::max(1.0, (double) params.R0));
 
                 double day = 0.0, reachedDay = -1.0;
                 bool reached = false;
                 double dt = 0.75;
-                while (day < params.maxHopDays) {
+                while (day < hopMaxDays) {
                     if (glfwWindowShouldClose(window)) { quit = true; break; }
 
                     rs->simulate(dt, false);
                     day += dt;
 
-                    bool forced = !reached && day > 0.6 * params.maxHopDays;
+                    bool forced = !reached && day > 0.6 * hopMaxDays;
                     if (!reached) {
                         double d = minDist(rs->getNodes(), localTarget);
                         double thr = params.reachMult * std::max(masks[hop].r_width, masks[hop].r_height);
