@@ -124,6 +124,22 @@ inline std::vector<Attractor> rimAttractors(const std::vector<MaskNode>& masks,
 // use `this->n`/`this->sigma` regardless of which sub-tropism's objective
 // ends up being evaluated. Only the objective *shape* (and thus which
 // direction is preferred) differs between main and lateral.
+// Delegates the ENTIRE heading computation (not just the attraction
+// objective) to one of two sub-tropisms based on the growing organ's order --
+// 0 (the primary/main axis grown straight from the seed) vs 1+ (laterals/
+// offshoots branching off it).
+//
+// Earlier version only overrode tropismObjective(), which looked right but
+// wasn't: CPlantBox's confining-geometry repair loop (the hard "don't grow
+// through a cavity" guarantee, as opposed to the soft attraction pull) lives
+// inside Tropism::getHeading(), and that's only called on the OUTER
+// OrderSplitTropism instance -- so it always used *this* instance's own
+// geometry regardless of which sub-tropism's objective got delegated to,
+// meaning a per-order geometry difference (e.g. a travel corridor that should
+// only constrain the main root) was silently impossible to express that way.
+// Delegating the whole call fixes that: each sub-tropism's own geometry
+// (and own n/sigma dicing intensity, as a side benefit) genuinely applies
+// per-order.
 class OrderSplitTropism : public Tropism {
 public:
     OrderSplitTropism(std::shared_ptr<Organism> plant, double n, double sigma,
@@ -138,6 +154,14 @@ public:
         return nt;
     }
 
+    CPlantBox::Vector2d getHeading(const Vector3d& pos, const Matrix3d& old, double dx,
+                                   const std::shared_ptr<Organ> o = nullptr, int nodeIdx = -1) override {
+        int order = o ? (int) o->getParameter("order") : 0;
+        return (order <= 0 ? main_ : lateral_)->getHeading(pos, old, dx, o, nodeIdx);
+    }
+
+    // kept for completeness/direct callers; getHeading() above no longer
+    // routes through this on its way to a sub-tropism.
     double tropismObjective(const Vector3d& pos, const Matrix3d& old, double a, double b, double dx,
                             const std::shared_ptr<Organ> o = nullptr) override {
         int order = o ? (int) o->getParameter("order") : 0;
@@ -148,17 +172,20 @@ private:
     std::shared_ptr<Tropism> main_, lateral_;
 };
 
-// Convenience: builds two combinedAttraction() tropisms (one per weight) and
-// wraps them in an OrderSplitTropism, so the caller doesn't have to.
+// Convenience: builds two combinedAttraction() tropisms (one per weight,
+// optionally one per geometry) and wraps them in an OrderSplitTropism, so the
+// caller doesn't have to. lateralGeometry defaults to mainGeometry if not
+// given -- pass a looser (or absent) one to let offshoots roam beyond
+// whatever hard bound the main root is held to (e.g. a travel corridor).
 inline std::shared_ptr<Tropism> combinedAttractionSplit(
     std::shared_ptr<Organism> plant, std::shared_ptr<Tropism> base, std::vector<Attractor> attractors,
     double n, double sigma, double mainWeight, double lateralWeight,
-    std::shared_ptr<SignedDistanceFunction> geometry = nullptr) {
-    auto mainT = combinedAttraction(plant, base, attractors, n, sigma, mainWeight, geometry);
-    auto latT = combinedAttraction(plant, base, attractors, n, sigma, lateralWeight, geometry);
-    auto split = std::make_shared<OrderSplitTropism>(plant, n, sigma, mainT, latT);
-    if (geometry) split->setGeometry(geometry);
-    return split;
+    std::shared_ptr<SignedDistanceFunction> mainGeometry = nullptr,
+    std::shared_ptr<SignedDistanceFunction> lateralGeometry = nullptr) {
+    if (!lateralGeometry) lateralGeometry = mainGeometry;
+    auto mainT = combinedAttraction(plant, base, attractors, n, sigma, mainWeight, mainGeometry);
+    auto latT = combinedAttraction(plant, base, attractors, n, sigma, lateralWeight, lateralGeometry);
+    return std::make_shared<OrderSplitTropism>(plant, n, sigma, mainT, latT);
 }
 
 }  // namespace maskcav

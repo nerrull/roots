@@ -21,9 +21,9 @@ uniform float u_metallic;
 uniform float u_roughness;
 
 uniform int   u_wispCount;
-uniform vec3  u_wispPos[16];
-uniform vec3  u_wispColor[16];
-uniform float u_wispIntensity[16];
+uniform vec3  u_wispPos[50];
+uniform vec3  u_wispColor[50];
+uniform float u_wispIntensity[50];
 
 uniform float u_radiusScale;
 uniform float u_radiusMin;

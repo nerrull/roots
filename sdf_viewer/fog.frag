@@ -24,9 +24,9 @@ uniform int   u_showGrid;
 uniform float u_gridSpacing;
 
 uniform int   u_wispCount;
-uniform vec3  u_wispPos[16];
-uniform vec3  u_wispColor[16];
-uniform float u_wispIntensity[16];
+uniform vec3  u_wispPos[50];
+uniform vec3  u_wispColor[50];
+uniform float u_wispIntensity[50];
 
 in vec2  v_uv;
 out vec4 fragColor;
@@ -258,12 +258,20 @@ void main() {
     // Wisp glow — soft emissive blobs floating in the atmosphere
     vec3 wispGlow = vec3(0.0);
     const float GLOW_R = 5.0;  // glow radius in world units
+    // Distance cutoff before the expensive part: marchFog() below is a 16-
+    // step loop per wisp, and with up to MAX_WISPS simultaneous face lights
+    // now feeding in (one per revealed mask), that's the real per-pixel cost
+    // here -- the Gaussian glow term itself already decays hard within a few
+    // multiples of GLOW_R, so skip wisps clearly too far to matter before
+    // ever calling marchFog for them.
+    const float GLOW_CUTOFF2 = (4.0 * GLOW_R) * (4.0 * GLOW_R);
     for (int wi = 0; wi < u_wispCount; wi++) {
         vec3  oc  = ro - u_wispPos[wi];
         float b   = dot(rd, oc);
         float tc  = max(0.0, -b);                  // closest t along ray, clamped to front
         vec3  cp  = (ro + rd * tc) - u_wispPos[wi];
         float d2  = dot(cp, cp);
+        if (d2 > GLOW_CUTOFF2) continue;
         float glow = u_wispIntensity[wi] * exp(-d2 / (GLOW_R * GLOW_R));
         // Attenuate by fog between camera and wisp, and occlude behind geometry
         float tauWisp = marchFog(ro, rd, tc);

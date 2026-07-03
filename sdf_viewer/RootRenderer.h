@@ -52,7 +52,7 @@ public:
         float driftSpeed  = 0.5f;
         float phase[3]    = {};
     };
-    static constexpr int MAX_WISPS = 16;
+    static constexpr int MAX_WISPS = 50;
 
     RootRenderer(int w, int h);
     ~RootRenderer();

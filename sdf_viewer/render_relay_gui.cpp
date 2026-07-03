@@ -242,6 +242,13 @@ struct Params {
     float radiusMax  = 0.35f;
     float maxHopDays = 60.0f;
     float reachMult  = 1.6f;
+    // hard geometric bound during travel -- a cylinder around the direct line
+    // from hop-start to hop-target that growth physically cannot leave,
+    // regardless of how attraction/gravity dicing happens to go. Prevents
+    // roots wandering far off course even at high attraction weight (that's
+    // a *soft* nudge, not a guarantee). Tight = more direct paths, loose =
+    // more room to wander while still bounded.
+    float travelCorridorRadius = 12.0f;
     bool invertMode  = false;   // black bg, white roots, overlaps XOR-toggle
 
     // --- lighting & material -------------------------------------------
@@ -323,6 +330,7 @@ int main(int argc, char** argv) {
     bool profileMode = (argc > 5) ? (std::atoi(argv[5]) != 0) : false;   // autostart growth, exit after, print PROFILE lines
     bool profileHidden = (argc > 6) ? (std::atoi(argv[6]) != 0) : true;  // profileMode window visibility (isolate swap-cost variable)
     float cliRenderScale = (argc > 7) ? std::atof(argv[7]) : -1.0f;      // override Params default, for isolating renderScale's effect
+    int cliN = (argc > 8) ? std::atoi(argv[8]) : -1;                     // override Params.N, for stress-testing mask count
 
     if (!glfwInit()) { std::cerr << "glfwInit failed\n"; return 1; }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -419,16 +427,16 @@ int main(int argc, char** argv) {
     std::vector<MaskNode> revealed;
     std::vector<FrozenHop> frozen;
     int frame = 0;
-    int orbitFrame = 0;       // separate counter for the whole-scene orbit --
-                              // doesn't advance while focused on a mask, so
-                              // resuming "Whole scene" doesn't jump/speed up.
-    float frozenAzimuth = 0.8f;   // captured live azimuth while orbiting,
-                                  // held fixed while focused on a mask.
+    int orbitFrame = 0;       // whole-scene orbit's own frame counter
+    int focusFrame = 0;       // focused-on-a-mask orbit's own frame counter --
+                              // separate so switching between the two doesn't
+                              // jump or change speed, but both keep spinning.
     bool growing = profileMode;
     std::string status = "Press \"Regrow\" to start.";
 
     Params params, pending = params;
     if (cliRenderScale > 0.0f) { params.renderScale = cliRenderScale; pending.renderScale = cliRenderScale; }
+    if (cliN > 0) { params.N = cliN; pending.N = cliN; }
 
     auto blit = [&]() {
         int w2, h2; glfwGetFramebufferSize(window, &w2, &h2);
@@ -487,6 +495,8 @@ int main(int argc, char** argv) {
         ImGui::Separator();
         ImGui::SliderFloat("Max days/hop", &pending.maxHopDays, 20.0f, 120.0f, "%.0f");
         ImGui::SliderFloat("Reach threshold", &pending.reachMult, 1.0f, 3.0f, "%.2f");
+        ImGui::SliderFloat("Travel corridor radius", &pending.travelCorridorRadius, 3.0f, 30.0f, "%.1f cm");
+        ImGui::TextDisabled("Hard bound (main root only) around the direct\nline to the target -- can't wander off course\nno matter how attraction/gravity dicing goes.");
         ImGui::EndDisabled();
 
         ImGui::Separator();
@@ -646,18 +656,19 @@ int main(int argc, char** argv) {
         // (as RootRenderer "wisps"), using the exact same position each face
         // shader itself lights from -- so roots near a mask actually pick up
         // some of that light instead of it only affecting the face mesh.
-        // Capped well below MAX_WISPS -- even with the cheap Blinn-Phong wisp
-        // shading (see shader.frag), N simultaneous point lights means N
-        // extra light evaluations per hit pixel across potentially tens of
-        // thousands of capsule fragments. 6 is plenty to read as "nearby
-        // faces light nearby roots" without the per-pixel cost scaling with
-        // total mask count.
-        int wc = std::min({(int) revealed.size(), 6, RootRenderer::MAX_WISPS});
+        // Every revealed mask gets a light (up to MAX_WISPS=50, matching the
+        // max mask count) -- previously capped to the 6 most-recently-
+        // revealed for performance, but that left most masks permanently
+        // unlit with higher counts. Made affordable by (a) the cheap
+        // Blinn-Phong wisp shading (see shader.frag) instead of full PBR
+        // per light, and (b) a per-pixel distance cutoff in both shader.frag
+        // and fog.frag that skips the expensive part of a light entirely once
+        // it's clearly too far to matter, so cost tracks how many lights are
+        // actually NEARBY a given pixel, not the total count.
+        int wc = std::min((int) revealed.size(), RootRenderer::MAX_WISPS);
         renderer.wispCount = wc;
-        int wStart = (int) revealed.size() - wc;   // most-recently-revealed masks --
-                                                    // nearest the active growth frontier
         for (int i = 0; i < wc; i++) {
-            const auto& m = revealed[wStart + i];
+            const auto& m = revealed[i];
             Vector3d n = toYup(m.normal);
             Vector3d p = toYup(m.pos).minus(n.times(m.r_depth * 0.5));
             Vector3d lp = p.plus(n.times((double) std::max(3.0f, params.viewCylLen * pending.faceLightDist)));
@@ -718,20 +729,45 @@ int main(int argc, char** argv) {
                 localTargetNode.pos = localTarget;
 
                 auto base = std::make_shared<Gravitropism>(rs, 1.0, params.sigma);
+                // Hard travel corridor: soft tropism attraction alone isn't a
+                // reliable guarantee -- even at very high attraction weight, a
+                // root that starts (or drifts, via gravity's residual pull)
+                // heading the wrong way only gets nudged a small angle per
+                // growth step, and can wander far off course (observed: "way
+                // off course, down") before the dicing/attraction ever
+                // corrects it, since nothing PHYSICALLY stops it. This is a
+                // real geometric bound, not just a stronger suggestion: a
+                // cylinder wrapping the direct line from this hop's start to
+                // its target, intersected with the cavity-avoidance geometry.
+                // Applied only during travel (not dwell, where the root should
+                // be free to curl beyond the direct line to wrap the mask).
+                Vector3d corridorAxis = localTarget.minus(localSeed);
+                double corridorLen = corridorAxis.length();
+                auto corridorSDF = std::make_shared<SDF_Cylinder>(
+                    localSeed.plus(corridorAxis.times(0.5)), corridorAxis,
+                    (double) params.travelCorridorRadius, corridorLen * 0.5 + 2.0);
+
                 // travel: main axis and offshoots pull toward the target with
                 // different strength (mainW usually lower -- lets the primary
                 // axis wander instead of beelining, while laterals still cling
                 // for wrapping density). dwell: both pulled equally hard, since
                 // by then everything should be curling tightly around the mask.
-                auto rebuildTropism = [&](double mainW, double lateralW) {
+                auto rebuildTropism = [&](double mainW, double lateralW, bool constrainTravel) {
                     auto geom = buildCavityGeometry(localRevealed, params.R0, params.Hh, false, 2.0,
                                                     tipRadius, params.viewCylLen, 0.9, params.taperPower);
-                    rs->setGeometry(geom);
+                    // corridor applies to the main root only -- offshoots stay
+                    // free to wander/wrap for density, only the primary axis
+                    // gets the hard "can't go off course" guarantee.
+                    auto mainGeom = constrainTravel
+                        ? std::static_pointer_cast<SignedDistanceFunction>(
+                              std::make_shared<CPlantBox::SDF_Intersection>(geom, corridorSDF))
+                        : geom;
+                    rs->setGeometry(geom);   // base/default for any organ order the split doesn't see (shouldn't happen)
                     auto attrs = rimAttractors({localTargetNode}, 6, 1.0, 3.0, 1.15);
                     rs->setTropism(combinedAttractionSplit(rs, base, attrs, 6.0, params.sigma,
-                                                           mainW, lateralW, geom), -1);
+                                                           mainW, lateralW, mainGeom, geom), -1);
                 };
-                rebuildTropism(params.weight, params.lateralWeight);
+                rebuildTropism(params.weight, params.lateralWeight, true);
 
                 double day = 0.0, reachedDay = -1.0;
                 bool reached = false;
@@ -748,9 +784,11 @@ int main(int argc, char** argv) {
                         double thr = params.reachMult * std::max(masks[hop].r_width, masks[hop].r_height);
                         if (d < thr || forced) {
                             reached = true; reachedDay = day;
+                            if (forced) std::cout << "PROFILE hop " << hop << " gave up at day " << day
+                                                  << " (dist=" << d << ", threshold=" << thr << ")\n";
                             localRevealed.push_back(localTargetNode);
                             revealed.push_back(masks[hop]);
-                            rebuildTropism(params.dwellWeight, params.dwellLateralWeight);
+                            rebuildTropism(params.dwellWeight, params.dwellLateralWeight, false);
                         }
                     }
                     if (reached && day - reachedDay > params.dwellDays) break;
@@ -849,13 +887,16 @@ int main(int argc, char** argv) {
         float azimuth;
         bool focused = pending.cameraFaceIdx >= 0 && pending.cameraFaceIdx < (int) revealed.size();
         if (focused) {
-            // focused on one mask: center on it, frame tight, and hold still --
-            // no more orbiting past/behind it. Keeps whatever angle the
-            // whole-scene orbit last had, rather than snapping to a fixed view.
+            // focused on one mask: center on it and frame tight, but keep
+            // orbiting around it (its own independent, continuously-advancing
+            // angle) rather than either freezing or reusing the whole-scene
+            // orbit's arc (which was centered on the whole piece, not this
+            // mask, and would swing it out of frame/behind the camera).
             Vector3d fp = toYup(revealed[pending.cameraFaceIdx].pos);
             target3[0] = (float) fp.x; target3[1] = (float) fp.y; target3[2] = (float) fp.z;
             radius = std::max(revealed[pending.cameraFaceIdx].r_width, revealed[pending.cameraFaceIdx].r_height) * 3.5f + 4.0f;
-            azimuth = frozenAzimuth;
+            azimuth = 0.8f + 0.15f * pending.orbitSpeed * (float) focusFrame / 60.0f;
+            focusFrame++;
         } else {
             Vector3d lo = nodesYup.empty() ? Vector3d(0, 0, 0) : nodesYup[0], hi = lo;
             for (const auto& n : nodesYup) {
@@ -866,7 +907,6 @@ int main(int argc, char** argv) {
             float extent = nodesYup.empty() ? 10.0f : (float) std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
             radius = extent * 0.75f + 12.0f;
             azimuth = 0.8f + 0.15f * pending.orbitSpeed * (float) orbitFrame / 60.0f;
-            frozenAzimuth = azimuth;
             orbitFrame++;
         }
 
