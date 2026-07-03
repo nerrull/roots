@@ -1,0 +1,68 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "CMake: configure",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["-S", ".", "-B", "build"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": []
+        },
+        {
+            "label": "Build: mask_relay_gui",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["--build", "build", "--target", "mask_relay_gui", "-j4"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["CMake: configure"],
+            "group": { "kind": "build", "isDefault": true },
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "Run: Mask Relay Viewer",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/sdf_viewer/mask_relay_gui",
+            "args": [
+                "${workspaceFolder}/CPlantBox/modelparameter/structural/rootsystem/"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["Build: mask_relay_gui"],
+            "group": { "kind": "test", "isDefault": true },
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated" }
+        },
+        {
+            "label": "Run: Mask Relay Viewer (windowed, not fullscreen)",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/sdf_viewer/mask_relay_gui",
+            "args": [
+                "${workspaceFolder}/CPlantBox/modelparameter/structural/rootsystem/",
+                "1200", "900", "0"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["Build: mask_relay_gui"],
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated" }
+        },
+        {
+            "label": "Build: sdf_viewer (original CPlantBox viewer)",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["--build", "build", "--target", "sdf_viewer", "-j4"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["CMake: configure"],
+            "group": "build",
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "Run: sdf_viewer (original CPlantBox viewer)",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/sdf_viewer/sdf_viewer",
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["Build: sdf_viewer (original CPlantBox viewer)"],
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated" }
+        }
+    ]
+}

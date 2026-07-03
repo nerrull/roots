@@ -122,7 +122,12 @@ void main() {
     if (u_radiusMin > 0.0) r = max(r, u_radiusMin);
     if (u_radiusMax > 0.0) r = min(r, u_radiusMax);
 
-    const int   MAX_STEPS = 32;
+    const int   MAX_STEPS = 20;   // capsule SDF converges fast; 32 was a safety
+                                  // ceiling rarely actually needed -- real cost
+                                  // saving given this runs per covered pixel
+                                  // per instance, and overdraw from thousands
+                                  // of overlapping instanced quads is the
+                                  // dominant per-frame cost in a dense mass.
     const float HIT_EPS   = 0.001;
     const float MAX_DIST  = 200.0;
 
@@ -169,9 +174,11 @@ void main() {
         float spec = pow(max(dot(n, h), 0.0), u_shininess);
         color = albedo * (u_ambient + u_diffuse * diff) + u_specColor * spec;
 
+        const float WISP_CUTOFF2 = 400.0;   // see PBR branch below for why
         for (int wi = 0; wi < u_wispCount; wi++) {
             vec3  lv    = u_wispPos[wi] - p;
             float dist2 = dot(lv, lv);
+            if (dist2 > WISP_CUTOFF2) continue;
             vec3  ldir  = lv * inversesqrt(dist2);
             float att   = u_wispIntensity[wi] / (1.0 + dist2 * 0.008);
             float wd    = max(dot(n, ldir), 0.0);
@@ -189,9 +196,19 @@ void main() {
         // lights now feeding in from every revealed face, a full pbrBRDF()
         // per wisp per pixel (several pow/sqrt each) was the actual cause of
         // a severe framerate regression once mask count grew past a handful.
+        // Distance cutoff: the old falloff (1/(1+dist2*0.008)) never actually
+        // reached zero within this scene's scale (~20-60 units across), so
+        // every wisp was paying its full cost -- inversesqrt, two pow calls --
+        // for every pixel regardless of how far away it was, and contributing
+        // a barely-visible sliver of light to roots nowhere near it. A hard
+        // radius cutoff is the cheap substitute for real spatial partitioning
+        // here (no compute shaders on GL 4.1/macOS to build one properly):
+        // skip the light entirely, before any of that math, past ~20 units.
+        const float WISP_CUTOFF2 = 400.0;   // 20 units, matches typical mask spacing
         for (int wi = 0; wi < u_wispCount; wi++) {
             vec3  lv    = u_wispPos[wi] - p;
             float dist2 = dot(lv, lv);
+            if (dist2 > WISP_CUTOFF2) continue;
             vec3  ldir  = lv * inversesqrt(dist2);
             float att   = u_wispIntensity[wi] / (1.0 + dist2 * 0.008);
             float ndotl = max(dot(n, ldir), 0.0);

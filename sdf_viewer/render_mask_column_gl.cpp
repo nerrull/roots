@@ -199,11 +199,14 @@ int main(int argc, char** argv) {
     int W = (argc > 11) ? std::atoi(argv[11]) : 800;
     int H = (argc > 12) ? std::atoi(argv[12]) : 1000;
     double spin = (argc > 13) ? std::atof(argv[13]) : 0.5;
+    double R0 = (argc > 14) ? std::atof(argv[14]) : 12.0;
+    double Hh = (argc > 15) ? std::atof(argv[15]) : 48.0;
+    double startFrac = (argc > 16) ? std::atof(argv[16]) : 0.14;
 
     // ---- geometry / growth setup (same mechanics as export_sequential.cpp) --
-    double R0 = 12.0, Hh = 48.0, maskR = 2.6;
+    double maskR = 2.6;
     double tipRadius = 0.22 * R0;
-    auto masks = conePhyllotaxis(N, R0, Hh, maskR, 0.14, 0.94, tipRadius);
+    auto masks = conePhyllotaxis(N, R0, Hh, maskR, startFrac, 0.94, tipRadius);
 
     auto rs = std::make_shared<RootSystem>();
     rs->readParameters(param, "plant", true, false);

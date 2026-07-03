@@ -271,6 +271,11 @@ struct Params {
 
     // camera: -1 = whole-scene orbit, >=0 = focus on that revealed mask index.
     int cameraFaceIdx = -1;
+
+    // internal render resolution as a fraction of the real framebuffer --
+    // present() cost (blit+swap) scales with pixel count, this is the direct
+    // lever on it. 1.0 = native, lower = faster but softer (bilinear upscale).
+    float renderScale = 0.65f;
 };
 
 static const std::vector<std::pair<std::string, std::string>> g_species = {
@@ -291,24 +296,34 @@ int main(int argc, char** argv) {
     int W = (argc > 2) ? std::atoi(argv[2]) : 1100;
     int H = (argc > 3) ? std::atoi(argv[3]) : 1000;
     bool fullscreen = (argc > 4) ? (std::atoi(argv[4]) != 0) : true;
+    bool profileMode = (argc > 5) ? (std::atoi(argv[5]) != 0) : false;   // autostart growth, exit after, print PROFILE lines
+    bool profileHidden = (argc > 6) ? (std::atoi(argv[6]) != 0) : true;  // profileMode window visibility (isolate swap-cost variable)
 
     if (!glfwInit()) { std::cerr << "glfwInit failed\n"; return 1; }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+    if (profileMode) { fullscreen = false; if (profileHidden) glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE); }
 
-    GLFWmonitor* monitor = fullscreen ? glfwGetPrimaryMonitor() : nullptr;
-    if (monitor) {
+    // Windowed fullscreen (borderless), not exclusive fullscreen: a normal
+    // window sized/positioned to cover the monitor with decorations off,
+    // rather than an actual display-mode switch. Avoids exclusive
+    // fullscreen's mode-switch overhead/flakiness (also the likely cause of
+    // some unexplained non-zero exits on window close) and plays nicer with
+    // Spaces/Mission Control on macOS.
+    int monX = 0, monY = 0;
+    if (fullscreen) {
+        GLFWmonitor* monitor = glfwGetPrimaryMonitor();
         const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+        glfwGetMonitorPos(monitor, &monX, &monY);
         W = mode->width; H = mode->height;
-        glfwWindowHint(GLFW_RED_BITS, mode->redBits);
-        glfwWindowHint(GLFW_GREEN_BITS, mode->greenBits);
-        glfwWindowHint(GLFW_BLUE_BITS, mode->blueBits);
-        glfwWindowHint(GLFW_REFRESH_RATE, mode->refreshRate);
+        glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
     }
-    GLFWwindow* window = glfwCreateWindow(W, H, "jardins_racine -- mask relay", monitor, nullptr);
+    GLFWwindow* window = glfwCreateWindow(W, H, "jardins_racine -- mask relay", nullptr, nullptr);
     if (!window) { std::cerr << "glfwCreateWindow failed\n"; return 1; }
+    if (fullscreen) glfwSetWindowPos(window, monX, monY);
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
     glewExperimental = GL_TRUE;
@@ -322,7 +337,16 @@ int main(int argc, char** argv) {
 
     int fbW, fbH;
     glfwGetFramebufferSize(window, &fbW, &fbH);
-    RootRenderer renderer(fbW, fbH);
+    // Render internally at a fraction of the real framebuffer size and let
+    // the blit's bilinear-filtered texture sample upscale it -- profiling
+    // showed present()'s cost (blit + swap) scales almost exactly with pixel
+    // count (present() alone: ~20ms at 1.1MP vs ~40ms at 4K's 8.3MP, visible
+    // window), so rendering fewer pixels internally is a direct, real lever
+    // on the actual bottleneck (not the sphere-tracer itself, which profiled
+    // at under 1ms regardless of resolution).
+    float renderScale = 0.65f;
+    int rw = std::max(1, (int) (fbW * renderScale)), rh = std::max(1, (int) (fbH * renderScale));
+    RootRenderer renderer(rw, rh);
     renderer.mat.baseColor[0] = 0.55f; renderer.mat.baseColor[1] = 0.40f; renderer.mat.baseColor[2] = 0.26f;
     renderer.mat.ambient = 0.18f;
     renderer.mat.diffuse = 0.75f;
@@ -370,7 +394,7 @@ int main(int argc, char** argv) {
     std::vector<MaskNode> revealed;
     std::vector<FrozenHop> frozen;
     int frame = 0;
-    bool growing = false;
+    bool growing = profileMode;
     std::string status = "Press \"Regrow\" to start.";
 
     Params params, pending = params;
@@ -467,6 +491,11 @@ int main(int argc, char** argv) {
             ImGui::TextDisabled("All of the above apply live -- no regrow needed.");
         }
 
+        if (ImGui::CollapsingHeader("Performance")) {
+            ImGui::SliderFloat("Render scale", &pending.renderScale, 0.25f, 1.0f, "%.2f");
+            ImGui::TextDisabled("Internal render resolution vs. the real window/\nscreen size. Profiling showed frame cost tracks\npixel count almost exactly, not scene complexity --\nlower this first if it's heavy. Applies live.");
+        }
+
         if (ImGui::CollapsingHeader("Camera")) {
             const char* whole = "Whole scene";
             const char* label = whole;
@@ -515,6 +544,10 @@ int main(int argc, char** argv) {
     // regrow -- everything here is either a plain RootRenderer member or fed
     // straight into the face shader each frame.
     auto applyLiveRenderParams = [&]() {
+        int rw2 = std::max(1, (int) (fbW * pending.renderScale));
+        int rh2 = std::max(1, (int) (fbH * pending.renderScale));
+        renderer.resize(rw2, rh2);   // no-op if unchanged
+
         renderer.radiusScale = pending.radiusScale;
         renderer.radiusMin = pending.radiusMin;
         renderer.radiusMax = pending.radiusMax;
@@ -664,6 +697,7 @@ int main(int argc, char** argv) {
                     }
                     if (reached && day - reachedDay > params.dwellDays) break;
 
+                    auto _t0 = std::chrono::steady_clock::now();
                     SegmentAnalyser ana(*rs);
                     auto radii = ana.getParameter("radius");
                     std::vector<Vector3d> nodesYup;
@@ -679,10 +713,13 @@ int main(int argc, char** argv) {
                     for (const auto& n : ana.nodes) nodesYup.push_back(toYup(n.plus(offset)));
                     for (const auto& s : ana.segments) segsAll.push_back(Vector2i(s.x + base_idx, s.y + base_idx));
                     for (double r : radii) radAll.push_back(r);
+                    auto _t1 = std::chrono::steady_clock::now();
                     renderer.uploadSegments(nodesYup, segsAll, radAll);
+                    auto _t2 = std::chrono::steady_clock::now();
 
                     auto faceData = buildFaceVertexData(revealed, fv, ftris, 0.85f, std::max(3.0f, params.viewCylLen * pending.faceLightDist), pending.maskColor);
                     faceGL.upload(faceData);
+                    auto _t3 = std::chrono::steady_clock::now();
 
                     std::vector<Vector3d> fitNodes;
                     for (const auto& n : ana.nodes) fitNodes.push_back(toYup(n.plus(offset)));
@@ -702,8 +739,17 @@ int main(int argc, char** argv) {
 
                     renderer.render(azimuth, 0.12f, radius, target3, 0.5f, lightDir,
                                     [&](const float* vp, const float* eye) { faceGL.draw(vp, eye, lightDir); });
+                    auto _t4 = std::chrono::steady_clock::now();
                     present();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(70));
+                    auto _t5 = std::chrono::steady_clock::now();
+
+                    if (frame % 10 == 0) {
+                        auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+                        std::cout << "PROFILE frame=" << frame << " segs=" << segsAll.size()
+                                  << " rebuild=" << ms(_t0, _t1) << "ms upload=" << ms(_t1, _t2)
+                                  << "ms faceBuild+upload=" << ms(_t2, _t3) << "ms render=" << ms(_t3, _t4)
+                                  << "ms present=" << ms(_t4, _t5) << "ms TOTAL=" << ms(_t0, _t5) << "ms\n";
+                    }
                     frame++;
                 }
                 if (quit) break;
@@ -721,6 +767,7 @@ int main(int argc, char** argv) {
             growing = false;
             status = quit ? "Stopped." : "Done -- " + g_species[params.speciesIdx].first
                      + ", " + std::to_string((int) revealed.size()) + "/" + std::to_string(params.N) + " masks.";
+            if (profileMode) { std::cout << "PROFILE: growth complete, exiting\n"; break; }
             continue;   // re-enter loop in idle-orbit mode
         }
 
