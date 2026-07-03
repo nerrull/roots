@@ -256,17 +256,17 @@ struct Params {
     float radiusMax  = 0.35f;
     float maxHopDays = 60.0f;
     float reachMult  = 1.6f;
-    // Hard geometric bound during travel -- a cylinder around the direct line
-    // from hop-start to hop-target, as a LAST-RESORT backstop against a truly
-    // runaway root, not the primary steering mechanism (that's attraction
-    // weight/trials above). Important: CPlantBox's confinement "repair loop"
-    // -- what actually happens when a candidate heading would violate this --
-    // searches for a valid direction with a PURELY RANDOM beta, ignoring
-    // attraction entirely while repairing. A tight corridor the root presses
-    // against often means it spends much of its budget randomly bouncing off
-    // the wall instead of steering toward the target -- worse than no
-    // corridor at all. Keep this loose; let weight/trials do the real work.
-    float travelCorridorRadius = 25.0f;
+    // How far the current target's attraction reaches during travel, as a
+    // multiple of the hop's own start->target distance (Gaussian radius in
+    // AttractionTropism). This is the primary steering lever now that the old
+    // hard travel corridor is gone: >=1.0 keeps the pull effectively constant
+    // over the whole leg, so the main root always has a heading signal toward
+    // the mask and doesn't drift off under gravity the way it did when the
+    // target only pulled within a few cm. Larger = straighter/more insistent;
+    // smaller loosens the pull on the far part of long hops (more wander, but
+    // risks the old "misses the far mask" failure below ~0.8). Naturalness
+    // comes from the angular jitter (sigma), independent of this.
+    float travelPullReach = 1.2f;
     bool invertMode  = false;   // black bg, white roots, overlaps XOR-toggle
 
     // --- lighting & material -------------------------------------------
@@ -351,7 +351,7 @@ int main(int argc, char** argv) {
     bool profileHidden = (argc > 6) ? (std::atoi(argv[6]) != 0) : true;  // profileMode window visibility (isolate swap-cost variable)
     float cliRenderScale = (argc > 7) ? std::atof(argv[7]) : -1.0f;      // override Params default, for isolating renderScale's effect
     int cliN = (argc > 8) ? std::atoi(argv[8]) : -1;                     // override Params.N, for stress-testing mask count
-    float cliCorridorRadius = (argc > 9) ? std::atof(argv[9]) : -1.0f;   // override Params.travelCorridorRadius, for isolating its effect
+    float cliPullReach = (argc > 9) ? std::atof(argv[9]) : -1.0f;        // override Params.travelPullReach, for steering sweeps
 
     if (!glfwInit()) { std::cerr << "glfwInit failed\n"; return 1; }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -460,7 +460,7 @@ int main(int argc, char** argv) {
     Params params, pending = params;
     if (cliRenderScale > 0.0f) { params.renderScale = cliRenderScale; pending.renderScale = cliRenderScale; }
     if (cliN > 0) { params.N = cliN; pending.N = cliN; }
-    if (cliCorridorRadius > 0.0f) { params.travelCorridorRadius = cliCorridorRadius; pending.travelCorridorRadius = cliCorridorRadius; }
+    if (cliPullReach > 0.0f) { params.travelPullReach = cliPullReach; pending.travelPullReach = cliPullReach; }
 
     auto blit = [&]() {
         int w2, h2; glfwGetFramebufferSize(window, &w2, &h2);
@@ -521,8 +521,8 @@ int main(int argc, char** argv) {
         ImGui::Separator();
         ImGui::SliderFloat("Max days/hop", &pending.maxHopDays, 20.0f, 120.0f, "%.0f");
         ImGui::SliderFloat("Reach threshold", &pending.reachMult, 1.0f, 3.0f, "%.2f");
-        ImGui::SliderFloat("Travel corridor radius", &pending.travelCorridorRadius, 5.0f, 60.0f, "%.1f cm");
-        ImGui::TextDisabled("Last-resort backstop (main root only), not the\nprimary steering -- keep it loose. CPlantBox's\nconfinement repair loop searches for a valid\ndirection RANDOMLY when this boundary is hit,\nignoring attraction, so a tight corridor can\nmake wandering worse, not better.");
+        ImGui::SliderFloat("Travel pull reach", &pending.travelPullReach, 0.6f, 2.5f, "%.2f x hop");
+        ImGui::TextDisabled("How far the target's attraction reaches during\ntravel, as a multiple of the hop distance. This\nis the main steering lever (the old hard corridor\nis gone). >=1 keeps a steady pull the whole way\nso the root reliably reaches far masks; lower it\nfor looser paths. Wander comes from jitter, not\nthis, so paths stay natural either way.");
         ImGui::EndDisabled();
 
         ImGui::Separator();
@@ -812,43 +812,51 @@ int main(int argc, char** argv) {
                 localTargetNode.pos = localTarget;
 
                 auto base = std::make_shared<Gravitropism>(rs, 1.0, params.sigma);
-                // Hard travel corridor: soft tropism attraction alone isn't a
-                // reliable guarantee -- even at very high attraction weight, a
-                // root that starts (or drifts, via gravity's residual pull)
-                // heading the wrong way only gets nudged a small angle per
-                // growth step, and can wander far off course (observed: "way
-                // off course, down") before the dicing/attraction ever
-                // corrects it, since nothing PHYSICALLY stops it. This is a
-                // real geometric bound, not just a stronger suggestion: a
-                // cylinder wrapping the direct line from this hop's start to
-                // its target, intersected with the cavity-avoidance geometry.
-                // Applied only during travel (not dwell, where the root should
-                // be free to curl beyond the direct line to wrap the mask).
-                Vector3d corridorAxis = localTarget.minus(localSeed);
-                double corridorLen = corridorAxis.length();
-                auto corridorSDF = std::make_shared<SDF_Cylinder>(
-                    localSeed.plus(corridorAxis.times(0.5)), corridorAxis,
-                    (double) params.travelCorridorRadius, corridorLen * 0.5 + 2.0);
+                double hopLen = localTarget.minus(localSeed).length();
 
-                // travel: main axis and offshoots pull toward the target with
-                // different strength (mainW usually lower -- lets the primary
-                // axis wander instead of beelining, while laterals still cling
-                // for wrapping density). dwell: both pulled equally hard, since
-                // by then everything should be curling tightly around the mask.
-                auto rebuildTropism = [&](double mainW, double lateralW, bool constrainTravel) {
+                // Steering is now soft attraction only -- no hard travel
+                // corridor. The old corridor was a geometric backstop for a
+                // root that "missed", but it fought the real problem instead
+                // of fixing it: CPlantBox's confinement repair (tropism.cpp
+                // getHeading) dices a PURELY RANDOM azimuth whenever a
+                // candidate heading leaves the allowed region, ignoring
+                // attraction while it repairs -- so a root pressed against a
+                // long corridor wall steered randomly, not toward the mask.
+                //
+                // The actual cause of "way off course" was that the target's
+                // attraction had almost no reach: rimAttractors used a 3cm
+                // Gaussian radius, so AttractionTropism's objective went
+                // neutral (0.5, no pull) beyond ~6cm -- i.e. for nearly the
+                // whole travel leg the main root felt no target at all and
+                // just fell under residual gravity until it happened to drift
+                // within 6cm. Late hops at the wide end of the cone, whose
+                // targets sit tens of cm from the seed, could never close that
+                // gap and gave up ~20cm short.
+                //
+                // Fix: during travel, pull toward the target with a Gaussian
+                // radius scaled to the hop's own length (x the user reach
+                // multiplier), so there's a consistent heading signal the
+                // entire way. Because AttractionTropism normalizes the pull
+                // direction and scores only alignment, a large radius acts as
+                // a near-constant "point at the target" objective -- reliable
+                // steering -- while the sigma angular jitter still supplies
+                // organic wander, so paths stay natural rather than beelining.
+                // On reach we swap to the tight rimAttractors ring, which is
+                // what actually wants a small radius: local wrapping of the
+                // mask rim, not long-range travel.
+                auto rebuildTropism = [&](double mainW, double lateralW, bool travel) {
                     auto geom = buildCavityGeometry(localRevealed, params.R0, params.Hh, false, 2.0,
                                                     tipRadius, params.viewCylLen, 0.9, params.taperPower);
-                    // corridor applies to the main root only -- offshoots stay
-                    // free to wander/wrap for density, only the primary axis
-                    // gets the hard "can't go off course" guarantee.
-                    auto mainGeom = constrainTravel
-                        ? std::static_pointer_cast<SignedDistanceFunction>(
-                              std::make_shared<CPlantBox::SDF_Intersection>(geom, corridorSDF))
-                        : geom;
-                    rs->setGeometry(geom);   // base/default for any organ order the split doesn't see (shouldn't happen)
-                    auto attrs = rimAttractors({localTargetNode}, 6, 1.0, 3.0, 1.15);
+                    rs->setGeometry(geom);
+                    std::vector<Attractor> attrs;
+                    if (travel) {
+                        double reach = std::max(params.travelPullReach * hopLen, (double) params.R0);
+                        attrs.push_back(Attractor{localTarget, 1.0, reach});
+                    } else {
+                        attrs = rimAttractors({localTargetNode}, 6, 1.0, 3.0, 1.15);
+                    }
                     rs->setTropism(combinedAttractionSplit(rs, base, attrs, params.mainTravelTrials, 6.0,
-                                                           params.sigma, mainW, lateralW, mainGeom, geom), -1);
+                                                           params.sigma, mainW, lateralW, geom, geom), -1);
                 };
                 rebuildTropism(params.weight, params.lateralWeight, true);
 
@@ -862,7 +870,7 @@ int main(int argc, char** argv) {
                 // (confirmed: they persisted identically with the travel
                 // corridor effectively disabled, so it wasn't a corridor/
                 // repair-loop problem -- just not enough time to get there).
-                double hopMaxDays = params.maxHopDays * std::max(1.0, corridorLen / std::max(1.0, (double) params.R0));
+                double hopMaxDays = params.maxHopDays * std::max(1.0, hopLen / std::max(1.0, (double) params.R0));
 
                 double day = 0.0, reachedDay = -1.0;
                 bool reached = false;
