@@ -267,6 +267,14 @@ struct Params {
     // risks the old "misses the far mask" failure below ~0.8). Naturalness
     // comes from the angular jitter (sigma), independent of this.
     float travelPullReach = 1.2f;
+    // "Along the surface" travel variant: confine the travelling root to a
+    // thin shell straddling the cone surface the masks sit on, so it crawls
+    // over the cone between masks instead of cutting through the interior.
+    // Off = original volumetric travel. Shell applies during travel only --
+    // dwell/wrapping stays unconstrained so the nests around each mask still
+    // bulge into 3D instead of being flattened onto the surface.
+    bool  coneSurfaceTravel  = false;
+    float coneShellThickness = 7.0f;   // cm; thicker = looser hug, more wander off-surface
     bool invertMode  = false;   // black bg, white roots, overlaps XOR-toggle
 
     // --- lighting & material -------------------------------------------
@@ -352,6 +360,7 @@ int main(int argc, char** argv) {
     float cliRenderScale = (argc > 7) ? std::atof(argv[7]) : -1.0f;      // override Params default, for isolating renderScale's effect
     int cliN = (argc > 8) ? std::atoi(argv[8]) : -1;                     // override Params.N, for stress-testing mask count
     float cliPullReach = (argc > 9) ? std::atof(argv[9]) : -1.0f;        // override Params.travelPullReach, for steering sweeps
+    int cliSurface = (argc > 10) ? std::atoi(argv[10]) : -1;             // >=0 sets coneSurfaceTravel, for the surface-travel variant
 
     if (!glfwInit()) { std::cerr << "glfwInit failed\n"; return 1; }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -461,6 +470,7 @@ int main(int argc, char** argv) {
     if (cliRenderScale > 0.0f) { params.renderScale = cliRenderScale; pending.renderScale = cliRenderScale; }
     if (cliN > 0) { params.N = cliN; pending.N = cliN; }
     if (cliPullReach > 0.0f) { params.travelPullReach = cliPullReach; pending.travelPullReach = cliPullReach; }
+    if (cliSurface >= 0) { params.coneSurfaceTravel = (cliSurface != 0); pending.coneSurfaceTravel = params.coneSurfaceTravel; }
 
     auto blit = [&]() {
         int w2, h2; glfwGetFramebufferSize(window, &w2, &h2);
@@ -523,6 +533,12 @@ int main(int argc, char** argv) {
         ImGui::SliderFloat("Reach threshold", &pending.reachMult, 1.0f, 3.0f, "%.2f");
         ImGui::SliderFloat("Travel pull reach", &pending.travelPullReach, 0.6f, 2.5f, "%.2f x hop");
         ImGui::TextDisabled("How far the target's attraction reaches during\ntravel, as a multiple of the hop distance. This\nis the main steering lever (the old hard corridor\nis gone). >=1 keeps a steady pull the whole way\nso the root reliably reaches far masks; lower it\nfor looser paths. Wander comes from jitter, not\nthis, so paths stay natural either way.");
+        ImGui::Checkbox("Travel along cone surface", &pending.coneSurfaceTravel);
+        ImGui::TextDisabled("Roots crawl over the cone surface between masks\ninstead of cutting through the interior. Wrapping\nat each mask still bulges into 3D.");
+        ImGui::BeginDisabled(!pending.coneSurfaceTravel);
+        ImGui::SliderFloat("Surface shell thickness", &pending.coneShellThickness, 2.0f, 16.0f, "%.1f cm");
+        ImGui::TextDisabled("How tightly roots hug the surface. Thinner =\ntighter (but more repair jitter); thicker = looser.");
+        ImGui::EndDisabled();
         ImGui::EndDisabled();
 
         ImGui::Separator();
@@ -847,7 +863,21 @@ int main(int argc, char** argv) {
                 auto rebuildTropism = [&](double mainW, double lateralW, bool travel) {
                     auto geom = buildCavityGeometry(localRevealed, params.R0, params.Hh, false, 2.0,
                                                     tipRadius, params.viewCylLen, 0.9, params.taperPower);
-                    rs->setGeometry(geom);
+                    // "along the surface" variant: during travel, intersect the
+                    // cavity-avoidance geometry with a shell hugging the cone
+                    // surface, so the root crawls over the cone rather than
+                    // through it. The shell only constrains the radial
+                    // (off-surface) axis -- orthogonal to travel direction --
+                    // so it doesn't fight the tangential target attraction the
+                    // way the old axial corridor did. Local frame: the global
+                    // cone apex (origin) sits at -offset in grow coords.
+                    std::shared_ptr<SignedDistanceFunction> growGeom = geom;
+                    if (params.coneSurfaceTravel && travel) {
+                        auto shell = buildConeShell(params.R0, params.Hh, tipRadius, params.taperPower,
+                                                    params.coneShellThickness, offset.times(-1.0));
+                        growGeom = std::make_shared<CPlantBox::SDF_Intersection>(geom, shell);
+                    }
+                    rs->setGeometry(growGeom);
                     std::vector<Attractor> attrs;
                     if (travel) {
                         double reach = std::max(params.travelPullReach * hopLen, (double) params.R0);
@@ -856,7 +886,7 @@ int main(int argc, char** argv) {
                         attrs = rimAttractors({localTargetNode}, 6, 1.0, 3.0, 1.15);
                     }
                     rs->setTropism(combinedAttractionSplit(rs, base, attrs, params.mainTravelTrials, 6.0,
-                                                           params.sigma, mainW, lateralW, geom, geom), -1);
+                                                           params.sigma, mainW, lateralW, growGeom, growGeom), -1);
                 };
                 rebuildTropism(params.weight, params.lateralWeight, true);
 

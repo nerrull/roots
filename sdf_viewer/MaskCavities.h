@@ -75,23 +75,49 @@ private:
 // the base -- more spike-like.
 class SDF_Cone : public SignedDistanceFunction {
 public:
+    // apex: world position of the cone's tip (z=0 point of its own frame).
+    // Defaults to the origin. Needed because the root system grows in a local
+    // frame translated from the global cone frame -- pass apex = (globalOrigin
+    // - localOffset) so the same global cone can be evaluated on local coords.
     SDF_Cone(double baseRadius, double height, double tipRadius = 0.0,
-            const Vector3d& axisXY = Vector3d(0, 0, 0), double taperPower = 1.0)
-        : R0_(baseRadius), h_(height), tipR_(tipRadius), cxy_(axisXY), taper_(taperPower) {}
+            const Vector3d& axisXY = Vector3d(0, 0, 0), double taperPower = 1.0,
+            const Vector3d& apex = Vector3d(0, 0, 0))
+        : R0_(baseRadius), h_(height), tipR_(tipRadius), cxy_(axisXY), taper_(taperPower), apex_(apex) {}
 
     double getDist(const Vector3d& v) const override {
-        double t = -v.z;                          // 0 at tip (z=0) .. h at base (z=-h)
+        double t = -(v.z - apex_.z);              // 0 at tip .. h at base
         double frac = std::pow(std::clamp(t / h_, 0.0, 1.0), taper_);
         double allowedR = tipR_ + (R0_ - tipR_) * frac;
-        double dx = v.x - cxy_.x, dy = v.y - cxy_.y;
+        double dx = v.x - cxy_.x - apex_.x, dy = v.y - cxy_.y - apex_.y;
         double radial = std::sqrt(dx * dx + dy * dy);
         return std::max({radial - allowedR, t - h_, -t});   // < 0 inside the cone
     }
     std::string toString() const override { return "SDF_Cone"; }
 private:
     double R0_, h_, tipR_, taper_;
-    Vector3d cxy_;
+    Vector3d cxy_, apex_;
 };
+
+// A thin shell straddling the lateral surface of the cone the masks sit on
+// (radius profile tipRadius..baseRadius over height, with taperPower): the
+// region between an outer and inner cone offset +/- thickness/2 from that
+// surface. Confining travel to this shell makes roots crawl ALONG the cone
+// surface between masks instead of cutting straight through the interior --
+// the straight chord between two surface points dips inside the cone, and the
+// shell pushes the path back out onto the surface. apex positions it in the
+// grower's local frame (see SDF_Cone::apex).
+inline std::shared_ptr<SignedDistanceFunction>
+buildConeShell(double baseRadius, double height, double tipRadius, double taperPower,
+               double thickness, const Vector3d& apex = Vector3d(0, 0, 0)) {
+    double hh = thickness * 0.5;
+    auto outer = std::make_shared<SDF_Cone>(baseRadius + hh, height, tipRadius + hh,
+                                            Vector3d(0, 0, 0), taperPower, apex);
+    auto inner = std::make_shared<SDF_Cone>(baseRadius - hh, height, std::max(0.0, tipRadius - hh),
+                                            Vector3d(0, 0, 0), taperPower, apex);
+    return std::make_shared<CPlantBox::SDF_Difference>(
+        std::static_pointer_cast<SignedDistanceFunction>(outer),
+        std::static_pointer_cast<SignedDistanceFunction>(inner));
+}
 
 // --- a mask node = a cavity + the frame the mask should be placed in --------
 struct MaskNode {
