@@ -865,7 +865,13 @@ int main(int argc, char** argv) {
                 // On reach we swap to the tight rimAttractors ring, which is
                 // what actually wants a small radius: local wrapping of the
                 // mask rim, not long-range travel.
-                auto rebuildTropism = [&](double mainW, double lateralW, bool travel) {
+                // dwellThreshold >= 0 (dwell phase) further splits offshoots by
+                // emergence time: those that spawned during travel (emerged at
+                // or before the reach day) keep the loose travel attraction,
+                // only offshoots that emerge during dwell wrap tightly -- so
+                // reaching the mask doesn't yank the travel-spawned tendrils
+                // inward. -1 (travel phase) uses the plain order split.
+                auto rebuildTropism = [&](double mainW, double lateralW, bool travel, double dwellThreshold) {
                     auto geom = buildCavityGeometry(localRevealed, params.R0, params.Hh, false, 2.0,
                                                     tipRadius, params.viewCylLen, 0.9, params.taperPower);
                     // "along the surface" variant: during travel, intersect the
@@ -890,10 +896,18 @@ int main(int argc, char** argv) {
                     } else {
                         attrs = rimAttractors({localTargetNode}, 6, 1.0, 3.0, 1.15);
                     }
-                    rs->setTropism(combinedAttractionSplit(rs, base, attrs, params.mainTravelTrials, 6.0,
-                                                           params.sigma, mainW, lateralW, growGeom, growGeom), -1);
+                    if (dwellThreshold >= 0.0) {
+                        // dwell: travel-spawned offshoots (emerged <= threshold)
+                        // keep the low travel weight; dwell-spawned ones wrap.
+                        rs->setTropism(combinedAttractionSplitTimed(
+                            rs, base, attrs, params.mainTravelTrials, 6.0, params.sigma,
+                            mainW, params.lateralWeight, lateralW, dwellThreshold, growGeom), -1);
+                    } else {
+                        rs->setTropism(combinedAttractionSplit(rs, base, attrs, params.mainTravelTrials, 6.0,
+                                                               params.sigma, mainW, lateralW, growGeom, growGeom), -1);
+                    }
                 };
-                rebuildTropism(params.weight, params.lateralWeight, true);
+                rebuildTropism(params.weight, params.lateralWeight, true, -1.0);
 
                 // Scale the day budget by how far this hop actually has to
                 // travel: in a golden-angle spiral, masks near the wide end
@@ -926,7 +940,7 @@ int main(int argc, char** argv) {
                                                   << " (dist=" << d << ", threshold=" << thr << ")\n";
                             localRevealed.push_back(localTargetNode);
                             revealed.push_back(masks[hop]);
-                            rebuildTropism(params.dwellWeight, params.dwellLateralWeight, false);
+                            rebuildTropism(params.dwellWeight, params.dwellLateralWeight, false, reachedDay);
                         }
                     }
                     if (reached && day - reachedDay > params.dwellDays) break;

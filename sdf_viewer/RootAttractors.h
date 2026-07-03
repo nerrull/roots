@@ -172,6 +172,51 @@ private:
     std::shared_ptr<Tropism> main_, lateral_;
 };
 
+// Delegates the whole heading computation by an organ's EMERGENCE TIME (the
+// creation time of its first node, getNodeCT(0)): organs that emerged at or
+// before thresholdTime use early_, later ones use late_. Same delegation
+// trick as OrderSplitTropism (see the long note there on why the entire call
+// must be delegated, not just the objective).
+//
+// Purpose: an offshoot that spawned while the main axis was still travelling
+// toward a mask should keep its loose travel attraction even after the main
+// root arrives and the rest of the system switches to tight dwell wrapping --
+// otherwise the moment the hop reaches the mask, every previously-dangling
+// travel offshoot gets yanked inward by the strong dwell pull. Splitting on
+// emergence time lets travel-spawned offshoots stay loose while only offshoots
+// that emerge during dwell wrap densely.
+class EmergenceTimeSplitTropism : public Tropism {
+public:
+    EmergenceTimeSplitTropism(std::shared_ptr<Organism> plant, double n, double sigma,
+                              double thresholdTime, std::shared_ptr<Tropism> early,
+                              std::shared_ptr<Tropism> late)
+        : Tropism(plant, n, sigma), threshold_(thresholdTime), early_(early), late_(late) {}
+
+    std::shared_ptr<Tropism> copy(std::shared_ptr<Organism> plant) override {
+        auto nt = std::make_shared<EmergenceTimeSplitTropism>(*this);
+        nt->plant = plant;
+        nt->early_ = early_->copy(plant);
+        nt->late_ = late_->copy(plant);
+        return nt;
+    }
+
+    CPlantBox::Vector2d getHeading(const Vector3d& pos, const Matrix3d& old, double dx,
+                                   const std::shared_ptr<Organ> o = nullptr, int nodeIdx = -1) override {
+        double ct = (o && o->getNumberOfNodes() > 0) ? o->getNodeCT(0) : 0.0;
+        return (ct <= threshold_ ? early_ : late_)->getHeading(pos, old, dx, o, nodeIdx);
+    }
+
+    double tropismObjective(const Vector3d& pos, const Matrix3d& old, double a, double b, double dx,
+                            const std::shared_ptr<Organ> o = nullptr) override {
+        double ct = (o && o->getNumberOfNodes() > 0) ? o->getNodeCT(0) : 0.0;
+        return (ct <= threshold_ ? early_ : late_)->tropismObjective(pos, old, a, b, dx, o);
+    }
+
+private:
+    double threshold_;
+    std::shared_ptr<Tropism> early_, late_;
+};
+
 // Convenience: builds two combinedAttraction() tropisms (one per weight,
 // optionally one per geometry) and wraps them in an OrderSplitTropism, so the
 // caller doesn't have to. lateralGeometry defaults to mainGeometry if not
@@ -195,6 +240,24 @@ inline std::shared_ptr<Tropism> combinedAttractionSplit(
     auto mainT = combinedAttraction(plant, base, attractors, mainN, sigma, mainWeight, mainGeometry);
     auto latT = combinedAttraction(plant, base, attractors, lateralN, sigma, lateralWeight, lateralGeometry);
     return std::make_shared<OrderSplitTropism>(plant, mainN, sigma, mainT, latT);
+}
+
+// Like combinedAttractionSplit, but the lateral/offshoot branch is further
+// split by emergence time (see EmergenceTimeSplitTropism): offshoots that
+// emerged at or before thresholdTime pull with earlyLateralWeight, later ones
+// with lateLateralWeight. Used for the dwell phase so travel-spawned offshoots
+// keep their loose travel weight while dwell-spawned offshoots wrap tightly.
+inline std::shared_ptr<Tropism> combinedAttractionSplitTimed(
+    std::shared_ptr<Organism> plant, std::shared_ptr<Tropism> base, std::vector<Attractor> attractors,
+    double mainN, double lateralN, double sigma, double mainWeight,
+    double earlyLateralWeight, double lateLateralWeight, double thresholdTime,
+    std::shared_ptr<SignedDistanceFunction> geometry = nullptr) {
+    auto mainT     = combinedAttraction(plant, base, attractors, mainN, sigma, mainWeight, geometry);
+    auto earlyLatT = combinedAttraction(plant, base, attractors, lateralN, sigma, earlyLateralWeight, geometry);
+    auto lateLatT  = combinedAttraction(plant, base, attractors, lateralN, sigma, lateLateralWeight, geometry);
+    auto latSplit  = std::make_shared<EmergenceTimeSplitTropism>(plant, lateralN, sigma, thresholdTime,
+                                                                 earlyLatT, lateLatT);
+    return std::make_shared<OrderSplitTropism>(plant, mainN, sigma, mainT, latSplit);
 }
 
 }  // namespace maskcav
