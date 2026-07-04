@@ -34,6 +34,8 @@ public:
         float noiseStrength = 0.70f;
         float driftTime     = 0.0f;    // accumulated; advance by dt*driftSpeed each frame
         float driftSpeed    = 1.0f;
+        float refDist       = 0.0f;    // >0: subtract density*refDist from optical
+                                       // depth (camera-stable fog); 0 = classic
         int   noiseType     = 0;       // 0 = value noise, 1 = simplex
     };
 
@@ -93,6 +95,7 @@ public:
     Overlay    overlay;
     WispDef    wisps[MAX_WISPS];
     int        wispCount    = 2;
+    float      wispGlowStrength = 1.0f;   // fog-pass glow blobs (fog-gated in fog.frag)
     float      wispTime     = 0.0f;  // advance by dt each frame
     float      radiusScale  = 1.0f;
     float      radiusMin    = 0.0f;   // 0 = no floor clamp
@@ -146,4 +149,5 @@ private:
     int m_fpShowGrid = -1, m_fpGridSpacing = -1;
     int m_fpWispCount = -1, m_fpWispPos = -1, m_fpWispColor = -1, m_fpWispIntensity = -1;
     int m_fpNoiseTex = -1;
+    int m_fpFogRefDist = -1, m_fpWispGlowStrength = -1;
 };
