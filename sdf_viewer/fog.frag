@@ -16,6 +16,11 @@ uniform float u_fogFalloff;
 uniform float u_fogNoiseScale;
 uniform float u_fogNoiseStrength;
 uniform float u_fogTime;
+uniform float u_fogRefDist;         // >0: camera->target distance whose mean
+                                    // optical depth is subtracted out, so fog
+                                    // encodes relative depth within the scene
+                                    // instead of absolute camera distance
+uniform float u_wispGlowStrength;   // scales the atmospheric face-light glow
 uniform int   u_noiseType;      // 0 = value, 1 = simplex
 
 uniform int   u_showAxes;
@@ -185,6 +190,13 @@ void main() {
 
     // Apply fog from camera to the nearest surface
     float tau = marchFog(ro, rd, tHit);
+    // Camera-stable fog: subtract the mean optical depth accumulated over the
+    // camera->target distance, so the subject keeps a constant brightness as
+    // the camera zooms/orbits and fog only differentiates depth WITHIN the
+    // scene. (The noise modulation is zero-mean, so density * refDist is the
+    // right baseline; clamping at 0 just means nothing nearer than the focus
+    // plane gets artificially brightened.) u_fogRefDist = 0 disables this.
+    tau = max(tau - u_fogDensity * u_fogRefDist, 0.0);
     vec3  foggedColor = mix(u_fogColor, hitColor, exp(-tau));
 
     // Wisp glow — soft emissive blobs floating in the atmosphere
@@ -215,5 +227,10 @@ void main() {
         wispGlow += u_wispColor[wi] * glow;
     }
 
-    fragColor = vec4(foggedColor + wispGlow * 0.15, 1.0);
+    // The glow blobs read as fog-scattered light -- with no fog there's
+    // nothing to scatter, so gate them by density (normalized to the default
+    // density 0.015 so the long-standing look is unchanged there) instead of
+    // unconditionally adding a "light volume" even in perfectly clear air.
+    float glowGate = clamp(u_fogDensity / 0.015, 0.0, 1.0) * u_wispGlowStrength;
+    fragColor = vec4(foggedColor + wispGlow * 0.15 * glowGate, 1.0);
 }

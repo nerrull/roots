@@ -324,11 +324,36 @@ struct Params {
     float colorNoiseScale = 0.4f;
     float colorNoiseStrength = 0.6f;
 
+    // fog noise drift rate -- multiplies the fixed per-frame driftTime step.
+    // 0 freezes the fog in place.
+    float fogScrollSpeed = 1.0f;
+    // Camera-stable lighting: subtract the mean fog optical depth over the
+    // camera->target distance in the fog pass, so overall scene brightness
+    // stops depending on how far out the (zooming/auto-fitting) camera sits
+    // and fog only encodes relative depth within the scene.
+    bool fogStableLighting = true;
+    // strength of the fog-pass glow blob around each face light (already
+    // gated by fog density in fog.frag -- no fog, no visible light volume).
+    float faceGlowStrength = 1.0f;
+
+    // Travel target sits this far (cm) visually above the mask center, so the
+    // arriving main root anchors above the face and the dwell wrap (which
+    // still targets the mask rim itself) frames it instead of crossing it.
+    float targetLift = 3.0f;
+    // The next hop's root system seeds this far (cm) behind the previous
+    // mask's back surface (along -normal, past r_depth), so new growth
+    // emerges from inside the cone around the mask instead of poking out
+    // of its front.
+    float spawnBehind = 2.5f;
+
     // camera: -1 = whole-scene orbit, >=0 = focus on that revealed mask index
     // (fixed/non-rotating -- see idle-orbit code). orbitSpeed only affects
     // the whole-scene orbit; 0 = frozen.
     int cameraFaceIdx = -1;
     float orbitSpeed = 1.0f;
+    // user zoom on top of the auto-fit orbit radius; driven by the mouse
+    // scroll wheel (see scroll callback) and the Camera panel slider.
+    float zoom = 1.0f;
 
     // internal render resolution as a fraction of the real framebuffer.
     // History: 0.35 was chosen when the fog pass computed a 4-octave
@@ -340,6 +365,19 @@ struct Params {
     // comfortably interactive and this default is just a headroom choice.
     float renderScale = 0.35f;
 };
+
+// Mouse-wheel zoom: chains to ImGui's own scroll callback (installed by
+// ImGui_ImplGlfw with install_callbacks=true) so panel scrolling keeps
+// working, and only adjusts the camera when the cursor isn't over a panel.
+static float* g_zoomPtr = nullptr;
+static GLFWscrollfun g_prevScrollCb = nullptr;
+static void zoomScrollCallback(GLFWwindow* w, double dx, double dy) {
+    if (g_prevScrollCb) g_prevScrollCb(w, dx, dy);
+    if (g_zoomPtr && !ImGui::GetIO().WantCaptureMouse) {
+        *g_zoomPtr *= std::exp((float) -dy * 0.1f);   // exponential: even feel at any zoom
+        *g_zoomPtr = std::min(std::max(*g_zoomPtr, 0.15f), 5.0f);
+    }
+}
 
 static const std::vector<std::pair<std::string, std::string>> g_species = {
     {"Maize (Zea mays)",     "Zea_mays_6_Leitner_2014.xml"},
@@ -471,6 +509,8 @@ int main(int argc, char** argv) {
     std::string status = "Press \"Regrow\" to start.";
 
     Params params, pending = params;
+    g_zoomPtr = &pending.zoom;
+    g_prevScrollCb = glfwSetScrollCallback(window, zoomScrollCallback);
     if (cliRenderScale > 0.0f) { params.renderScale = cliRenderScale; pending.renderScale = cliRenderScale; }
     if (cliN > 0) { params.N = cliN; pending.N = cliN; }
     if (cliPullReach > 0.0f) { params.travelPullReach = cliPullReach; pending.travelPullReach = cliPullReach; }
@@ -520,6 +560,10 @@ int main(int argc, char** argv) {
         ImGui::TextDisabled("Distance step 0 = auto (spread N masks evenly\nover the cone). Set explicitly to make mask\ncount and spacing independent.");
         ImGui::Separator();
         ImGui::SliderFloat("Dwell days", &pending.dwellDays, 2.0f, 40.0f, "%.1f");
+        ImGui::SliderFloat("Arrival lift above mask", &pending.targetLift, 0.0f, 8.0f, "%.1f cm");
+        ImGui::TextDisabled("Travel target sits this far above the mask, so\nthe arriving root anchors above the face and the\ndwell wrap frames it instead of crossing it.");
+        ImGui::SliderFloat("Next-root start depth", &pending.spawnBehind, 0.0f, 8.0f, "%.1f cm");
+        ImGui::TextDisabled("Each new hop seeds this far behind the previous\nmask's back surface, so it emerges around the\nmask instead of poking out of its front.");
         ImGui::SliderFloat("Attraction: main root", &pending.weight, 0.0f, 0.99f, "%.2f");
         ImGui::SliderFloat("Main root trials (n)", &pending.mainTravelTrials, 4.0f, 30.0f, "%.0f");
         ImGui::TextDisabled("More trials = more candidate headings tried\nper step -- at high attraction, this is what\nactually makes it reliably point at the target.");
@@ -576,13 +620,18 @@ int main(int argc, char** argv) {
             ImGui::SliderFloat("Face specular", &pending.faceSpecStrength, 0.0f, 4.0f, "%.2f");
             ImGui::ColorEdit3("Face light color (on roots)", pending.faceLightColorForRoots);
             ImGui::TextDisabled("Was accidentally tied to vein color -- now\nindependent.");
+            ImGui::SliderFloat("Face light glow", &pending.faceGlowStrength, 0.0f, 3.0f, "%.2f");
+            ImGui::TextDisabled("The soft glow \"volume\" around each face light.\nIt's fog-scattered light, so it also scales with\nfog density -- zero fog = no glow.");
             ImGui::Spacing();
             ImGui::Text("Fog");
             ImGui::SliderFloat("Fog density", &pending.fogDensity, 0.0f, 0.3f, "%.3f");
             ImGui::SliderFloat("Fog falloff", &pending.fogFalloff, 0.0f, 0.1f, "%.3f");
             ImGui::SliderFloat("Fog noise strength", &pending.fogNoiseStrength, 0.0f, 1.0f, "%.2f");
             ImGui::SliderFloat("Fog noise scale", &pending.fogNoiseScale, 0.01f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Fog scroll speed", &pending.fogScrollSpeed, 0.0f, 5.0f, "%.2f");
             ImGui::ColorEdit3("Fog color", pending.fogColor);
+            ImGui::Checkbox("Camera-stable lighting", &pending.fogStableLighting);
+            ImGui::TextDisabled("Measures fog relative to the camera-target\ndistance, so zooming/orbiting doesn't dim or\nbrighten the whole scene -- fog only encodes\ndepth differences within it.");
             ImGui::TextDisabled("All of the above apply live -- no regrow needed.");
         }
 
@@ -614,6 +663,9 @@ int main(int argc, char** argv) {
             ImGui::TextDisabled("Applies once growth is finished (idle orbit).\nFocusing on a face freezes rotation --\nit no longer orbits behind it.");
             ImGui::SliderFloat("Orbit speed", &pending.orbitSpeed, 0.0f, 3.0f, "%.2f");
             ImGui::TextDisabled("Whole-scene orbit only -- a focused face\nalready holds still regardless of this.");
+            ImGui::SliderFloat("Zoom", &pending.zoom, 0.15f, 5.0f, "%.2fx");
+            ImGui::TextDisabled("Also driven by the mouse scroll wheel\n(when the cursor isn't over a panel).");
+            if (ImGui::Button("Reset zoom")) pending.zoom = 1.0f;
         }
 
         ImGui::Spacing();
@@ -752,6 +804,7 @@ int main(int argc, char** argv) {
         lightDir[1] = sinEl;
         lightDir[2] = cosEl * cosf(pending.lightAzimuth);
 
+        renderer.wispGlowStrength = pending.faceGlowStrength;
         renderer.fog.falloff = pending.fogFalloff;
         renderer.fog.noiseStrength = pending.fogNoiseStrength;
         renderer.fog.noiseScale = pending.fogNoiseScale;
@@ -832,7 +885,12 @@ int main(int argc, char** argv) {
             bool quit = false;
 
             for (int hop = 0; hop < params.N && !quit; hop++) {
-                Vector3d targetGlobal = masks[hop].pos;
+                Vector3d maskGlobal = masks[hop].pos;
+                // Travel target sits a bit visually above the mask (render-up
+                // is -z in grow coords, see toYup), so the main root arrives
+                // and dwells above the face -- framing it -- while the dwell
+                // rim ring below still wraps the actual mask.
+                Vector3d targetGlobal = maskGlobal.plus(Vector3d(0, 0, -(double) params.targetLift));
                 status = "Growing hop " + std::to_string(hop + 1) + "/" + std::to_string(params.N)
                         + " -- " + g_species[params.speciesIdx].first;
 
@@ -853,8 +911,10 @@ int main(int argc, char** argv) {
                     MaskNode lm = m; lm.pos = m.pos.minus(offset);
                     localRevealed.push_back(lm);
                 }
+                // rim/dwell attraction targets the REAL mask position, not the
+                // lifted travel target -- wrapping should hug the face itself.
                 MaskNode localTargetNode = masks[hop];
-                localTargetNode.pos = localTarget;
+                localTargetNode.pos = maskGlobal.minus(offset);
 
                 auto base = std::make_shared<Gravitropism>(rs, 1.0, params.sigma);
                 double hopLen = localTarget.minus(localSeed).length();
@@ -999,9 +1059,10 @@ int main(int argc, char** argv) {
                     }
                     float target3[3] = {(float) (lo.x + hi.x) * 0.5f, (float) (lo.y + hi.y) * 0.5f, (float) (lo.z + hi.z) * 0.5f};
                     float extent = (float) std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
-                    float radius = extent * 0.9f + 10.0f;
+                    float radius = (extent * 0.9f + 10.0f) * pending.zoom;
                     float azimuth = 0.8f + 2.0f * (float) M_PI * 0.5f * pending.orbitSpeed * (frame / 260.0f);
-                    renderer.fog.driftTime += 0.02f;
+                    renderer.fog.driftTime += 0.02f * pending.fogScrollSpeed;
+                    renderer.fog.refDist = pending.fogStableLighting ? radius : 0.0f;
 
                     renderer.render(azimuth, 0.12f, radius, target3, 0.5f, lightDir,
                                     [&](const float* vp, const float* eye) { faceGL.draw(vp, eye, lightDir); });
@@ -1031,7 +1092,12 @@ int main(int argc, char** argv) {
                 fh.segs = anaFinal.segments;
                 fh.radii = radiiFinal;
                 frozen.push_back(fh);
-                prevPos = targetGlobal;
+                // Seed the next hop behind the mask (past its ellipsoid depth
+                // along -normal, i.e. inside the cone body) so the new root
+                // emerges from around the mask instead of sprouting out of
+                // its front face.
+                prevPos = maskGlobal.minus(masks[hop].normal.times(
+                    masks[hop].r_depth + (double) params.spawnBehind));
             }
 
             growing = false;
@@ -1077,12 +1143,12 @@ int main(int argc, char** argv) {
             // mask, and would swing it out of frame/behind the camera).
             Vector3d fp = toYup(revealed[pending.cameraFaceIdx].pos);
             target3[0] = (float) fp.x; target3[1] = (float) fp.y; target3[2] = (float) fp.z;
-            radius = std::max(revealed[pending.cameraFaceIdx].r_width, revealed[pending.cameraFaceIdx].r_height) * 3.5f + 4.0f;
+            radius = (std::max(revealed[pending.cameraFaceIdx].r_width, revealed[pending.cameraFaceIdx].r_height) * 3.5f + 4.0f) * pending.zoom;
             azimuth = 0.8f + 0.15f * pending.orbitSpeed * (float) focusFrame / 60.0f;
             focusFrame++;
         } else {
             target3[0] = idleCenter[0]; target3[1] = idleCenter[1]; target3[2] = idleCenter[2];
-            radius = idleExtent * 0.75f + 12.0f;
+            radius = (idleExtent * 0.75f + 12.0f) * pending.zoom;
             azimuth = 0.8f + 0.15f * pending.orbitSpeed * (float) orbitFrame / 60.0f;
             orbitFrame++;
         }
@@ -1092,6 +1158,10 @@ int main(int argc, char** argv) {
             azimuth = 0.8f + 2.0f * (float) M_PI * (float) seqDumped / (float) seqFrames;
 
         auto _i1 = std::chrono::steady_clock::now();
+        // fog drift never advanced during the idle orbit before -- the noise
+        // was frozen the moment growth finished.
+        renderer.fog.driftTime += 0.02f * pending.fogScrollSpeed;
+        renderer.fog.refDist = pending.fogStableLighting ? radius : 0.0f;
         renderer.render(azimuth, 0.15f, radius, target3, 0.5f, lightDir,
                         [&](const float* vp, const float* eye) { faceGL.draw(vp, eye, lightDir); });
         auto _i2 = std::chrono::steady_clock::now();

@@ -255,6 +255,8 @@ void RootRenderer::buildShader() {
         m_fpFogNoiseScale    = glGetUniformLocation(m_fogProg, "u_fogNoiseScale");
         m_fpFogNoiseStrength = glGetUniformLocation(m_fogProg, "u_fogNoiseStrength");
         m_fpFogTime          = glGetUniformLocation(m_fogProg, "u_fogTime");
+        m_fpFogRefDist       = glGetUniformLocation(m_fogProg, "u_fogRefDist");
+        m_fpWispGlowStrength = glGetUniformLocation(m_fogProg, "u_wispGlowStrength");
         m_fpNoiseType        = glGetUniformLocation(m_fogProg, "u_noiseType");
         m_fpShowAxes         = glGetUniformLocation(m_fogProg, "u_showAxes");
         m_fpAxisLength       = glGetUniformLocation(m_fogProg, "u_axisLength");
@@ -543,6 +545,8 @@ void RootRenderer::render(float azimuth, float elevation, float radius,
     glUniform1f (m_fpFogNoiseScale,      fog.noiseScale);
     glUniform1f (m_fpFogNoiseStrength,   fog.noiseStrength);
     glUniform1f (m_fpFogTime,            fog.driftTime);
+    glUniform1f (m_fpFogRefDist,         fog.refDist);
+    glUniform1f (m_fpWispGlowStrength,   wispGlowStrength);
     glUniform1i (m_fpNoiseType,          fog.noiseType);
     glUniform1i (m_fpShowAxes,           overlay.showAxes  ? 1 : 0);
     glUniform1f (m_fpAxisLength,         overlay.axisLength);
