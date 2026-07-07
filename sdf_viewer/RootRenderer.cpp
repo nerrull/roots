@@ -158,6 +158,23 @@ RootRenderer::RootRenderer(int w, int h) : m_w(w), m_h(h) {
     makeTBO(m_nodeBuf, m_nodeTex);
     makeTBO(m_segBuf,  m_segTex);
     makeTBO(m_radBuf,  m_radTex);
+    makeTBO(m_distBuf, m_distTex);
+    makeTBO(m_grpBuf,  m_grpTex);
+    makeTBO(m_primBuf, m_primTex);
+    makeTBO(m_frameBuf, m_frameTex);
+    makeTBO(m_auxBuf,  m_auxTex);
+
+    glBindTexture(GL_TEXTURE_BUFFER, m_grpTex);
+    glTexBuffer(GL_TEXTURE_BUFFER, GL_R32I, m_grpBuf);
+
+    glBindTexture(GL_TEXTURE_BUFFER, m_primTex);
+    glTexBuffer(GL_TEXTURE_BUFFER, GL_R32I, m_primBuf);
+
+    glBindTexture(GL_TEXTURE_BUFFER, m_frameTex);
+    glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA32F, m_frameBuf);
+
+    glBindTexture(GL_TEXTURE_BUFFER, m_auxTex);
+    glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA32F, m_auxBuf);
 
     glBindTexture(GL_TEXTURE_BUFFER, m_nodeTex);
     glTexBuffer(GL_TEXTURE_BUFFER, GL_RGB32F, m_nodeBuf);
@@ -167,6 +184,9 @@ RootRenderer::RootRenderer(int w, int h) : m_w(w), m_h(h) {
 
     glBindTexture(GL_TEXTURE_BUFFER, m_radTex);
     glTexBuffer(GL_TEXTURE_BUFFER, GL_R32F,   m_radBuf);
+
+    glBindTexture(GL_TEXTURE_BUFFER, m_distTex);
+    glTexBuffer(GL_TEXTURE_BUFFER, GL_R32F,   m_distBuf);
 
     glBindTexture(GL_TEXTURE_BUFFER, 0);
 
@@ -185,9 +205,19 @@ RootRenderer::~RootRenderer() {
     glDeleteBuffers(1,  &m_nodeBuf);
     glDeleteBuffers(1,  &m_segBuf);
     glDeleteBuffers(1,  &m_radBuf);
+    glDeleteBuffers(1,  &m_distBuf);
+    glDeleteBuffers(1,  &m_grpBuf);
+    glDeleteTextures(1, &m_grpTex);
+    glDeleteBuffers(1,  &m_primBuf);
+    glDeleteTextures(1, &m_primTex);
+    glDeleteBuffers(1,  &m_frameBuf);
+    glDeleteTextures(1, &m_frameTex);
+    glDeleteBuffers(1,  &m_auxBuf);
+    glDeleteTextures(1, &m_auxTex);
     glDeleteTextures(1, &m_nodeTex);
     glDeleteTextures(1, &m_segTex);
     glDeleteTextures(1, &m_radTex);
+    glDeleteTextures(1, &m_distTex);
     glDeleteTextures(1, &m_noiseTex);
 }
 
@@ -230,6 +260,21 @@ void RootRenderer::buildShader() {
         m_uRadiusMin     = glGetUniformLocation(m_prog, "u_radiusMin");
         m_uRadiusMax     = glGetUniformLocation(m_prog, "u_radiusMax");
         m_uNoiseTex      = glGetUniformLocation(m_prog, "u_noiseTex");
+        m_uDist          = glGetUniformLocation(m_prog, "u_nodeDist");
+        m_uGroups        = glGetUniformLocation(m_prog, "u_groups");
+        m_uPalette       = glGetUniformLocation(m_prog, "u_palette");
+        m_uPaletteCount  = glGetUniformLocation(m_prog, "u_paletteCount");
+        m_uPrimType      = glGetUniformLocation(m_prog, "u_primType");
+        m_uPrimFrame     = glGetUniformLocation(m_prog, "u_primFrame");
+        m_uPrimAux       = glGetUniformLocation(m_prog, "u_primAux");
+        m_uPaletteTip    = glGetUniformLocation(m_prog, "u_paletteTip");
+        m_uPulseEnabled  = glGetUniformLocation(m_prog, "u_pulseEnabled");
+        m_uPulseColor    = glGetUniformLocation(m_prog, "u_pulseColor");
+        m_uPulseSpeed    = glGetUniformLocation(m_prog, "u_pulseSpeed");
+        m_uPulseSpacing  = glGetUniformLocation(m_prog, "u_pulseSpacing");
+        m_uPulseWidth    = glGetUniformLocation(m_prog, "u_pulseWidth");
+        m_uPulseIntensity= glGetUniformLocation(m_prog, "u_pulseIntensity");
+        m_uPulseTime     = glGetUniformLocation(m_prog, "u_pulseTime");
     }
 
     // --- Fog post-process pass ---
@@ -326,7 +371,11 @@ void RootRenderer::resize(int w, int h) {
 
 void RootRenderer::uploadSegments(const std::vector<CPlantBox::Vector3d>& nodes,
                                    const std::vector<CPlantBox::Vector2i>& segs,
-                                   const std::vector<double>& radii) {
+                                   const std::vector<double>& radii,
+                                   const std::vector<int>* groups,
+                                   const std::vector<int>* prims,
+                                   const std::vector<float>* frames,
+                                   const std::vector<float>* aux) {
     m_segCount = static_cast<int>(segs.size());
 
     std::vector<float> nodeData;
@@ -348,6 +397,36 @@ void RootRenderer::uploadSegments(const std::vector<CPlantBox::Vector3d>& nodes,
     for (double r : radii) radData.push_back(static_cast<float>(r));
     if (radData.empty()) radData.push_back(0.f);
 
+    // Per-node arc-length from its root base, used by the travelling-pulse
+    // effect. Segments arrive parent-before-child within each hop and each
+    // hop's seed node has no incoming segment, so a single forward pass over
+    // the segment list accumulates dist[child] = dist[parent] + |edge|. Nodes
+    // that are never a child (the seeds) keep distance 0, which restarts the
+    // pulse train at each relayed hop -- reads as a fresh signal per mask.
+    std::vector<float> distData(nodes.size(), 0.f);
+    // Each hop is a separate root system whose base node (the only node that is
+    // never a segment child) starts a fresh chain. Pre-seed those base nodes
+    // with a cumulative per-hop offset so consecutive masks' pulse trains are
+    // phase-shifted; the forward pass below then adds edge lengths on top.
+    std::vector<char> isChild(nodes.size(), 0);
+    for (auto& s : segs)
+        if (s.y >= 0 && (size_t) s.y < nodes.size()) isChild[s.y] = 1;
+    if (pulse.hopOffset != 0.0f) {
+        float hopBase = 0.f;
+        for (size_t i = 0; i < nodes.size(); i++)
+            if (!isChild[i]) { distData[i] = hopBase; hopBase += pulse.hopOffset; }
+    }
+    for (auto& s : segs) {
+        int pi = s.x, ci = s.y;
+        if (pi < 0 || ci < 0 || (size_t) pi >= nodes.size() || (size_t) ci >= nodes.size())
+            continue;
+        double dx = nodes[ci].x - nodes[pi].x;
+        double dy = nodes[ci].y - nodes[pi].y;
+        double dz = nodes[ci].z - nodes[pi].z;
+        distData[ci] = distData[pi] + static_cast<float>(std::sqrt(dx*dx + dy*dy + dz*dz));
+    }
+    if (distData.empty()) distData.push_back(0.f);
+
     glBindBuffer(GL_TEXTURE_BUFFER, m_nodeBuf);
     glBufferData(GL_TEXTURE_BUFFER, static_cast<GLsizeiptr>(nodeData.size() * sizeof(float)),
                  nodeData.data(), GL_DYNAMIC_DRAW);
@@ -359,6 +438,50 @@ void RootRenderer::uploadSegments(const std::vector<CPlantBox::Vector3d>& nodes,
     glBindBuffer(GL_TEXTURE_BUFFER, m_radBuf);
     glBufferData(GL_TEXTURE_BUFFER, static_cast<GLsizeiptr>(radData.size() * sizeof(float)),
                  radData.data(), GL_DYNAMIC_DRAW);
+
+    glBindBuffer(GL_TEXTURE_BUFFER, m_distBuf);
+    glBufferData(GL_TEXTURE_BUFFER, static_cast<GLsizeiptr>(distData.size() * sizeof(float)),
+                 distData.data(), GL_DYNAMIC_DRAW);
+
+    // Per-segment palette group index (int per capsule). Absent -> all 0.
+    std::vector<int> grpData;
+    if (groups && !groups->empty()) grpData = *groups;
+    else                            grpData.assign(std::max<size_t>(1, segs.size()), 0);
+    grpData.resize(std::max<size_t>(1, segs.size()), 0);
+    glBindBuffer(GL_TEXTURE_BUFFER, m_grpBuf);
+    glBufferData(GL_TEXTURE_BUFFER, static_cast<GLsizeiptr>(grpData.size() * sizeof(int)),
+                 grpData.data(), GL_DYNAMIC_DRAW);
+
+    // Per-segment primitive type (int). Absent -> all capsules (0).
+    std::vector<int> primData;
+    if (prims && !prims->empty()) primData = *prims;
+    primData.resize(std::max<size_t>(1, segs.size()), 0);
+    glBindBuffer(GL_TEXTURE_BUFFER, m_primBuf);
+    glBufferData(GL_TEXTURE_BUFFER, static_cast<GLsizeiptr>(primData.size() * sizeof(int)),
+                 primData.data(), GL_DYNAMIC_DRAW);
+
+    // Per-segment blade frame (vec4). Absent -> zeros (ignored by capsules).
+    std::vector<float> frameData;
+    if (frames && !frames->empty()) frameData = *frames;
+    frameData.resize(std::max<size_t>(1, segs.size()) * 4, 0.f);
+    glBindBuffer(GL_TEXTURE_BUFFER, m_frameBuf);
+    glBufferData(GL_TEXTURE_BUFFER, static_cast<GLsizeiptr>(frameData.size() * sizeof(float)),
+                 frameData.data(), GL_DYNAMIC_DRAW);
+
+    // Per-segment aux (s0,s1,grad0,grad1). Absent -> whole-petal span, no
+    // gradient: (0,1,0,0) so gradT stays 0 and the base palette colour is used.
+    std::vector<float> auxData;
+    if (aux && !aux->empty()) auxData = *aux;
+    else {
+        auxData.resize(std::max<size_t>(1, segs.size()) * 4);
+        for (size_t i = 0; i < auxData.size(); i += 4) {
+            auxData[i] = 0.f; auxData[i+1] = 1.f; auxData[i+2] = 0.f; auxData[i+3] = 0.f;
+        }
+    }
+    auxData.resize(std::max<size_t>(1, segs.size()) * 4, 0.f);
+    glBindBuffer(GL_TEXTURE_BUFFER, m_auxBuf);
+    glBufferData(GL_TEXTURE_BUFFER, static_cast<GLsizeiptr>(auxData.size() * sizeof(float)),
+                 auxData.data(), GL_DYNAMIC_DRAW);
 
     glBindBuffer(GL_TEXTURE_BUFFER, 0);
 }
@@ -460,11 +583,38 @@ void RootRenderer::render(float azimuth, float elevation, float radius,
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_BUFFER, m_segTex);
     glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_BUFFER, m_radTex);
     glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_3D,     m_noiseTex);
+    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_BUFFER, m_distTex);
+    glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_BUFFER, m_grpTex);
+    glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_BUFFER, m_primTex);
+    glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_BUFFER, m_frameTex);
+    glActiveTexture(GL_TEXTURE8); glBindTexture(GL_TEXTURE_BUFFER, m_auxTex);
 
     glUniform1i(m_uNodes,    0);
     glUniform1i(m_uSegs,     1);
     glUniform1i(m_uRads,     2);
     glUniform1i(m_uNoiseTex, 3);
+    glUniform1i(m_uDist,     4);
+    glUniform1i(m_uGroups,   5);
+    glUniform1i(m_uPrimType, 6);
+    glUniform1i(m_uPrimFrame, 7);
+    glUniform1i(m_uPrimAux,  8);
+    {
+        int pc = paletteCount < 0 ? 0 : (paletteCount > MAX_GROUPS ? MAX_GROUPS : paletteCount);
+        glUniform1i(m_uPaletteCount, pc);
+        if (pc > 0) {
+            glUniform3fv(m_uPalette, pc, &palette[0][0]);
+            // Tip colours: use paletteTip where provided, else fall back to the
+            // base colour so groups without a gradient render flat.
+            float tips[MAX_GROUPS * 3];
+            for (int i = 0; i < pc; ++i) {
+                bool hasTip = i < paletteTipCount;
+                tips[i*3+0] = hasTip ? paletteTip[i][0] : palette[i][0];
+                tips[i*3+1] = hasTip ? paletteTip[i][1] : palette[i][1];
+                tips[i*3+2] = hasTip ? paletteTip[i][2] : palette[i][2];
+            }
+            glUniform3fv(m_uPaletteTip, pc, tips);
+        }
+    }
     glUniform1i(m_uSegCount, m_segCount);
     glUniform3f(m_uEye,      ex, ey, ez);
     glUniformMatrix3fv(m_uCam, 1, GL_FALSE, cam);
@@ -492,6 +642,13 @@ void RootRenderer::render(float azimuth, float elevation, float radius,
     glUniform1f(m_uRadiusScale, radiusScale);
     glUniform1f(m_uRadiusMin, radiusMin);
     glUniform1f(m_uRadiusMax, radiusMax);
+    glUniform1i(m_uPulseEnabled,   pulse.enabled ? 1 : 0);
+    glUniform3fv(m_uPulseColor, 1, pulse.color);
+    glUniform1f(m_uPulseSpeed,     pulse.speed);
+    glUniform1f(m_uPulseSpacing,   pulse.spacing);
+    glUniform1f(m_uPulseWidth,     pulse.width);
+    glUniform1f(m_uPulseIntensity, pulse.intensity);
+    glUniform1f(m_uPulseTime,      pulse.time);
 
     glBindVertexArray(m_vao);
     glDrawArraysInstanced(GL_TRIANGLES, 0, 6, m_segCount);

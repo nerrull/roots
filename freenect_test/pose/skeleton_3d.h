@@ -68,8 +68,8 @@ static inline float kinect_raw_to_mm(uint16_t raw) {
 }
 
 // Median depth (mm) over a (2r+1)² patch; returns 0 if no valid samples.
-static float sample_depth_mm(const uint16_t* raw_depth, int cx, int cy, int r = 3) {
-    float vals[49];  // worst case (2*3+1)^2 = 49
+static float sample_depth_mm(const uint16_t* raw_depth, int cx, int cy, int r = 6) {
+    float vals[169];  // worst case (2*6+1)^2 = 169
     int   n = 0;
     for (int dy = -r; dy <= r; dy++) {
         for (int dx = -r; dx <= r; dx++) {

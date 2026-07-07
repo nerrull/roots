@@ -10,7 +10,7 @@ public:
     RTMPoseTrackerOnnxruntime() = delete;
     RTMPoseTrackerOnnxruntime(const std::string& det_path,
                                const std::string& pose_path,
-                               int detect_interval = 10);
+                               int detect_interval = 5);
 
     std::vector<std::pair<DetectBox, std::vector<PosePoint>>> Inference(const cv::Mat& frame);
 

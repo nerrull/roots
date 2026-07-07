@@ -39,6 +39,24 @@ public:
         int   noiseType     = 0;       // 0 = value noise, 1 = simplex
     };
 
+    // Pulses of light travelling along the roots: an emissive band that scrolls
+    // outward along each root's arc-length from its base. Purely additive on top
+    // of the normal shading, driven by a per-node "distance from base" buffer.
+    struct Pulse {
+        bool  enabled   = false;
+        float color[3]  = {1.0f, 0.85f, 0.45f};
+        float speed     = 14.0f;   // cm of arc-length per unit time
+        float spacing   = 22.0f;   // cm between consecutive pulses
+        float width     = 3.5f;    // cm; length of the bright band
+        float intensity = 1.6f;    // additive brightness at the crest
+        float time      = 0.0f;    // accumulated; advance each frame
+        // Arc-length added to each successive hop's base, so the pulse train is
+        // out of phase from mask to mask -- reads as the wave travelling along
+        // the relay rather than every mask firing in unison. Baked into the
+        // per-node distance in uploadSegments (0 = all hops in phase).
+        float hopOffset = 12.0f;
+    };
+
     struct Overlay {
         bool  showAxes    = false;
         float axisLength  = 10.0f;    // cm
@@ -59,9 +77,32 @@ public:
     RootRenderer(int w, int h);
     ~RootRenderer();
 
+    // prims: optional per-segment primitive type (0 = capsule, 1 = blade).
+    // frames: optional per-segment vec4 (4 floats/segment) -- for blades,
+    // xyz = half-width vector, w = curl. Both null -> all capsules (unchanged).
     void uploadSegments(const std::vector<CPlantBox::Vector3d>& nodes,
                         const std::vector<CPlantBox::Vector2i>& segments,
-                        const std::vector<double>& radii);
+                        const std::vector<double>& radii,
+                        const std::vector<int>* groups = nullptr,
+                        const std::vector<int>* prims = nullptr,
+                        const std::vector<float>* frames = nullptr,
+                        const std::vector<float>* aux = nullptr);
+
+    // Per-segment colour groups: a cheap alternative to a full RGB-per-segment
+    // attribute. Each segment carries a small integer index (uploaded via the
+    // `groups` arg of uploadSegments); the shader looks that index up in this
+    // palette for the segment's base colour, so a whole plant of thousands of
+    // capsules costs one int per capsule + a handful of palette colours rather
+    // than three floats per capsule. paletteCount = 0 disables it and falls
+    // back to the single mat.baseColor / baseColor2 material.
+    static constexpr int MAX_GROUPS = 8;
+    float palette[MAX_GROUPS][3] = {};
+    int   paletteCount = 0;
+    // Second colour per group: petals/blades lerp palette -> paletteTip along
+    // their length (base -> tip) by the per-segment gradient in the aux buffer.
+    // paletteTipCount == 0 -> tips default to the base palette (no gradient).
+    float paletteTip[MAX_GROUPS][3] = {};
+    int   paletteTipCount = 0;
 
     void resize(int w, int h);
 
@@ -92,6 +133,7 @@ public:
     Material   mat;
     PBRParams  pbr;
     Fog        fog;
+    Pulse      pulse;
     Overlay    overlay;
     WispDef    wisps[MAX_WISPS];
     int        wispCount    = 2;
@@ -124,6 +166,11 @@ private:
     GLuint m_nodeBuf = 0, m_nodeTex = 0;
     GLuint m_segBuf  = 0, m_segTex  = 0;
     GLuint m_radBuf  = 0, m_radTex  = 0;
+    GLuint m_distBuf = 0, m_distTex = 0;   // per-node arc-length from root base
+    GLuint m_grpBuf  = 0, m_grpTex  = 0;   // per-segment palette group index
+    GLuint m_primBuf = 0, m_primTex = 0;   // per-segment primitive type
+    GLuint m_frameBuf= 0, m_frameTex= 0;   // per-segment blade frame (vec4)
+    GLuint m_auxBuf  = 0, m_auxTex  = 0;   // per-segment aux (s0,s1,grad0,grad1)
 
     int m_segCount = 0;
 
@@ -137,6 +184,11 @@ private:
     int m_uWispCount = -1, m_uWispPos = -1, m_uWispColor = -1, m_uWispIntensity = -1;
     int m_uRadiusScale = -1, m_uRadiusMin = -1, m_uRadiusMax = -1;
     int m_uNoiseTex = -1;
+    int m_uDist = -1;
+    int m_uGroups = -1, m_uPalette = -1, m_uPaletteCount = -1;
+    int m_uPrimType = -1, m_uPrimFrame = -1, m_uPrimAux = -1, m_uPaletteTip = -1;
+    int m_uPulseEnabled = -1, m_uPulseColor = -1, m_uPulseSpeed = -1;
+    int m_uPulseSpacing = -1, m_uPulseWidth = -1, m_uPulseIntensity = -1, m_uPulseTime = -1;
 
     // Fog pass
     int m_fpColorTex = -1, m_fpDepthTex = -1;

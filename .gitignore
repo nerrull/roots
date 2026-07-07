@@ -1,3 +1,6 @@
 build/
 documentation/*.mov
 **.DS_Store**
+mmpose/
+greenlab/
+freenect_test/models/

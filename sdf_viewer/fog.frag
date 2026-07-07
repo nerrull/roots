@@ -56,10 +56,16 @@ float fogFbm(vec3 p) {
 }
 
 // ---------------------------------------------------------------------------
-// Fog density: sigma(y) = density * exp(-falloff * y), noise-modulated
+// Fog density: sigma = density * exp(-falloff * height), noise-modulated.
+// Falloff decays along +y, which is render-up (see toYup): fog thins with
+// height like real ground fog, and -- crucially -- the gradient is vertical,
+// so it stays put as the camera orbits. (It used to decay along pos.z, a
+// HORIZONTAL world axis after the Y-up remap, which made the whole scene
+// brighten/dim depending on which side the camera was looking through -- the
+// "fog changes as I rotate" artifact.)
 // ---------------------------------------------------------------------------
 float fogDensity(vec3 pos) {
-    float base = u_fogDensity * exp(-u_fogFalloff * pos.z);
+    float base = u_fogDensity * exp(-u_fogFalloff * pos.y);
     if (u_fogNoiseStrength < 0.001) return base;
     vec3  np  = pos * u_fogNoiseScale + vec3(u_fogTime * 0.5, 0.0, u_fogTime * 0.3);
     float n   = fogFbm(np);                      // [0, 1], mean 0.5

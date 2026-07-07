@@ -24,12 +24,13 @@
 static const int DW = 640, DH = 480;
 
 // ── shared camera buffers ─────────────────────────────────────────────────────
-static std::mutex        s_depth_mtx, s_video_mtx;
+static std::mutex        s_depth_mtx, s_video_mtx, s_masked_video_mtx;
 static uint8_t           s_depth_pix[DW * DH * 3]{};
 static uint16_t          s_depth_raw[DW * DH]{};
 static uint8_t           s_video_pix[DW * DH * 3]{};
 static uint8_t           s_video_back[DW * DH * 3]{};
-static std::atomic<bool>    s_depth_dirty{false}, s_video_dirty{false}, s_pose_video_dirty{false};
+static uint8_t           s_masked_video[DW * DH * 3]{};
+static std::atomic<bool>    s_depth_dirty{false}, s_video_dirty{false}, s_pose_video_dirty{false}, s_masked_video_dirty{false};
 static int                  s_video_skip = 30;
 static std::atomic<bool>    s_running{true};
 static std::atomic<int>     s_video_cb_count{0};   // total video_cb invocations
@@ -46,6 +47,9 @@ struct PersonPose {
 static std::mutex              s_pose_mtx;
 static std::vector<PersonPose> s_persons;
 static std::atomic<bool>       s_pose_ready{false};
+
+// ── depth mask threshold (shared between UI and pose threads) ─────────────────
+static std::atomic<float> g_depth_mask_mm{3000.f};
 
 // ── 3D scene shaders ──────────────────────────────────────────────────────────
 static const char* SCENE3D_VERT = R"glsl(
@@ -376,9 +380,11 @@ static void pose_thread_fn() {
         std::vector<uint16_t> depth(DW * DH);
 
         // EMA state per tracked person (matched by box IoU across frames)
-        std::vector<std::vector<Joint3D>> smooth_joints;
-        std::vector<DetectBox>            smooth_boxes;
-        constexpr float EMA_ALPHA = 0.4f; // weight on new sample; lower = smoother
+        std::vector<std::vector<Joint3D>>   smooth_joints;
+        std::vector<std::vector<PosePoint>> smooth_kps;
+        std::vector<DetectBox>              smooth_boxes;
+        constexpr float EMA_ALPHA  = 0.35f;
+        constexpr float HOLD_DECAY = 0.8f;  // confidence decay per frame when depth is missing
 
         int pose_frame = 0;
         while (s_running) {
@@ -395,6 +401,26 @@ static void pose_thread_fn() {
                 std::lock_guard<std::mutex> lk(s_depth_mtx);
                 memcpy(depth.data(), s_depth_raw, sizeof(s_depth_raw));
             }
+            // Depth mask: black out pixels beyond threshold (invalid/too-close pixels untouched)
+            {
+                float mask_mm = g_depth_mask_mm.load();
+                for (int i = 0; i < DW * DH; i++) {
+                    uint16_t raw = depth[i] & 0x7FFu;
+                    float d = kinect_raw_to_mm(raw);
+                    if (d > 0.f && d > mask_mm) {
+                        frame.data[i * 3 + 0] = 0;
+                        frame.data[i * 3 + 1] = 0;
+                        frame.data[i * 3 + 2] = 0;
+                    }
+                }
+            }
+            // Share masked RGB frame for display before converting to BGR for inference
+            {
+                std::lock_guard<std::mutex> lk(s_masked_video_mtx);
+                memcpy(s_masked_video, frame.data, DW * DH * 3);
+            }
+            s_masked_video_dirty = true;
+
             cv::cvtColor(frame, frame, cv::COLOR_RGB2BGR);
 
             fprintf(stderr, "[pose] frame=%d video_frames=%d\n",
@@ -417,31 +443,45 @@ static void pose_thread_fn() {
                 if (best_j >= 0) { match[i] = best_j; used[best_j] = true; }
             }
 
-            std::vector<std::vector<Joint3D>> new_smooth(n_new);
-            std::vector<DetectBox>            new_boxes(n_new);
-            std::vector<PersonPose>           persons(n_new);
+            std::vector<std::vector<Joint3D>>   new_smooth(n_new);
+            std::vector<std::vector<PosePoint>> new_smooth_kps(n_new);
+            std::vector<DetectBox>              new_boxes(n_new);
+            std::vector<PersonPose>             persons(n_new);
 
             for (int i = 0; i < n_new; i++) {
                 auto& [box, kps] = detections[i];
                 auto joints = lift_to_3d(kps, depth.data());
 
                 if (match[i] >= 0) {
-                    const auto& prev = smooth_joints[match[i]];
-                    for (int k = 0; k < (int)joints.size() && k < (int)prev.size(); k++) {
-                        if (joints[k].valid && prev[k].valid) {
-                            joints[k].pos.x = EMA_ALPHA*joints[k].pos.x + (1.f-EMA_ALPHA)*prev[k].pos.x;
-                            joints[k].pos.y = EMA_ALPHA*joints[k].pos.y + (1.f-EMA_ALPHA)*prev[k].pos.y;
-                            joints[k].pos.z = EMA_ALPHA*joints[k].pos.z + (1.f-EMA_ALPHA)*prev[k].pos.z;
+                    const auto& prev_j = smooth_joints[match[i]];
+                    const auto& prev_k = smooth_kps[match[i]];
+
+                    for (int k = 0; k < (int)joints.size() && k < (int)prev_j.size(); k++) {
+                        if (joints[k].valid && prev_j[k].valid) {
+                            joints[k].pos.x = EMA_ALPHA*joints[k].pos.x + (1.f-EMA_ALPHA)*prev_j[k].pos.x;
+                            joints[k].pos.y = EMA_ALPHA*joints[k].pos.y + (1.f-EMA_ALPHA)*prev_j[k].pos.y;
+                            joints[k].pos.z = EMA_ALPHA*joints[k].pos.z + (1.f-EMA_ALPHA)*prev_j[k].pos.z;
+                        } else if (!joints[k].valid && prev_j[k].valid) {
+                            // hold last known position; decay confidence so it fades out if depth stays missing
+                            joints[k]             = prev_j[k];
+                            joints[k].confidence *= HOLD_DECAY;
+                            joints[k].valid       = joints[k].confidence > 0.1f;
                         }
                     }
+
+                    // smooth 2-D scores so borderline keypoints don't snap across the threshold
+                    for (int k = 0; k < (int)kps.size() && k < (int)prev_k.size(); k++)
+                        kps[k].score = EMA_ALPHA*kps[k].score + (1.f-EMA_ALPHA)*prev_k[k].score;
                 }
 
-                new_smooth[i] = joints;
-                new_boxes[i]  = box;
-                persons[i]    = { box, kps, std::move(joints) };
+                new_smooth[i]     = joints;
+                new_smooth_kps[i] = kps;
+                new_boxes[i]      = box;
+                persons[i]        = { box, kps, std::move(joints) };
             }
 
             smooth_joints = std::move(new_smooth);
+            smooth_kps    = std::move(new_smooth_kps);
             smooth_boxes  = std::move(new_boxes);
 
             {
@@ -568,7 +608,10 @@ int main() {
             std::lock_guard<std::mutex> lk(s_depth_mtx);
             upload_tex(depth_tex, s_depth_pix);
         }
-        if (s_video_dirty.exchange(false)) {
+        if (s_masked_video_dirty.exchange(false)) {
+            std::lock_guard<std::mutex> lk(s_masked_video_mtx);
+            upload_tex(video_tex, s_masked_video);
+        } else if (s_video_dirty.exchange(false)) {
             std::lock_guard<std::mutex> lk(s_video_mtx);
             upload_tex(video_tex, s_video_pix);
         }
@@ -661,13 +704,18 @@ int main() {
 
         // ── controls panel ────────────────────────────────────────────────────
         ImGui::SetNextWindowPos({DW + 16.f, DH + 36.f}, ImGuiCond_Always);
-        ImGui::SetNextWindowSize({DW + 16.f, 68.f}, ImGuiCond_Always);
+        ImGui::SetNextWindowSize({DW + 16.f, 96.f}, ImGuiCond_Always);
         ImGui::Begin("Controls", nullptr,
             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
         ImGui::Checkbox("Boxes",    &g_show_boxes);
         ImGui::SameLine();
         ImGui::Checkbox("Skeleton", &g_show_skeleton);
         ImGui::SliderFloat("Confidence threshold", &g_conf_thresh, 0.f, 1.f, "%.2f");
+        {
+            float mask = g_depth_mask_mm.load();
+            if (ImGui::SliderFloat("Depth mask (mm)", &mask, 500.f, 7000.f, "%.0f mm"))
+                g_depth_mask_mm.store(mask);
+        }
         ImGui::End();
 
         // ── 3D skeleton scene ─────────────────────────────────────────────────

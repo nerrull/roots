@@ -21,9 +21,12 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -260,6 +263,11 @@ struct Params {
     float radiusMax  = 0.35f;
     float maxHopDays = 60.0f;
     float reachMult  = 1.6f;
+    // Simulation time-step per rendered frame (days). Lower = the growth plays
+    // back slower and smoother so you can watch it closely; it also finely
+    // subdivides CPlantBox's integration. Read live, so it can be changed
+    // mid-growth. Not a structural knob -- doesn't need a Regrow.
+    float growthDt   = 0.75f;
     // How far the current target's attraction reaches during travel, as a
     // multiple of the hop's own start->target distance (Gaussian radius in
     // AttractionTropism). This is the primary steering lever now that the old
@@ -336,6 +344,15 @@ struct Params {
     // gated by fog density in fog.frag -- no fog, no visible light volume).
     float faceGlowStrength = 1.0f;
 
+    // --- travelling light pulses ---------------------------------------
+    bool  pulseEnabled   = false;
+    float pulseColor[3]  = {1.0f, 0.85f, 0.45f};
+    float pulseSpeed     = 14.0f;   // cm arc-length / sec
+    float pulseSpacing   = 22.0f;   // cm between pulses
+    float pulseWidth     = 3.5f;    // cm band length
+    float pulseIntensity = 1.6f;
+    float pulseHopOffset = 12.0f;   // cm phase-lag added per successive mask
+
     // Travel target sits this far (cm) visually above the mask center, so the
     // arriving main root anchors above the face and the dwell wrap (which
     // still targets the mask rim itself) frames it instead of crossing it.
@@ -365,6 +382,106 @@ struct Params {
     // comfortably interactive and this default is just a headroom choice.
     float renderScale = 0.35f;
 };
+
+// --- config save/load ------------------------------------------------------
+// A single field list (visitParams) drives both writing and reading, so the
+// two can never drift out of sync. Format is one "key value..." per line --
+// human-editable, order-independent, and forward/backward compatible (unknown
+// keys are ignored on load, missing keys keep their current/default value).
+struct ConfigWriter {
+    std::ofstream os;
+    void operator()(const char* k, int&   v)      { os << k << ' ' << v << '\n'; }
+    void operator()(const char* k, float& v)      { os << k << ' ' << v << '\n'; }
+    void operator()(const char* k, bool&  v)      { os << k << ' ' << (v ? 1 : 0) << '\n'; }
+    void operator()(const char* k, float (&v)[3]) { os << k << ' ' << v[0] << ' ' << v[1] << ' ' << v[2] << '\n'; }
+};
+struct ConfigReader {
+    std::map<std::string, std::string> kv;   // key -> everything after the key
+    void operator()(const char* k, int&   v)      { auto it = kv.find(k); if (it != kv.end()) v = std::atoi(it->second.c_str()); }
+    void operator()(const char* k, float& v)      { auto it = kv.find(k); if (it != kv.end()) v = (float) std::atof(it->second.c_str()); }
+    void operator()(const char* k, bool&  v)      { auto it = kv.find(k); if (it != kv.end()) v = std::atoi(it->second.c_str()) != 0; }
+    void operator()(const char* k, float (&v)[3]) { auto it = kv.find(k); if (it != kv.end()) { std::istringstream ss(it->second); ss >> v[0] >> v[1] >> v[2]; } }
+};
+
+template <class Ar>
+static void visitParams(Ar& ar, Params& p) {
+    ar("speciesIdx", p.speciesIdx);
+    ar("N", p.N);
+    ar("R0", p.R0); ar("Hh", p.Hh); ar("startFrac", p.startFrac);
+    ar("angleStepGoldenMult", p.angleStepGoldenMult); ar("distStepFrac", p.distStepFrac);
+    ar("taperPower", p.taperPower); ar("dwellDays", p.dwellDays);
+    ar("weight", p.weight); ar("mainTravelTrials", p.mainTravelTrials);
+    ar("lateralWeight", p.lateralWeight); ar("dwellWeight", p.dwellWeight);
+    ar("dwellLateralWeight", p.dwellLateralWeight); ar("sigma", p.sigma);
+    ar("viewCylLen", p.viewCylLen); ar("radiusScale", p.radiusScale);
+    ar("radiusMin", p.radiusMin); ar("radiusMax", p.radiusMax);
+    ar("maxHopDays", p.maxHopDays); ar("reachMult", p.reachMult); ar("growthDt", p.growthDt);
+    ar("travelPullReach", p.travelPullReach);
+    ar("coneSurfaceTravel", p.coneSurfaceTravel); ar("coneShellThickness", p.coneShellThickness);
+    ar("invertMode", p.invertMode);
+    ar("rootColor", p.rootColor); ar("rootAmbient", p.rootAmbient);
+    ar("rootMetallic", p.rootMetallic); ar("rootRoughness", p.rootRoughness);
+    ar("lightAzimuth", p.lightAzimuth); ar("lightElevation", p.lightElevation);
+    ar("maskColor", p.maskColor);
+    ar("faceLightIntensity", p.faceLightIntensity); ar("faceLightFalloff", p.faceLightFalloff);
+    ar("faceLightDist", p.faceLightDist); ar("faceSpecStrength", p.faceSpecStrength);
+    ar("veinColor", p.veinColor); ar("veinScale", p.veinScale); ar("veinStrength", p.veinStrength);
+    ar("faceLightColorForRoots", p.faceLightColorForRoots);
+    ar("fogDensity", p.fogDensity); ar("fogFalloff", p.fogFalloff);
+    ar("fogNoiseStrength", p.fogNoiseStrength); ar("fogNoiseScale", p.fogNoiseScale);
+    ar("fogColor", p.fogColor);
+    ar("rootColor2", p.rootColor2); ar("colorNoiseScale", p.colorNoiseScale);
+    ar("colorNoiseStrength", p.colorNoiseStrength);
+    ar("fogScrollSpeed", p.fogScrollSpeed); ar("fogStableLighting", p.fogStableLighting);
+    ar("faceGlowStrength", p.faceGlowStrength);
+    ar("pulseEnabled", p.pulseEnabled); ar("pulseColor", p.pulseColor);
+    ar("pulseSpeed", p.pulseSpeed); ar("pulseSpacing", p.pulseSpacing);
+    ar("pulseWidth", p.pulseWidth); ar("pulseIntensity", p.pulseIntensity);
+    ar("pulseHopOffset", p.pulseHopOffset);
+    ar("targetLift", p.targetLift); ar("spawnBehind", p.spawnBehind);
+    ar("cameraFaceIdx", p.cameraFaceIdx); ar("orbitSpeed", p.orbitSpeed);
+    ar("zoom", p.zoom); ar("renderScale", p.renderScale);
+}
+
+static bool saveConfig(const std::string& path, Params& p) {
+    ConfigWriter w{std::ofstream(path)};
+    if (!w.os.is_open()) return false;
+    visitParams(w, p);
+    return true;
+}
+static bool loadConfig(const std::string& path, Params& p) {
+    std::ifstream f(path);
+    if (!f.is_open()) return false;
+    ConfigReader r;
+    std::string line;
+    while (std::getline(f, line)) {
+        std::istringstream ss(line);
+        std::string key; ss >> key;
+        if (key.empty() || key[0] == '#') continue;
+        std::string rest; std::getline(ss, rest);
+        size_t nb = rest.find_first_not_of(" \t");
+        r.kv[key] = (nb == std::string::npos) ? "" : rest.substr(nb);
+    }
+    visitParams(r, p);
+    return true;
+}
+
+// Presets live as individual .txt files under this directory (relative to the
+// launch cwd), so the panel can offer a dropdown of whatever's on disk.
+static const char* kConfigDir = "relay_configs";
+static std::vector<std::string> listConfigs() {
+    std::vector<std::string> out;
+    std::error_code ec;
+    std::filesystem::create_directories(kConfigDir, ec);
+    for (auto& e : std::filesystem::directory_iterator(kConfigDir, ec))
+        if (e.is_regular_file() && e.path().extension() == ".txt")
+            out.push_back(e.path().stem().string());
+    std::sort(out.begin(), out.end());
+    return out;
+}
+static std::string configPathFor(const std::string& name) {
+    return std::string(kConfigDir) + "/" + name + ".txt";
+}
 
 // Mouse-wheel zoom: chains to ImGui's own scroll callback (installed by
 // ImGui_ImplGlfw with install_callbacks=true) so panel scrolling keeps
@@ -509,6 +626,10 @@ int main(int argc, char** argv) {
     std::string status = "Press \"Regrow\" to start.";
 
     Params params, pending = params;
+    std::vector<std::string> configList = listConfigs();
+    int  configSel = -1;                // index into configList; -1 = defaults/unsaved
+    char newConfigName[128] = "";
+    bool creatingNew = false;
     g_zoomPtr = &pending.zoom;
     g_prevScrollCb = glfwSetScrollCallback(window, zoomScrollCallback);
     if (cliRenderScale > 0.0f) { params.renderScale = cliRenderScale; pending.renderScale = cliRenderScale; }
@@ -560,7 +681,7 @@ int main(int argc, char** argv) {
         ImGui::TextDisabled("Distance step 0 = auto (spread N masks evenly\nover the cone). Set explicitly to make mask\ncount and spacing independent.");
         ImGui::Separator();
         ImGui::SliderFloat("Dwell days", &pending.dwellDays, 2.0f, 40.0f, "%.1f");
-        ImGui::SliderFloat("Arrival lift above mask", &pending.targetLift, 0.0f, 8.0f, "%.1f cm");
+        ImGui::SliderFloat("Arrival lift above mask", &pending.targetLift, 0.0f, 20.0f, "%.1f cm");
         ImGui::TextDisabled("Travel target sits this far above the mask, so\nthe arriving root anchors above the face and the\ndwell wrap frames it instead of crossing it.");
         ImGui::SliderFloat("Next-root start depth", &pending.spawnBehind, 0.0f, 8.0f, "%.1f cm");
         ImGui::TextDisabled("Each new hop seeds this far behind the previous\nmask's back surface, so it emerges around the\nmask instead of poking out of its front.");
@@ -591,6 +712,8 @@ int main(int argc, char** argv) {
         ImGui::EndDisabled();
 
         ImGui::Separator();
+        ImGui::SliderFloat("Growth speed (days/frame)", &pending.growthDt, 0.05f, 1.5f, "%.2f");
+        ImGui::TextDisabled("Sim time advanced per frame. Lower = slower,\nsmoother playback to watch growth closely.\nApplies live -- adjustable mid-growth.");
         ImGui::Checkbox("Invert mode (black/white, overlaps XOR)", &pending.invertMode);
         ImGui::TextDisabled("Applies live -- works during growth too.");
 
@@ -633,6 +756,16 @@ int main(int argc, char** argv) {
             ImGui::Checkbox("Camera-stable lighting", &pending.fogStableLighting);
             ImGui::TextDisabled("Measures fog relative to the camera-target\ndistance, so zooming/orbiting doesn't dim or\nbrighten the whole scene -- fog only encodes\ndepth differences within it.");
             ImGui::TextDisabled("All of the above apply live -- no regrow needed.");
+            ImGui::Spacing();
+            ImGui::Text("Light pulses");
+            ImGui::Checkbox("Pulses travel along roots", &pending.pulseEnabled);
+            ImGui::ColorEdit3("Pulse color", pending.pulseColor);
+            ImGui::SliderFloat("Pulse speed", &pending.pulseSpeed, 0.0f, 60.0f, "%.1f cm/s");
+            ImGui::SliderFloat("Pulse spacing", &pending.pulseSpacing, 4.0f, 80.0f, "%.1f cm");
+            ImGui::SliderFloat("Pulse width", &pending.pulseWidth, 0.5f, 20.0f, "%.1f cm");
+            ImGui::SliderFloat("Pulse intensity", &pending.pulseIntensity, 0.0f, 4.0f, "%.2f");
+            ImGui::SliderFloat("Mask-to-mask lag", &pending.pulseHopOffset, 0.0f, 60.0f, "%.1f cm");
+            ImGui::TextDisabled("Emissive bands scrolling outward along each\nroot's length from its base. Applies live.\nMask-to-mask lag phase-shifts each successive\nmask so the wave travels down the relay\n(0 = every mask pulses in unison).");
         }
 
         if (ImGui::CollapsingHeader("Performance")) {
@@ -667,6 +800,71 @@ int main(int argc, char** argv) {
             ImGui::TextDisabled("Also driven by the mouse scroll wheel\n(when the cursor isn't over a panel).");
             if (ImGui::Button("Reset zoom")) pending.zoom = 1.0f;
         }
+
+        ImGui::Separator();
+        ImGui::Text("Presets");
+        const char* curLabel = (configSel >= 0 && configSel < (int) configList.size())
+                             ? configList[configSel].c_str() : "(Defaults)";
+        if (ImGui::BeginCombo("Preset", curLabel)) {
+            if (ImGui::Selectable("(Defaults)", configSel < 0)) {
+                pending = Params();   // factory defaults
+                configSel = -1;
+                status = "Loaded factory defaults.";
+            }
+            for (int i = 0; i < (int) configList.size(); i++) {
+                bool sel = (i == configSel);
+                if (ImGui::Selectable(configList[i].c_str(), sel)) {
+                    if (loadConfig(configPathFor(configList[i]), pending)) {
+                        configSel = i;
+                        status = "Loaded preset \"" + configList[i]
+                               + "\" -- live settings applied; Regrow for structural changes.";
+                    } else {
+                        status = "Load FAILED: " + configList[i];
+                    }
+                }
+                if (sel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+
+        ImGui::BeginDisabled(configSel < 0);
+        if (ImGui::Button("Save")) {
+            status = saveConfig(configPathFor(configList[configSel]), pending)
+                     ? "Saved preset \"" + configList[configSel] + "\"."
+                     : "Save FAILED: " + configList[configSel];
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("New...")) { creatingNew = true; newConfigName[0] = '\0'; }
+        ImGui::SameLine();
+        if (ImGui::Button("Refresh")) configList = listConfigs();
+
+        if (creatingNew) {
+            ImGui::InputText("Name", newConfigName, sizeof(newConfigName));
+            ImGui::SameLine();
+            if (ImGui::Button("Create")) {
+                std::string nm = newConfigName;
+                // keep filenames tame: drop path separators and surrounding space
+                nm.erase(std::remove_if(nm.begin(), nm.end(),
+                         [](char c){ return c == '/' || c == '\\'; }), nm.end());
+                size_t a = nm.find_first_not_of(" \t"), b = nm.find_last_not_of(" \t");
+                nm = (a == std::string::npos) ? "" : nm.substr(a, b - a + 1);
+                if (nm.empty()) {
+                    status = "Enter a preset name.";
+                } else if (saveConfig(configPathFor(nm), pending)) {
+                    configList = listConfigs();
+                    auto it = std::find(configList.begin(), configList.end(), nm);
+                    configSel = (it != configList.end()) ? (int) (it - configList.begin()) : -1;
+                    creatingNew = false;
+                    status = "Created preset \"" + nm + "\".";
+                } else {
+                    status = "Could not create \"" + nm + "\".";
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) creatingNew = false;
+        }
+        ImGui::TextDisabled("Presets live in ./relay_configs. Live settings apply\non load; structural params take effect on Regrow.");
 
         ImGui::Spacing();
         if (growing) {
@@ -804,6 +1002,16 @@ int main(int argc, char** argv) {
         lightDir[1] = sinEl;
         lightDir[2] = cosEl * cosf(pending.lightAzimuth);
 
+        renderer.pulse.enabled = pending.pulseEnabled;
+        renderer.pulse.color[0] = pending.pulseColor[0];
+        renderer.pulse.color[1] = pending.pulseColor[1];
+        renderer.pulse.color[2] = pending.pulseColor[2];
+        renderer.pulse.speed = pending.pulseSpeed;
+        renderer.pulse.spacing = pending.pulseSpacing;
+        renderer.pulse.width = pending.pulseWidth;
+        renderer.pulse.intensity = pending.pulseIntensity;
+        renderer.pulse.hopOffset = pending.pulseHopOffset;
+
         renderer.wispGlowStrength = pending.faceGlowStrength;
         renderer.fog.falloff = pending.fogFalloff;
         renderer.fog.noiseStrength = pending.fogNoiseStrength;
@@ -886,11 +1094,14 @@ int main(int argc, char** argv) {
 
             for (int hop = 0; hop < params.N && !quit; hop++) {
                 Vector3d maskGlobal = masks[hop].pos;
-                // Travel target sits a bit visually above the mask (render-up
-                // is -z in grow coords, see toYup), so the main root arrives
-                // and dwells above the face -- framing it -- while the dwell
-                // rim ring below still wraps the actual mask.
-                Vector3d targetGlobal = maskGlobal.plus(Vector3d(0, 0, -(double) params.targetLift));
+                // Travel target sits a bit visually above the mask so the main
+                // root arrives and dwells above the face -- framing it -- while
+                // the dwell rim ring still wraps the actual mask. The lift is
+                // +z in grow coords: after the toYup remap AND the vertical flip
+                // the blit applies (see blitFS, "1.0 - v_uv.y"), +grow-z is what
+                // ends up pointing UP on screen. (An earlier -z guess put the
+                // target below the face -- the net two flips had been missed.)
+                Vector3d targetGlobal = maskGlobal.plus(Vector3d(0, 0, (double) params.targetLift));
                 status = "Growing hop " + std::to_string(hop + 1) + "/" + std::to_string(params.N)
                         + " -- " + g_species[params.speciesIdx].first;
 
@@ -1007,10 +1218,12 @@ int main(int argc, char** argv) {
 
                 double day = 0.0, reachedDay = -1.0;
                 bool reached = false;
-                double dt = 0.75;
                 while (day < hopMaxDays) {
                     if (glfwWindowShouldClose(window)) { quit = true; break; }
 
+                    // read live each step so the growth-speed slider takes
+                    // effect immediately, even mid-hop
+                    double dt = std::max(0.02, (double) pending.growthDt);
                     rs->simulate(dt, false);
                     day += dt;
 
@@ -1062,6 +1275,7 @@ int main(int argc, char** argv) {
                     float radius = (extent * 0.9f + 10.0f) * pending.zoom;
                     float azimuth = 0.8f + 2.0f * (float) M_PI * 0.5f * pending.orbitSpeed * (frame / 260.0f);
                     renderer.fog.driftTime += 0.02f * pending.fogScrollSpeed;
+                    renderer.pulse.time += 1.0f / 60.0f;
                     renderer.fog.refDist = pending.fogStableLighting ? radius : 0.0f;
 
                     renderer.render(azimuth, 0.12f, radius, target3, 0.5f, lightDir,
@@ -1112,8 +1326,11 @@ int main(int argc, char** argv) {
         // geometry is static here; rebuild + re-upload only when a growth
         // session actually changed it (or the buffers still carry a live-
         // growth tail past the frozen prefix from the last growth frame)
+        static float lastHopOffset = pending.pulseHopOffset;
+        bool hopOffsetChanged = pending.pulseHopOffset != lastHopOffset;
+        lastHopOffset = pending.pulseHopOffset;
         bool geomChanged = refreshFrozenPrefix() || segNodes.size() != segPrefixNodes;
-        if (geomChanged) {
+        if (geomChanged || hopOffsetChanged) {
             segNodes.resize(segPrefixNodes);
             segSegs.resize(segPrefixSegs);
             segRads.resize(segPrefixSegs);
@@ -1161,6 +1378,7 @@ int main(int argc, char** argv) {
         // fog drift never advanced during the idle orbit before -- the noise
         // was frozen the moment growth finished.
         renderer.fog.driftTime += 0.02f * pending.fogScrollSpeed;
+        renderer.pulse.time += 1.0f / 60.0f;
         renderer.fog.refDist = pending.fogStableLighting ? radius : 0.0f;
         renderer.render(azimuth, 0.15f, radius, target3, 0.5f, lightDir,
                         [&](const float* vp, const float* eye) { faceGL.draw(vp, eye, lightDir); });

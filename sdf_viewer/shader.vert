@@ -10,6 +10,10 @@ uniform float          u_radiusScale;
 uniform float          u_radiusMin;   // clamp, 0 = no floor
 uniform float          u_radiusMax;   // clamp, 0 = no ceiling
 
+uniform isamplerBuffer u_primType;    // 0 = capsule, 1 = blade
+uniform samplerBuffer  u_primFrame;   // blade half-width vector in .xyz, curl in .w
+uniform samplerBuffer  u_primAux;     // (s0,s1,latCup,gradBias)
+
 flat out int  v_segIdx;
 out vec2      v_ndc;
 
@@ -23,6 +27,23 @@ void main() {
     float r   = texelFetch(u_radii, i).r * u_radiusScale;
     if (u_radiusMin > 0.0) r = max(r, u_radiusMin);
     if (u_radiusMax > 0.0) r = min(r, u_radiusMax);
+
+    // Blades reach out to their half-width AND bend/curl off the a->b axis by
+    // up to ~curl*0.6*L (see sdBlade's `bend`) plus the cross-section cup. If
+    // the quad only covered the half-width, the curled surface would poke past
+    // the AABB and get sliced by a hard straight edge. Include the curl term.
+    if (texelFetch(u_primType, i).r != 0) {
+        vec4  fr   = texelFetch(u_primFrame, i);
+        float hw   = length(fr.xyz);
+        float curl = abs(fr.w);
+        float L    = distance(a, b);
+        // Rolled cross-section stays within ~hw of the axis in the cross plane
+        // (a strip of arc-length hw wrapped onto a circle never gets farther
+        // than hw from the axis), plus the lengthwise bend ~curl*0.6*L. Cover
+        // both generously so no marched surface is sliced by the quad edge.
+        float reach = curl * 0.6 * L + 2.0 * hw;
+        r = max(r, hw + reach) * 1.7;
+    }
 
     vec4 ca = u_viewProj * vec4(a, 1.0);
     vec4 cb = u_viewProj * vec4(b, 1.0);
