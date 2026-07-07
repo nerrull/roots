@@ -587,15 +587,19 @@ inline void emitInvolucre(FlowerMesh& m, const Vector3d& centre, const Vector3d&
             // Bud: a rounded green lower cup whose bracts reach up to the bud's
             // equator (a stable up-and-out aim, not straight up), letting the
             // furled pink petal knob poke out the top (see buds_ref).
-            double ty_b =  R * (0.16 - 0.06 * ring);
-            double tr_b =  R * (0.48 - 0.04 * ring);
+            double ty_b =  R * (0.08 - 0.05 * ring);
+            double tr_b =  R * (0.40 - 0.04 * ring);
             double ty   = lp(ty_b, ty_o, g), tr = lp(tr_b, tr_o, g);
             Vector3d tgt = centre.plus(up.times(ty)).plus(radial.times(tr));
             Vector3d dir = tgt.minus(base);
-            double len   = dir.length() * lp(1.12, 1.00, g);
+            double len   = dir.length() * lp(1.02, 1.00, g);
             dir = dir.normalized();
             double wid  = R * lp(0.19, 0.15, g);       // broad, overlapping into a collar
-            double curl = lp(1.1, 0.8, g);             // hug/cup the convex surface
+            // The blade normal (ax x W) of an up-and-out bract points OUTWARD &
+            // DOWN, and +curl bends toward the normal -- so hugging the convex
+            // bloom surface (tips wrapping up & IN over it) needs NEGATIVE curl.
+            // Positive curl here was the old flat-green-skirt bug.
+            double curl = lp(-1.2, -0.7, g);
             double cup  = lp(-1.5, -0.9, g);           // rolled at bud, shallow cup open
             m.curvedPetal(base, dir, up, len, wid, curl, wid * 0.10, PRIM_PETAL, cup, 0.0);
         }
@@ -812,10 +816,10 @@ inline FlowerMesh buildChrysanthemum(const ChrysanthParams& P) {
                 // --- BUD pose: petals furl into a rounded PINK KNOB that pokes
                 //     up out of the green calyx cup (see buds_ref) ---
                 double baseR_b  = R * 0.06 * f * jr;             // clustered on the axis
-                double dome_b   = R * (0.14 + 0.26 * (1.0 - f)); // inner stacked higher -> rounded crown
+                double dome_b   = R * (0.08 + 0.16 * (1.0 - f)); // inner stacked higher -> rounded crown
                 double outMix_b = 0.03;                          // straight up
-                double len_b    = R * (0.42 + 0.10 * f) * jl;    // a visible furled knob
-                double curl_b   = -1.9 * jc;                     // strong up/in furl: tips arch over & meet
+                double len_b    = R * (0.30 + 0.08 * f) * jl;    // short: only tips clear the bract rim
+                double curl_b   = -0.9 * jc;                     // up/in furl -- tips lean in, no flip-over
                 double latCup_b = -2.8 * jc;                     // tightly rolled (quilled) in the bud
 
                 // --- interpolate bud -> open by this petal's openness ---
@@ -835,14 +839,19 @@ inline FlowerMesh buildChrysanthemum(const ChrysanthParams& P) {
                               PRIM_PETAL, latCup, 0.0);
             }
             // Tight raised central boss of tiny incurved florets (the eye).
-            m.curGroup = G_DISK;
-            for (int i = 0; i < 70; ++i) {
-                double ang = i * kGoldenAngle;
-                double r = R * 0.14 * std::sqrt(double(i) / 70.0);
-                Vector3d radial(std::cos(ang), 0, std::sin(ang));
-                Vector3d base = centre.plus(radial.times(r)).plus(up.times(R * 0.32));
-                Vector3d tip = base.plus(up.times(R * 0.12)).minus(radial.times(R * 0.03));
-                petalTo(base, tip, R * 0.07, 0.9, PRIM_PETAL);
+            // Hidden while budding (a real bud shows no eye -- only furled petal
+            // tips poke from the bract cup); grows in as the centre opens.
+            if (g > 0.5) {
+                double eye = (g - 0.5) / 0.5;
+                m.curGroup = G_DISK;
+                for (int i = 0; i < 70; ++i) {
+                    double ang = i * kGoldenAngle;
+                    double r = R * 0.14 * std::sqrt(double(i) / 70.0);
+                    Vector3d radial(std::cos(ang), 0, std::sin(ang));
+                    Vector3d base = centre.plus(radial.times(r)).plus(up.times(R * 0.32 * eye));
+                    Vector3d tip = base.plus(up.times(R * 0.12 * eye)).minus(radial.times(R * 0.03));
+                    petalTo(base, tip, R * 0.07 * (0.4 + 0.6 * eye), 0.9, PRIM_PETAL);
+                }
             }
         } break;
     }

@@ -276,26 +276,28 @@ void main() {
         bool  hitB = false;
         // The bend term makes s (hence the field) depend on position along the
         // axis, so sdBlade is not a unit-Lipschitz distance -- its gradient can
-        // exceed 1 where curl/cup are strong. Step at 0.6x so the march can't
-        // overshoot the thin surface (which showed up as hard "clipped" cuts at
-        // high curl); more iterations compensate for the shorter steps.
-        for (int i = 0; i < 110; ++i) {
+        // exceed 1 where curl/cup are strong, and overshooting the thin surface
+        // showed up as hard "clipped" cuts at high curl. Adaptive step: a
+        // near-full step is safe away from the surface; damp to 0.6x only
+        // within a few blade-thicknesses, where the overshoot actually bites.
+        float near2 = th * 4.0 + 0.05;
+        for (int i = 0; i < 72; ++i) {
             vec3  pt = ro + rd * t;
             float dd = sdBlade(pt, a, ax, L, wdir, nrm, hw0, th, curl, oExp, tipT, s0, s1, latCup, lobe);
             if (dd < 0.004) { hitB = true; break; }
-            t += dd * 0.6;
+            t += dd * (dd > near2 ? 0.95 : 0.6);
             if (t > MAX_DIST) break;
         }
         if (!hitB) discard;
         p = ro + rd * t;
-        vec2 e = vec2(0.01, 0.0);
-        n = normalize(vec3(
-            sdBlade(p + e.xyy, a, ax, L, wdir, nrm, hw0, th, curl, oExp, tipT, s0, s1, latCup, lobe) -
-            sdBlade(p - e.xyy, a, ax, L, wdir, nrm, hw0, th, curl, oExp, tipT, s0, s1, latCup, lobe),
-            sdBlade(p + e.yxy, a, ax, L, wdir, nrm, hw0, th, curl, oExp, tipT, s0, s1, latCup, lobe) -
-            sdBlade(p - e.yxy, a, ax, L, wdir, nrm, hw0, th, curl, oExp, tipT, s0, s1, latCup, lobe),
-            sdBlade(p + e.yyx, a, ax, L, wdir, nrm, hw0, th, curl, oExp, tipT, s0, s1, latCup, lobe) -
-            sdBlade(p - e.yyx, a, ax, L, wdir, nrm, hw0, th, curl, oExp, tipT, s0, s1, latCup, lobe)));
+        // Tetrahedron normal: 4 SDF taps instead of 6.
+        const vec2 k = vec2(1.0, -1.0);
+        float he = 0.01;
+        n = normalize(
+            k.xyy * sdBlade(p + k.xyy * he, a, ax, L, wdir, nrm, hw0, th, curl, oExp, tipT, s0, s1, latCup, lobe) +
+            k.yyx * sdBlade(p + k.yyx * he, a, ax, L, wdir, nrm, hw0, th, curl, oExp, tipT, s0, s1, latCup, lobe) +
+            k.yxy * sdBlade(p + k.yxy * he, a, ax, L, wdir, nrm, hw0, th, curl, oExp, tipT, s0, s1, latCup, lobe) +
+            k.xxx * sdBlade(p + k.xxx * he, a, ax, L, wdir, nrm, hw0, th, curl, oExp, tipT, s0, s1, latCup, lobe));
         // Two-sided: face the viewer so back-lit petals still shade.
         if (dot(n, rd) > 0.0) n = -n;
         float al = clamp(dot(p - a, ax) / L, 0.0, 1.0);
