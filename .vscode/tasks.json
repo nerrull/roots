@@ -65,6 +65,27 @@
             "presentation": { "reveal": "always", "panel": "dedicated" }
         },
         {
+            "label": "Build: mlp_parity_test",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["--build", "build", "--target", "mlp_parity_test", "-j4"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["CMake: configure"],
+            "group": "build",
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "Test: mlp_parity",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/mirror_app/mlp_parity_test",
+            "args": ["${workspaceFolder}/mirror_app/tests/fixtures"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["Build: mlp_parity_test"],
+            "group": { "kind": "test" },
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated" }
+        },
+        {
             "label": "Build: sdf_viewer (original CPlantBox viewer)",
             "type": "shell",
             "command": "cmake",
