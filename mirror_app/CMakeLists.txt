@@ -41,6 +41,8 @@ add_executable(mirror_app
     src/main.mm
     src/metal_context.mm
     src/mirror_scene.mm
+    src/metal_root_renderer.mm
+    src/root_scene.mm
     src/fullscreen_present.mm)
 target_include_directories(mirror_app PRIVATE src)
 target_link_libraries(mirror_app PRIVATE mirror_imgui glfw
@@ -54,6 +56,7 @@ target_compile_definitions(mirror_app PRIVATE
     NEUROMIRROR_DIR="${NEUROMIRROR_DIR}"
     SDF_VIEWER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../sdf_viewer"
     MIRROR_APP_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+    MIRROR_APP_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src"
     MIRROR_APP_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")
 
 # --- MLX (neural mirror) -----------------------------------------------------

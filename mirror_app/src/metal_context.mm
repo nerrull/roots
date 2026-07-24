@@ -17,6 +17,16 @@ id<MTLLibrary> MetalContext::newLibraryFromFile(const std::string& path) const {
     return newLibraryFromSource(ss.str());
 }
 
+id<MTLLibrary> MetalContext::newLibraryFromFiles(const std::vector<std::string>& paths) const {
+    std::stringstream ss;
+    for (const auto& p : paths) {
+        std::ifstream f(p);
+        if (!f) { fprintf(stderr, "MetalContext: cannot open MSL '%s'\n", p.c_str()); return nil; }
+        ss << f.rdbuf() << "\n";
+    }
+    return newLibraryFromSource(ss.str());
+}
+
 id<MTLLibrary> MetalContext::newLibraryFromSource(const std::string& src) const {
     NSError* err = nil;
     id<MTLLibrary> lib =

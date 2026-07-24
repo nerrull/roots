@@ -15,6 +15,7 @@
 
 #import <Metal/Metal.h>
 #include <string>
+#include <vector>
 
 class MetalContext {
 public:
@@ -31,6 +32,12 @@ public:
     // Compile MSL from an in-memory source string (used by the MLP/feature port,
     // whose MSL is reused verbatim from the Python kernel strings).
     id<MTLLibrary> newLibraryFromSource(const std::string& src) const;
+
+    // Compile MSL assembled from several files concatenated in order. The
+    // runtime source-string compiler has no #include search path, so shared
+    // headers (e.g. root_shared.h) are prepended as plain text this way rather
+    // than #included. Missing files log and yield nil.
+    id<MTLLibrary> newLibraryFromFiles(const std::vector<std::string>& paths) const;
 
 private:
     id<MTLDevice>       device_ = nil;

@@ -20,13 +20,16 @@
 
 #include "metal_context.h"
 #include "mirror_scene.h"
+#include "root_scene.h"
 #include "fullscreen_present.h"
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 // Headless check of the MLX→Metal texture path (no window): render a few mirror
 // frames and read back a pixel. Used to smoke-test without a GUI.
@@ -82,10 +85,97 @@ static int bench(int downscale, int frames) {
     return 0;
 }
 
+// Headless check of the root scene's Metal pipeline (no window): compiles the
+// MSL passes, renders a few frames of the synthetic root structure into the
+// offscreen fog texture, and reads back the centre texel to confirm real data.
+static int roottest() {
+    MetalContext ctx;
+    if (!ctx.device()) { fprintf(stderr, "roottest: no Metal device\n"); return 1; }
+    RootScene roots(ctx, 640, 360);
+    if (!roots.valid()) { fprintf(stderr, "roottest: root scene invalid (shader compile?)\n"); return 1; }
+    id<MTLTexture> tex = nil;
+    for (int i = 0; i < 3; ++i) {
+        @autoreleasepool {
+            id<MTLCommandBuffer> cb = [ctx.queue() commandBuffer];
+            roots.advance(1.0 / 60.0);
+            tex = roots.render(cb);
+            [cb commit];
+            [cb waitUntilCompleted];
+        }
+    }
+    if (!tex) { fprintf(stderr, "roottest: no texture\n"); return 1; }
+    uint16_t px[4] = {0, 0, 0, 0};
+    NSUInteger cx = tex.width / 2, cy = tex.height / 2;
+    [tex getBytes:px bytesPerRow:sizeof(px)
+       fromRegion:MTLRegionMake2D(cx, cy, 1, 1) mipmapLevel:0];
+    auto h2f = [](uint16_t h) {
+        uint32_t s = (h >> 15) & 1, e = (h >> 10) & 0x1f, m = h & 0x3ff, bits;
+        if (e == 0) bits = (s << 31) | 0; else bits = (s << 31) | ((e + 112) << 23) | (m << 13);
+        float f; __builtin_memcpy(&f, &bits, 4); return f;
+    };
+    printf("roottest: %dx%d center rgba = %.3f %.3f %.3f %.3f  OK\n",
+           (int)tex.width, (int)tex.height, h2f(px[0]), h2f(px[1]), h2f(px[2]), h2f(px[3]));
+    return 0;
+}
+
+// Headless render of the root scene to a PPM file for visual validation.
+// Usage: --rootshot <out.ppm> [az] [el] [radius]
+static int rootshot(const char* path, float az, float el, float rad) {
+    MetalContext ctx;
+    if (!ctx.device()) { fprintf(stderr, "rootshot: no Metal device\n"); return 1; }
+    const int W = 960, H = 540;
+    RootScene roots(ctx, W, H);
+    if (!roots.valid()) { fprintf(stderr, "rootshot: root scene invalid\n"); return 1; }
+    roots.autoOrbit = false;
+    roots.azimuth = az; roots.elevation = el; roots.radius = rad;
+    id<MTLTexture> tex = nil;
+    for (int i = 0; i < 3; ++i) {
+        @autoreleasepool {
+            id<MTLCommandBuffer> cb = [ctx.queue() commandBuffer];
+            roots.advance(1.0 / 60.0);
+            tex = roots.render(cb);
+            [cb commit];
+            [cb waitUntilCompleted];
+        }
+    }
+    std::vector<uint16_t> px((size_t)W * H * 4);
+    [tex getBytes:px.data() bytesPerRow:W * 4 * sizeof(uint16_t)
+       fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
+    auto h2f = [](uint16_t h) {
+        uint32_t s = (h >> 15) & 1, e = (h >> 10) & 0x1f, m = h & 0x3ff, bits;
+        if (e == 0) bits = (s << 31) | 0; else bits = (s << 31) | ((e + 112) << 23) | (m << 13);
+        float f; __builtin_memcpy(&f, &bits, 4); return f;
+    };
+    FILE* fp = fopen(path, "wb");
+    if (!fp) { fprintf(stderr, "rootshot: cannot open %s\n", path); return 1; }
+    fprintf(fp, "P6\n%d %d\n255\n", W, H);
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) {
+            const uint16_t* p = &px[((size_t)y * W + x) * 4];
+            for (int c = 0; c < 3; ++c) {
+                float v = h2f(p[c]);
+                v = v <= 0.f ? 0.f : (v >= 1.f ? 1.f : v);
+                unsigned char b = (unsigned char)(powf(v, 1.0f / 2.2f) * 255.0f + 0.5f);
+                fputc(b, fp);
+            }
+        }
+    fclose(fp);
+    printf("rootshot: wrote %s (%dx%d)\n", path, W, H);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--selftest") return selftest();
+        if (a == "--roottest") return roottest();
+        if (a == "--rootshot") {
+            const char* path = (i + 1 < argc) ? argv[i + 1] : "root.ppm";
+            float az  = (i + 2 < argc) ? atof(argv[i + 2]) : 0.6f;
+            float el  = (i + 3 < argc) ? atof(argv[i + 3]) : 0.35f;
+            float rad = (i + 4 < argc) ? atof(argv[i + 4]) : 42.0f;
+            return rootshot(path, az, el, rad);
+        }
         if (a == "--bench") {
             int ds = (i + 1 < argc) ? atoi(argv[i + 1]) : 4;
             int fr = (i + 2 < argc) ? atoi(argv[i + 2]) : 200;
@@ -124,12 +214,15 @@ int main(int argc, char** argv) {
 
     // Scenes / presenter.
     MirrorScene mirror(ctx);
+    RootScene roots(ctx, W, H);
     FullscreenPresent present(ctx, std::string(MIRROR_APP_SHADER_DIR) + "/present.metal",
                               layer.pixelFormat);
 
     enum class Scene { Mirror = 0, Roots = 1 };
     int scene = (int)Scene::Mirror;
-    int downscale = 4;   // mirror render-resolution divisor (low-res + upsample)
+    int downscale = 4;       // mirror render-resolution divisor (low-res + upsample)
+    int rootDownscale = 1;   // roots render-resolution divisor
+    int rootSeed = 1;
 
     double lastTime = glfwGetTime();
     double fpsAccum = 0.0; int fpsFrames = 0; double fpsShown = 0.0;
@@ -156,6 +249,10 @@ int main(int argc, char** argv) {
                 mirror.ensureSize(fbw / std::max(1, downscale), fbh / std::max(1, downscale));
                 mirror.advance(dt);
                 sceneTex = mirror.render();
+            } else if (scene == (int)Scene::Roots && roots.valid()) {
+                roots.ensureSize(fbw / std::max(1, rootDownscale), fbh / std::max(1, rootDownscale));
+                roots.advance(dt);
+                sceneTex = roots.render(cb);   // encodes geometry + fog passes into cb
             }
 
             MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -245,7 +342,62 @@ int main(int argc, char** argv) {
                     ImGui::SliderFloat("background dim", &P.bg_dim, 0.0f, 1.0f);
                 }
             } else {
-                ImGui::TextDisabled("roots scene: Metal port pending");
+                MetalRootRenderer& R = roots.renderer();
+                ImGui::Text("%.0f fps   t=%5.1fs", fpsShown, roots.clock());
+                ImGui::Text("render %d x %d -> %d x %d",
+                            roots.width(), roots.height(), fbw, fbh);
+                ImGui::SliderInt("root downscale", &rootDownscale, 1, 6);
+                ImGui::Separator();
+                // camera
+                ImGui::Checkbox("auto-orbit", &roots.autoOrbit); ImGui::SameLine();
+                ImGui::SetNextItemWidth(120);
+                ImGui::SliderFloat("orbit rate", &roots.orbitRate, -1.0f, 1.0f);
+                ImGui::SliderFloat("azimuth", &roots.azimuth, -(float)M_PI, (float)M_PI);
+                ImGui::SliderFloat("elevation", &roots.elevation, -1.5f, 1.5f);
+                ImGui::SliderFloat("radius", &roots.radius, 5.0f, 120.0f);
+                ImGui::SliderFloat("fov", &roots.fov, 0.2f, 1.2f);
+                if (ImGui::Button("reseed roots")) roots.reseed((uint32_t)(++rootSeed));
+                ImGui::Separator();
+                // shading
+                const char* modes[] = {"Phong", "PBR", "Invert (approx)"};
+                int sm = (int)R.shaderMode;
+                if (ImGui::Combo("shader", &sm, modes, 3)) R.shaderMode = (MetalRootRenderer::ShaderMode)sm;
+                ImGui::ColorEdit3("base color", R.mat.baseColor);
+                ImGui::ColorEdit3("base color 2", R.mat.baseColor2);
+                ImGui::SliderFloat("color noise", &R.mat.colorNoiseStrength, 0.0f, 1.0f);
+                ImGui::SliderFloat("ambient", &R.mat.ambient, 0.0f, 0.5f);
+                ImGui::SliderFloat("diffuse", &R.mat.diffuse, 0.0f, 1.5f);
+                ImGui::SliderFloat("shininess", &R.mat.shininess, 4.0f, 300.0f);
+                if (sm == 1) {
+                    ImGui::SliderFloat("metallic", &R.pbr.metallic, 0.0f, 1.0f);
+                    ImGui::SliderFloat("roughness", &R.pbr.roughness, 0.05f, 1.0f);
+                }
+                ImGui::SliderFloat("radius scale", &R.radiusScale, 0.2f, 4.0f);
+                ImGui::Separator();
+                // fog
+                if (ImGui::CollapsingHeader("fog & atmosphere")) {
+                    ImGui::ColorEdit3("fog color", R.fog.color);
+                    ImGui::SliderFloat("fog density", &R.fog.density, 0.0f, 0.06f);
+                    ImGui::SliderFloat("fog falloff", &R.fog.falloff, 0.0f, 0.3f);
+                    ImGui::SliderFloat("fog noise", &R.fog.noiseStrength, 0.0f, 1.0f);
+                    ImGui::SliderFloat("fog refDist", &R.fog.refDist, 0.0f, 120.0f);
+                    ImGui::SliderFloat("wisp glow", &R.wispGlowStrength, 0.0f, 3.0f);
+                    ImGui::SliderInt("wisps", &R.wispCount, 0, 8);
+                }
+                // pulses
+                if (ImGui::CollapsingHeader("travelling pulses")) {
+                    ImGui::Checkbox("pulses on", &R.pulse.enabled);
+                    ImGui::SliderFloat("pulse speed", &R.pulse.speed, 0.0f, 40.0f);
+                    ImGui::SliderFloat("pulse spacing", &R.pulse.spacing, 4.0f, 60.0f);
+                    ImGui::SliderFloat("pulse width", &R.pulse.width, 0.5f, 12.0f);
+                    ImGui::SliderFloat("pulse intensity", &R.pulse.intensity, 0.0f, 4.0f);
+                    ImGui::ColorEdit3("pulse color", R.pulse.color);
+                }
+                if (ImGui::CollapsingHeader("overlays")) {
+                    ImGui::Checkbox("axes", &R.overlay.showAxes); ImGui::SameLine();
+                    ImGui::Checkbox("grid", &R.overlay.showGrid);
+                    ImGui::SliderFloat("grid spacing", &R.overlay.gridSpacing, 1.0f, 20.0f);
+                }
             }
             ImGui::End();
 
