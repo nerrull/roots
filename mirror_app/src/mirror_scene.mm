@@ -2,6 +2,7 @@
 #include "metal_context.h"
 #import <Foundation/Foundation.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -56,12 +57,24 @@ MirrorScene::MirrorScene(const MetalContext& ctx, const std::string& assetDir,
         { 0.35f, -0.30f, 0.41f, 4.6f},
     };
 
+    makeTexture();
+}
+
+void MirrorScene::makeTexture() {
     MTLTextureDescriptor* td =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
                                                            width:lw_ height:lh_ mipmapped:NO];
     td.usage = MTLTextureUsageShaderRead;
     td.storageMode = MTLStorageModeShared;   // CPU-writable (unified memory)
     tex_ = [ctx_.device() newTextureWithDescriptor:td];
+}
+
+void MirrorScene::ensureSize(int w, int h) {
+    w = std::max(2, w);
+    h = std::max(2, h);
+    if (w == lw_ && h == lh_ && tex_) return;
+    lw_ = w; lh_ = h;
+    makeTexture();
 }
 
 id<MTLTexture> MirrorScene::render(double t) {
@@ -77,8 +90,16 @@ id<MTLTexture> MirrorScene::render(double t) {
     sources.push_back({0.6f * asp * std::cos(0.5f * (float)t),
                        0.6f * std::sin(0.5f * (float)t), phase, 1.0f});
 
+    // Latent circle: driving (z, zCos) with (sin, cos) of a ramping phase gives a
+    // continuous, constant-speed cyclic morph (a lone sin latent stalls at turns).
+    float zv = z, zc = zCos;
+    if (animateZ) {
+        float zp = 2.0f * (float)M_PI * zSpeed * (float)t;
+        zv = std::sin(zp); zc = std::cos(zp);
+    }
+
     auto rgba = mirror::render_pond_lowres(weights_, cfg_, lh_, lw_, sources,
-                                           ringFreq, decay, /*z=*/0.f, /*z_cos=*/0.f);
+                                           ringFreq, decay, zv, zc, warp, core, asp);
     rgba = mx::contiguous(rgba);
     mx::eval(rgba);
 

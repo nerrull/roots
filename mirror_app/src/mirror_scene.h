@@ -21,16 +21,29 @@ public:
     MirrorScene(const MetalContext& ctx, const std::string& assetDir,
                 int lowW = 480, int lowH = 270);
 
+    // Ensure the low-res render target matches (w, h); recreates it if changed.
+    void ensureSize(int w, int h);
+
     // Animate to time t (seconds) and return the current low-res RGBA16F texture.
     id<MTLTexture> render(double t);
 
     bool valid() const { return tex_ != nil; }
+    int lowW() const { return lw_; }
+    int lowH() const { return lh_; }
 
     float speed = 1.2f;      // ripple propagation speed (demo_pond default)
     float ringFreq = 3.0f;
     float decay = 1.6f;
+    float warp = 0.0f;       // domain-warp refraction strength
+    float core = 0.0f;       // core-radius damping (0 = off)
+    float z = 0.0f;          // latent channel 2
+    float zCos = 0.0f;       // quadrature latent (channel 6)
+    bool  animateZ = false;  // drive (z, zCos) around the latent circle
+    float zSpeed = 0.3f;
 
 private:
+    void makeTexture();
+
     const MetalContext& ctx_;
     mirror::MLPConfig cfg_;
     mirror::mx::array weights_;

@@ -90,6 +90,7 @@ int main(int argc, char** argv) {
 
     enum class Scene { Mirror = 0, Roots = 1 };
     int scene = (int)Scene::Mirror;
+    int downscale = 4;   // mirror render-resolution divisor (low-res + upsample)
 
     const double startTime = glfwGetTime();
     double lastTime = glfwGetTime();
@@ -110,8 +111,10 @@ int main(int argc, char** argv) {
 
             // Update the active scene's texture (MLX compute happens here).
             id<MTLTexture> sceneTex = nil;
-            if (scene == (int)Scene::Mirror && mirror.valid())
+            if (scene == (int)Scene::Mirror && mirror.valid()) {
+                mirror.ensureSize(fbw / std::max(1, downscale), fbh / std::max(1, downscale));
                 sceneTex = mirror.render(glfwGetTime() - startTime);
+            }
 
             MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
             rpd.colorAttachments[0].texture = drawable.texture;
@@ -134,9 +137,20 @@ int main(int argc, char** argv) {
             ImGui::Separator();
             if (scene == (int)Scene::Mirror) {
                 ImGui::TextUnformatted("neural mirror (pond)");
+                ImGui::Text("render %d x %d  (÷%d)", mirror.lowW(), mirror.lowH(), downscale);
+                ImGui::SliderInt("downscale", &downscale, 1, 8);
                 ImGui::SliderFloat("speed", &mirror.speed, 0.05f, 4.0f, "%.2f");
                 ImGui::SliderFloat("ring freq", &mirror.ringFreq, 1.0f, 8.0f, "%.2f");
                 ImGui::SliderFloat("decay", &mirror.decay, 0.4f, 3.0f, "%.2f");
+                ImGui::SliderFloat("warp", &mirror.warp, 0.0f, 0.5f, "%.3f");
+                ImGui::SliderFloat("core damp", &mirror.core, 0.0f, 0.6f, "%.3f");
+                ImGui::Checkbox("animate z", &mirror.animateZ);
+                if (mirror.animateZ) {
+                    ImGui::SliderFloat("z speed", &mirror.zSpeed, 0.0f, 1.5f, "%.2f");
+                } else {
+                    ImGui::SliderFloat("z", &mirror.z, -1.0f, 1.0f, "%.2f");
+                    ImGui::SliderFloat("z cos", &mirror.zCos, -1.0f, 1.0f, "%.2f");
+                }
             } else {
                 ImGui::TextDisabled("roots scene: Metal port pending");
             }
