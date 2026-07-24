@@ -39,7 +39,9 @@ target_link_libraries(mirror_imgui PUBLIC glfw
 # --- app ---------------------------------------------------------------------
 add_executable(mirror_app
     src/main.mm
-    src/metal_context.mm)
+    src/metal_context.mm
+    src/mirror_scene.mm
+    src/fullscreen_present.mm)
 target_include_directories(mirror_app PRIVATE src)
 target_link_libraries(mirror_app PRIVATE mirror_imgui glfw
     "-framework Metal" "-framework MetalKit" "-framework QuartzCore"
@@ -51,7 +53,8 @@ set(NEUROMIRROR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../neuromirror"
 target_compile_definitions(mirror_app PRIVATE
     NEUROMIRROR_DIR="${NEUROMIRROR_DIR}"
     SDF_VIEWER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../sdf_viewer"
-    MIRROR_APP_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+    MIRROR_APP_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+    MIRROR_APP_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")
 
 # --- MLX (neural mirror) -----------------------------------------------------
 # The MLX C++ library + CMake package ships inside neuromirror's venv (pip mlx).
@@ -67,7 +70,8 @@ find_package(MLX CONFIG REQUIRED)
 # mirror_core: the neural-mirror compute (MLX C++ port of the fused MLP), shared
 # by the app and the parity test. Pure C++ (no ObjC).
 add_library(mirror_core STATIC
-    src/mlp_forward.cpp)
+    src/mlp_forward.cpp
+    src/mirror_render.cpp)
 target_include_directories(mirror_core PUBLIC src ${MLX_INCLUDE_DIRS})
 target_link_libraries(mirror_core PUBLIC mlx)
 

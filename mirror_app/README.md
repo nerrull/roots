@@ -22,9 +22,16 @@ VS Code: **Build: mirror_app** / **Run: mirror_app**.
 ## Status
 
 - [x] Metal window shell (GLFW + CAMetalLayer + ImGui-metal + MetalContext)
-- [ ] Neural mirror (MLX C++ fused MLP + libmediapipe face tracking)
+- [x] Neural mirror render: MLX C++ fused MLP (bit-exact vs Python) → ripple
+      features → low-res RGBA16F → Metal texture, presented fullscreen (linear
+      upsample). The animated "pond" from `demo_pond`, live in the app.
+- [ ] Neural mirror: libmediapipe face tracking driving the field
 - [ ] Metal root renderer (GLSL→MSL port of sdf_viewer's `RootRenderer`)
 - [ ] Transition (deferred — not yet defined)
+
+Headless checks: `mirror_app --selftest` (MLX→texture path) and
+`mlp_parity_test mirror_app/tests/fixtures` (MLP vs Python reference).
+Regenerate the pond weights with `assets/gen_pond_weights.py` (needs neuromirror's venv).
 
 ## Layout
 

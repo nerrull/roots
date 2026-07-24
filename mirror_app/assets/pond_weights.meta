@@ -1,0 +1,7 @@
+in_dim 8
+hidden_dim 64
+out_dim 3
+num_layers 6
+act 1
+out_act 2
+total_weights 17408
