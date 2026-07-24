@@ -24,7 +24,12 @@ VS Code: **Build: mirror_app** / **Run: mirror_app**.
 - [x] Metal window shell (GLFW + CAMetalLayer + ImGui-metal + MetalContext)
 - [x] Neural mirror render: MLX C++ fused MLP (bit-exact vs Python) → ripple
       features → low-res RGBA16F → Metal texture, presented fullscreen (linear
-      upsample). The animated "pond" from `demo_pond`, live in the app.
+      upsample).
+- [x] **Full `demo_panel` feature parity**: weight shaping (detail / gain-tilt /
+      gauss↔uniform / contrast / reseed), ripple/z/colour/time knobs, and the
+      mask-emergence (hydro-dip) transition — the complete ImGui panel.
+      Numerically matched vs the Python panel (`pond_parity_test`: max u8 |Δ|=1,
+      0% pixels off by >1).
 - [ ] Neural mirror: libmediapipe face tracking driving the field
 - [ ] Metal root renderer (GLSL→MSL port of sdf_viewer's `RootRenderer`)
 - [ ] Transition (deferred — not yet defined)

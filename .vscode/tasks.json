@@ -75,6 +75,27 @@
             "problemMatcher": ["$gcc"]
         },
         {
+            "label": "Build: pond_parity_test",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["--build", "build", "--target", "pond_parity_test", "-j4"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["CMake: configure"],
+            "group": "build",
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "Test: pond_parity",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/mirror_app/pond_parity_test",
+            "args": ["${workspaceFolder}/mirror_app/tests/fixtures"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["Build: pond_parity_test"],
+            "group": { "kind": "test" },
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated" }
+        },
+        {
             "label": "Selftest: mirror (headless)",
             "type": "shell",
             "command": "${workspaceFolder}/build/mirror_app/mirror_app",

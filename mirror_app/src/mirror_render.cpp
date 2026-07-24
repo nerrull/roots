@@ -23,7 +23,8 @@ mx::array make_coord_grid(int h, int w, float x0, float x1, float y0, float y1) 
 mx::array multi_ripple_features(const mx::array& coords_in,
                                 const std::vector<RippleSource>& sources,
                                 float ring_freq, float decay, float z, float z_cos,
-                                float warp, float core_radius) {
+                                float warp, float core_radius,
+                                float x_offset, float y_offset) {
     auto coords = mx::astype(coords_in, mx::float32);
     auto xy = mx::split(coords, 2, /*axis=*/1);  // x, y : (N, 1) each
     auto x = xy[0];
@@ -56,8 +57,13 @@ mx::array multi_ripple_features(const mx::array& coords_in,
             gy = mx::add(gy, mx::multiply(slope, dy));
         }
     }
-    auto xw = warp != 0.f ? mx::add(x, mx::multiply(S(warp), gx)) : x;
-    auto yw = warp != 0.f ? mx::add(y, mx::multiply(S(warp), gy)) : y;
+    // Color coords: subtract xy_offset (color travel) and add warp*gradient (refraction).
+    auto xw = mx::subtract(x, S(x_offset));
+    auto yw = mx::subtract(y, S(y_offset));
+    if (warp != 0.f) {
+        xw = mx::add(xw, mx::multiply(S(warp), gx));
+        yw = mx::add(yw, mx::multiply(S(warp), gy));
+    }
     auto zc = mx::full({n, 1}, z, mx::float32);
     auto zc2 = mx::full({n, 1}, z_cos, mx::float32);
     auto bias = mx::ones({n, 1}, mx::float32);

@@ -3,60 +3,12 @@
 #import <Foundation/Foundation.h>
 
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
-#include <cstdio>
-#include <fstream>
-#include <map>
-#include <vector>
 
 namespace mx = mirror::mx;
 
-namespace {
-
-std::map<std::string, int> read_meta(const std::string& path) {
-    std::ifstream f(path);
-    std::map<std::string, int> m;
-    std::string k; int v;
-    while (f >> k >> v) m[k] = v;
-    return m;
-}
-
-std::vector<float> read_f32(const std::string& path, size_t count) {
-    std::ifstream f(path, std::ios::binary);
-    std::vector<float> v(count);
-    if (f) f.read(reinterpret_cast<char*>(v.data()), count * sizeof(float));
-    return v;
-}
-
-}  // namespace
-
-MirrorScene::MirrorScene(const MetalContext& ctx, const std::string& assetDir,
-                         int lowW, int lowH)
-    : ctx_(ctx), weights_(mx::zeros({1})), lw_(lowW), lh_(lowH) {
-    std::string dir = assetDir;
-    if (!dir.empty() && dir.back() != '/') dir += '/';
-
-    auto meta = read_meta(dir + "pond_weights.meta");
-    cfg_.in_dim = meta.count("in_dim") ? meta["in_dim"] : 8;
-    cfg_.hidden_dim = meta.count("hidden_dim") ? meta["hidden_dim"] : 64;
-    cfg_.out_dim = meta.count("out_dim") ? meta["out_dim"] : 3;
-    cfg_.num_layers = meta.count("num_layers") ? meta["num_layers"] : 6;
-    cfg_.activation = static_cast<mirror::Act>(meta.count("act") ? meta["act"] : 1);
-    cfg_.out_activation = static_cast<mirror::Act>(meta.count("out_act") ? meta["out_act"] : 2);
-
-    const int total = cfg_.total_weights();
-    auto wv = read_f32(dir + "pond_weights.f32", (size_t)total);
-    weights_ = mx::array(wv.data(), {total}, mx::float32);
-
-    // Fixed raindrop sites (cx, cy, rate, phase) — a hand-picked spread.
-    drops_ = {
-        {-0.55f,  0.35f, 0.23f, 0.0f},
-        { 0.60f,  0.10f, 0.31f, 1.7f},
-        {-0.20f, -0.55f, 0.17f, 3.1f},
-        { 0.35f, -0.30f, 0.41f, 4.6f},
-    };
-
+MirrorScene::MirrorScene(const MetalContext& ctx, int seed, int lowW, int lowH)
+    : ctx_(ctx), pond_(seed), lw_(lowW), lh_(lowH) {
     makeTexture();
 }
 
@@ -77,30 +29,20 @@ void MirrorScene::ensureSize(int w, int h) {
     makeTexture();
 }
 
-id<MTLTexture> MirrorScene::render(double t) {
-    // pond_sources: pulsing fixed drops + one orbiting source.
-    const float phase = 2.0f * (float)M_PI * speed * (float)t;
-    std::vector<mirror::RippleSource> sources;
-    sources.reserve(drops_.size() + 1);
-    for (const auto& d : drops_) {
-        float amp = 0.5f - 0.5f * std::cos(2.0f * (float)M_PI * d[2] * (float)t + d[3]);
-        sources.push_back({d[0], d[1], phase, amp});
+void MirrorScene::advance(double dt) {
+    if (!params_.paused) {
+        t_ += dt * params_.time_scale;
+        params_.z += dt * params_.z_rate;
     }
-    const float asp = (float)lw_ / (float)lh_;
-    sources.push_back({0.6f * asp * std::cos(0.5f * (float)t),
-                       0.6f * std::sin(0.5f * (float)t), phase, 1.0f});
+    if (params_.trans_auto)
+        params_.transition = std::min(1.0f, std::max(0.0f, params_.transition + (float)dt * params_.trans_rate));
+}
 
-    // Latent circle: driving (z, zCos) with (sin, cos) of a ramping phase gives a
-    // continuous, constant-speed cyclic morph (a lone sin latent stalls at turns).
-    float zv = z, zc = zCos;
-    if (animateZ) {
-        float zp = 2.0f * (float)M_PI * zSpeed * (float)t;
-        zv = std::sin(zp); zc = std::cos(zp);
-    }
-
-    auto rgba = mirror::render_pond_lowres(weights_, cfg_, lh_, lw_, sources,
-                                           ringFreq, decay, zv, zc, warp, core, asp);
-    rgba = mx::contiguous(rgba);
+id<MTLTexture> MirrorScene::render() {
+    auto img = pond_.render(lh_, lw_, t_, params_);   // (lh, lw, 3) fp32 [0,1]
+    auto rgb16 = mx::astype(img, mx::float16);
+    auto alpha = mx::ones({lh_, lw_, 1}, mx::float16);
+    auto rgba = mx::contiguous(mx::concatenate({rgb16, alpha}, 2));
     mx::eval(rgba);
 
     const void* ptr = rgba.data<uint16_t>();   // fp16 bytes, unified memory

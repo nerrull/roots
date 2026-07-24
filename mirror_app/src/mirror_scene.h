@@ -1,6 +1,6 @@
-// MirrorScene — the neural-mirror scene. Runs the MLX fused-MLP "pond" render
-// each frame and hands back a low-res Metal texture (linearly upsampled at
-// present time). This is the C++ analogue of mlx_fused_mlp/demo_pond.
+// MirrorScene — the neural-mirror scene: owns a Pond (full demo_panel port),
+// advances its clocks, and uploads each frame's low-res image to a Metal texture
+// that the compositor presents (linearly upsampled).
 #pragma once
 
 #ifndef __OBJC__
@@ -8,46 +8,40 @@
 #endif
 
 #import <Metal/Metal.h>
-#include <string>
 
-#include "mlp_forward.h"
-#include "mirror_render.h"
+#include "pond_state.h"
 
 class MetalContext;
 
 class MirrorScene {
 public:
-    // assetDir holds pond_weights.f32 / pond_weights.meta (from gen_pond_weights.py).
-    MirrorScene(const MetalContext& ctx, const std::string& assetDir,
-                int lowW = 480, int lowH = 270);
+    MirrorScene(const MetalContext& ctx, int seed = 11, int lowW = 480, int lowH = 270);
 
     // Ensure the low-res render target matches (w, h); recreates it if changed.
     void ensureSize(int w, int h);
 
-    // Animate to time t (seconds) and return the current low-res RGBA16F texture.
-    id<MTLTexture> render(double t);
+    // Advance the ripple / z / transition clocks by dt seconds.
+    void advance(double dt);
+
+    // Render the current frame and return the low-res RGBA16F texture.
+    id<MTLTexture> render();
+
+    void reseed() { pond_.reseed(); }
 
     bool valid() const { return tex_ != nil; }
-    int lowW() const { return lw_; }
-    int lowH() const { return lh_; }
+    int  lowW() const { return lw_; }
+    int  lowH() const { return lh_; }
+    double clock() const { return t_; }
 
-    float speed = 1.2f;      // ripple propagation speed (demo_pond default)
-    float ringFreq = 3.0f;
-    float decay = 1.6f;
-    float warp = 0.0f;       // domain-warp refraction strength
-    float core = 0.0f;       // core-radius damping (0 = off)
-    float z = 0.0f;          // latent channel 2
-    float zCos = 0.0f;       // quadrature latent (channel 6)
-    bool  animateZ = false;  // drive (z, zCos) around the latent circle
-    float zSpeed = 0.3f;
+    mirror::PondParams& params() { return params_; }
 
 private:
     void makeTexture();
 
     const MetalContext& ctx_;
-    mirror::MLPConfig cfg_;
-    mirror::mx::array weights_;
-    std::vector<mirror::RippleSource> drops_;   // (cx, cy, rate, phase)
+    mirror::Pond pond_;
+    mirror::PondParams params_;
+    double t_ = 0.0;
     int lw_, lh_;
     id<MTLTexture> tex_ = nil;
 };

@@ -31,10 +31,12 @@
 static int selftest() {
     MetalContext ctx;
     if (!ctx.device()) { fprintf(stderr, "selftest: no Metal device\n"); return 1; }
-    MirrorScene mirror(ctx, MIRROR_APP_ASSET_DIR);
+    MirrorScene mirror(ctx);
     if (!mirror.valid()) { fprintf(stderr, "selftest: mirror invalid\n"); return 1; }
+    // Exercise the transition path too, so the whole pipeline is covered.
+    mirror.params().transition = 0.5f;
     id<MTLTexture> tex = nil;
-    for (int i = 0; i < 5; ++i) tex = mirror.render(i / 60.0);
+    for (int i = 0; i < 5; ++i) { mirror.advance(1.0 / 60.0); tex = mirror.render(); }
     // Read back one RGBA16F texel (center) to confirm real data landed.
     uint16_t px[4] = {0, 0, 0, 0};
     NSUInteger cx = tex.width / 2, cy = tex.height / 2;
@@ -84,7 +86,7 @@ int main(int argc, char** argv) {
     printf("mirror_app — Metal shell up (device: %s)\n", device.name.UTF8String);
 
     // Scenes / presenter.
-    MirrorScene mirror(ctx, MIRROR_APP_ASSET_DIR);
+    MirrorScene mirror(ctx);
     FullscreenPresent present(ctx, std::string(MIRROR_APP_SHADER_DIR) + "/present.metal",
                               layer.pixelFormat);
 
@@ -92,7 +94,6 @@ int main(int argc, char** argv) {
     int scene = (int)Scene::Mirror;
     int downscale = 4;   // mirror render-resolution divisor (low-res + upsample)
 
-    const double startTime = glfwGetTime();
     double lastTime = glfwGetTime();
     double fpsAccum = 0.0; int fpsFrames = 0; double fpsShown = 0.0;
 
@@ -110,10 +111,14 @@ int main(int argc, char** argv) {
             id<MTLCommandBuffer> cb = [queue commandBuffer];
 
             // Update the active scene's texture (MLX compute happens here).
+            static double prevT = glfwGetTime();
+            double nowT = glfwGetTime();
+            double dt = nowT - prevT; prevT = nowT;
             id<MTLTexture> sceneTex = nil;
             if (scene == (int)Scene::Mirror && mirror.valid()) {
                 mirror.ensureSize(fbw / std::max(1, downscale), fbh / std::max(1, downscale));
-                sceneTex = mirror.render(glfwGetTime() - startTime);
+                mirror.advance(dt);
+                sceneTex = mirror.render();
             }
 
             MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -126,30 +131,81 @@ int main(int argc, char** argv) {
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
 
-            ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_FirstUseEver);
-            ImGui::Begin("mirror_app");
-            ImGui::Text("%.1f fps", fpsShown);
-            ImGui::Text("drawable %d x %d", (int)fbw, (int)fbh);
-            ImGui::Separator();
-            ImGui::TextUnformatted("scene");
+            ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_FirstUseEver);
+            ImGui::Begin("neuromirror — controls");
+            ImGui::Text("%.0f fps   t=%5.1fs", fpsShown, mirror.clock());
+            ImGui::TextUnformatted("scene:"); ImGui::SameLine();
             ImGui::RadioButton("mirror", &scene, (int)Scene::Mirror); ImGui::SameLine();
             ImGui::RadioButton("roots",  &scene, (int)Scene::Roots);
             ImGui::Separator();
             if (scene == (int)Scene::Mirror) {
-                ImGui::TextUnformatted("neural mirror (pond)");
-                ImGui::Text("render %d x %d  (÷%d)", mirror.lowW(), mirror.lowH(), downscale);
-                ImGui::SliderInt("downscale", &downscale, 1, 8);
-                ImGui::SliderFloat("speed", &mirror.speed, 0.05f, 4.0f, "%.2f");
-                ImGui::SliderFloat("ring freq", &mirror.ringFreq, 1.0f, 8.0f, "%.2f");
-                ImGui::SliderFloat("decay", &mirror.decay, 0.4f, 3.0f, "%.2f");
-                ImGui::SliderFloat("warp", &mirror.warp, 0.0f, 0.5f, "%.3f");
-                ImGui::SliderFloat("core damp", &mirror.core, 0.0f, 0.6f, "%.3f");
-                ImGui::Checkbox("animate z", &mirror.animateZ);
-                if (mirror.animateZ) {
-                    ImGui::SliderFloat("z speed", &mirror.zSpeed, 0.0f, 1.5f, "%.2f");
-                } else {
-                    ImGui::SliderFloat("z", &mirror.z, -1.0f, 1.0f, "%.2f");
-                    ImGui::SliderFloat("z cos", &mirror.zCos, -1.0f, 1.0f, "%.2f");
+                mirror::PondParams& P = mirror.params();
+                // ripples
+                ImGui::SliderFloat("ring freq", &P.ring_freq, 0.3f, 10.0f);
+                ImGui::SliderFloat("ripple decay", &P.decay, 0.0f, 5.0f);
+                ImGui::SliderFloat("ripple speed", &P.speed, 0.0f, 6.0f);
+                ImGui::SliderFloat("ripple phase", &P.ripple_offset, 0.0f, 2.0f * (float)M_PI);
+                ImGui::SliderFloat("refraction (warp)", &P.warp, 0.0f, 1.0f);
+                ImGui::SliderInt("raindrops", &P.drops, 0, 12);
+                ImGui::Checkbox("moving ripple", &P.orbit_on);
+                ImGui::Checkbox("soft centers (anti-alias)", &P.core_rolloff);
+                if (P.core_rolloff) {
+                    ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+                    ImGui::SliderFloat("radius", &P.core_radius, 0.02f, 0.5f);
+                }
+                ImGui::Separator();
+                // weight shaping
+                ImGui::SliderFloat("detail (w hidden)", &P.detail, 0.5f, 10.0f);
+                ImGui::SliderFloat("gain tilt (front<->back)", &P.gain_tilt, -3.0f, 3.0f);
+                ImGui::SliderFloat("w shape (gauss<->uniform)", &P.uniform_mix, 0.0f, 1.0f);
+                ImGui::SliderFloat("contrast (w out)", &P.contrast, 1.0f, 12.0f);
+                ImGui::Checkbox("sRGB fix", &P.srgb_fix); ImGui::SameLine();
+                if (ImGui::Button("reset color")) { P.srgb_fix = false; P.gamma = 1.0f; }
+                ImGui::SliderFloat("gamma (>1 darkens)", &P.gamma, 0.3f, 2.0f);
+                ImGui::SliderFloat("color mix (0 grey -> 1 RGB)", &P.color_mix, 0.0f, 1.0f);
+                ImGui::SameLine(); ImGui::SetNextItemWidth(90);
+                const char* greyItems[] = {"R", "G", "B"};
+                ImGui::Combo("grey ch", &P.grey_channel, greyItems, 3);
+                ImGui::Checkbox("ripple amp -> color", &P.amp_drives_color);
+                if (P.amp_drives_color) {
+                    ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+                    ImGui::SliderFloat("amp gain", &P.amp_gain, 0.2f, 6.0f);
+                }
+                ImGui::SliderInt("downscale", &downscale, 1, 10);
+                ImGui::Separator();
+                // z latent
+                ImGui::Text("z phase = %6.2f  (circular morph)", P.z);
+                ImGui::DragFloat("z", &P.z, 0.02f);
+                ImGui::SliderFloat("z amplitude", &P.z_amp, 0.0f, 3.0f);
+                ImGui::SliderFloat("z auto-rate /s", &P.z_rate, -2.0f, 2.0f);
+                ImGui::SliderFloat("z step size", &P.z_step, 0.01f, 1.0f);
+                if (ImGui::Button("z - step")) P.z -= P.z_step; ImGui::SameLine();
+                if (ImGui::Button("z + step")) P.z += P.z_step; ImGui::SameLine();
+                if (ImGui::Button("z = 0")) P.z = 0.0f;
+                ImGui::Separator();
+                // time
+                ImGui::SliderFloat("ripple time scale", &P.time_scale, 0.0f, 4.0f);
+                ImGui::Checkbox("pause", &P.paused); ImGui::SameLine();
+                ImGui::Checkbox("swap R/B", &P.swap_rb);
+                ImGui::Checkbox("color travel (palette follows orbit)", &P.color_travel);
+                if (ImGui::Button("reseed network")) mirror.reseed();
+                ImGui::Text("render %d x %d -> %d x %d", mirror.lowW(), mirror.lowH(), fbw, fbh);
+                ImGui::Separator();
+                // mask emergence transition
+                if (ImGui::CollapsingHeader("mask emergence (transition)")) {
+                    ImGui::SliderFloat("transition (0 pond -> 1 mask)", &P.transition, 0.0f, 1.0f);
+                    ImGui::Checkbox("auto-play", &P.trans_auto); ImGui::SameLine();
+                    if (ImGui::Button("reset t")) { P.transition = 0.0f; P.trans_auto = false; }
+                    ImGui::SliderFloat("play rate /s", &P.trans_rate, 0.05f, 1.0f);
+                    ImGui::SliderFloat("relief height", &P.relief_h, 0.0f, 1.5f);
+                    ImGui::SliderFloat("mask width", &P.mask_ax, 0.2f, 1.0f);
+                    ImGui::SliderFloat("mask height", &P.mask_ay, 0.2f, 1.2f);
+                    ImGui::SliderFloat("light azimuth", &P.light_az, -(float)M_PI, (float)M_PI);
+                    ImGui::SliderFloat("light elevation", &P.light_elev, 0.1f, (float)M_PI / 2.0f);
+                    ImGui::SliderFloat("wet sheen (spec)", &P.spec_amt, 0.0f, 1.5f);
+                    ImGui::SliderFloat("sheen tightness", &P.shininess, 4.0f, 96.0f);
+                    ImGui::SliderFloat("background dim", &P.bg_dim, 0.0f, 1.0f);
                 }
             } else {
                 ImGui::TextDisabled("roots scene: Metal port pending");

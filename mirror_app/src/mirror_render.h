@@ -17,6 +17,10 @@ namespace mirror {
 
 namespace mx = mlx::core;
 
+// Enriched raw-coordinate feature width (features.ENRICHED_DIM): x, y, z, bias,
+// sin_field, cos_field, z_cos, spare.
+inline constexpr int ENRICHED_DIM = 8;
+
 // A ripple source: (cx, cy, phase, amp). Center, outward phase (ramp to animate
 // propagation), and 0..1 amplitude envelope.
 using RippleSource = std::array<float, 4>;
@@ -33,7 +37,8 @@ mx::array multi_ripple_features(const mx::array& coords,
                                 const std::vector<RippleSource>& sources,
                                 float ring_freq = 3.f, float decay = 1.6f,
                                 float z = 0.f, float z_cos = 0.f,
-                                float warp = 0.f, float core_radius = 0.f);
+                                float warp = 0.f, float core_radius = 0.f,
+                                float x_offset = 0.f, float y_offset = 0.f);
 
 // Render a low-res RGBA fp16 image (lh, lw, 4): evaluate the MLP over the grid's
 // multi-ripple features and append an opaque alpha channel. out_dim must be 3.

@@ -71,7 +71,8 @@ find_package(MLX CONFIG REQUIRED)
 # by the app and the parity test. Pure C++ (no ObjC).
 add_library(mirror_core STATIC
     src/mlp_forward.cpp
-    src/mirror_render.cpp)
+    src/mirror_render.cpp
+    src/pond_state.cpp)
 target_include_directories(mirror_core PUBLIC src ${MLX_INCLUDE_DIRS})
 target_link_libraries(mirror_core PUBLIC mlx)
 
@@ -80,6 +81,9 @@ target_link_libraries(mirror_app PRIVATE mirror_core)
 # --- tests -------------------------------------------------------------------
 add_executable(mlp_parity_test tests/mlp_parity_test.cpp)
 target_link_libraries(mlp_parity_test PRIVATE mirror_core)
+
+add_executable(pond_parity_test tests/pond_parity_test.cpp)
+target_link_libraries(pond_parity_test PRIVATE mirror_core)
 
 # --- subsystems (wired in as they land) --------------------------------------
 # TODO(tracking): prebuilt libmediapipe .dylib for face_tracker.
