@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.17)
-project(JardinsRacine LANGUAGES CXX)
+project(JardinsRacine LANGUAGES CXX OBJCXX)
 
 set(PIAFMUNCH OFF CACHE BOOL "Disable optional PiafMunch" FORCE)
 set(CPLANTBOX_PYTHON_BINDINGS OFF CACHE BOOL "Disable CPlantBox Python bindings" FORCE)
@@ -17,5 +17,6 @@ target_include_directories(CPlantBox PUBLIC
 )
 
 add_subdirectory(sdf_viewer)
+add_subdirectory(mirror_app)
 add_subdirectory(freenect_test)
 add_subdirectory(bubble_renderer)

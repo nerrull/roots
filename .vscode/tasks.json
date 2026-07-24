@@ -46,6 +46,25 @@
             "presentation": { "reveal": "always", "panel": "dedicated" }
         },
         {
+            "label": "Build: mirror_app",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["--build", "build", "--target", "mirror_app", "-j4"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["CMake: configure"],
+            "group": "build",
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "Run: mirror_app",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/mirror_app/mirror_app",
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["Build: mirror_app"],
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated" }
+        },
+        {
             "label": "Build: sdf_viewer (original CPlantBox viewer)",
             "type": "shell",
             "command": "cmake",
