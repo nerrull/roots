@@ -23,7 +23,9 @@
 #include "fullscreen_present.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 // Headless check of the MLX→Metal texture path (no window): render a few mirror
@@ -52,9 +54,44 @@ static int selftest() {
     return 0;
 }
 
+// Headless throughput benchmark of the mirror's MLX compute (features + fused
+// MLP), matching demo_pond's method: eval each frame, synchronize once at the
+// end. Reports ms/frame at 1920x1080 / downscale.  Usage: --bench [downscale] [frames]
+static int bench(int downscale, int frames) {
+    MetalContext ctx;
+    if (!ctx.device()) { fprintf(stderr, "bench: no Metal device\n"); return 1; }
+    const int W = 1920, H = 1080;
+    const int lw = std::max(2, W / downscale), lh = std::max(2, H / downscale);
+    mirror::Pond pond(11);
+    mirror::PondParams p;
+
+    auto now = [] { return std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count(); };
+
+    { auto a = pond.render(lh, lw, 0.0, p); mirror::mx::eval(a); }   // warmup
+    mirror::mx::synchronize();
+    double t0 = now();
+    for (int f = 0; f < frames; ++f) {
+        auto a = pond.render(lh, lw, f / 60.0, p);
+        mirror::mx::eval(a);
+    }
+    mirror::mx::synchronize();
+    double dt = (now() - t0) / frames;
+    printf("bench: pond compute %dx%d (ds=%d, %d frames): %.3f ms/frame (%.0f fps)\n",
+           lw, lh, downscale, frames, dt * 1e3, 1.0 / dt);
+    return 0;
+}
+
 int main(int argc, char** argv) {
-    for (int i = 1; i < argc; ++i)
-        if (std::string(argv[i]) == "--selftest") return selftest();
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--selftest") return selftest();
+        if (a == "--bench") {
+            int ds = (i + 1 < argc) ? atoi(argv[i + 1]) : 4;
+            int fr = (i + 2 < argc) ? atoi(argv[i + 2]) : 200;
+            return bench(ds, fr);
+        }
+    }
 
     if (!glfwInit()) { fprintf(stderr, "glfw init failed\n"); return 1; }
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);   // Metal owns the surface
