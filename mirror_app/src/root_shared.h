@@ -78,6 +78,23 @@ struct RootGeomU {
     RS_F4   paletteTip[ROOT_MAX_GROUPS];
 };
 
+// Face mid-geometry pass (root_face.metal): mask meshes rasterized into the
+// shared colour+depth target between the capsule pass and fog.
+struct RootFaceU {
+    RS_F4X4 viewProj;
+    RS_F4   eye;          // xyz
+    RS_F4   lightDir;     // xyz
+    RS_F4   veinColor;    // xyz
+    float   lightIntensity;
+    float   lightFalloff;
+    float   specStrength;
+    float   veinScale;
+    float   veinStrength;
+    float   _pad0;
+    float   _pad1;
+    float   _pad2;
+};
+
 // Fog post-process pass (root_fog.metal).
 struct RootFogU {
     RS_F3X3 cam;

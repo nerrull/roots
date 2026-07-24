@@ -1,9 +1,111 @@
 #include "root_scene.h"
 #include "metal_context.h"
 
+#include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <random>
+#include <sstream>
 #include <vector>
+
+// ---------------------------------------------------------------------------
+// Face model loading + placement (ports of render_relay_gui.cpp helpers, but in
+// render world space directly — no CPlantBox toYup remap needed here).
+// ---------------------------------------------------------------------------
+namespace {
+struct F3 { float x, y, z; };
+inline F3 sub(F3 a, F3 b) { return {a.x-b.x, a.y-b.y, a.z-b.z}; }
+inline F3 add(F3 a, F3 b) { return {a.x+b.x, a.y+b.y, a.z+b.z}; }
+inline F3 mul(F3 a, float s) { return {a.x*s, a.y*s, a.z*s}; }
+inline float dot(F3 a, F3 b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
+inline F3 cross(F3 a, F3 b) { return {a.y*b.z-a.z*b.y, a.z*b.x-a.x*b.z, a.x*b.y-a.y*b.x}; }
+inline F3 norm(F3 v) { float l = std::sqrt(dot(v,v)); if (l < 1e-9f) l = 1.f; return {v.x/l, v.y/l, v.z/l}; }
+
+void loadObj(const std::string& path, std::vector<float>& verts, std::vector<int>& tris) {
+    std::ifstream f(path);
+    if (!f.is_open()) return;
+    std::string line;
+    while (std::getline(f, line)) {
+        std::istringstream ss(line);
+        std::string tag; ss >> tag;
+        if (tag == "v") {
+            float x, y, z; ss >> x >> y >> z;
+            verts.push_back(x); verts.push_back(y); verts.push_back(z);
+        } else if (tag == "f") {
+            int idx[3]; std::string tok;
+            for (int i = 0; i < 3 && ss >> tok; i++) idx[i] = std::atoi(tok.c_str()) - 1;
+            tris.push_back(idx[0]); tris.push_back(idx[1]); tris.push_back(idx[2]);
+        }
+    }
+}
+
+void normalizeMesh(std::vector<float>& v) {
+    float cx = 0, cy = 0, cz = 0;
+    size_t n = v.size() / 3;
+    if (n == 0) return;
+    for (size_t i = 0; i < n; i++) { cx += v[i*3]; cy += v[i*3+1]; cz += v[i*3+2]; }
+    cx /= n; cy /= n; cz /= n;
+    float m = 1e-9f;
+    for (size_t i = 0; i < n; i++) {
+        v[i*3] -= cx; v[i*3+1] -= cy; v[i*3+2] -= cz;
+        m = std::max({m, std::fabs(v[i*3]), std::fabs(v[i*3+1]), std::fabs(v[i*3+2])});
+    }
+    for (auto& x : v) x /= m;
+}
+
+std::vector<int> cropOvalTris(const std::vector<float>& v, const std::vector<int>& tris,
+                              float rx, float ry) {
+    std::vector<int> out;
+    for (size_t t = 0; t < tris.size(); t += 3) {
+        float cx = 0, cy = 0;
+        for (int k = 0; k < 3; k++) { cx += v[tris[t+k]*3]; cy += v[tris[t+k]*3+1]; }
+        cx /= 3; cy /= 3;
+        if ((cx/rx)*(cx/rx) + (cy/ry)*(cy/ry) < 1.0f)
+            for (int k = 0; k < 3; k++) out.push_back(tris[t+k]);
+    }
+    return out;
+}
+
+// One placed mask (render world space; Y-up).
+struct Mask { F3 pos, normal, tangent, bitangent; float rDepth, rWidth, rHeight; };
+
+// Build interleaved face triangles (12 floats/vert) for a set of masks.
+void appendFaceVertexData(std::vector<float>& out, const Mask& m,
+                          const std::vector<float>& fv, const std::vector<int>& ftris,
+                          float faceScale, float lightDist, const float color[3]) {
+    F3 n = m.normal, t = m.tangent, b = m.bitangent;
+    F3 p = sub(m.pos, mul(n, m.rDepth * 0.5f));
+    float scale = faceScale * std::min(m.rWidth, m.rHeight);
+    F3 lightPos = add(p, mul(n, lightDist));
+    for (size_t i = 0; i < ftris.size(); i += 3) {
+        F3 v3[3];
+        for (int k = 0; k < 3; k++) {
+            int vi = ftris[i+k];
+            F3 local = {fv[vi*3], fv[vi*3+1], fv[vi*3+2]};
+            v3[k] = add(add(add(p, mul(t, local.x * scale)), mul(b, local.y * scale)),
+                        mul(n, local.z * scale));
+        }
+        F3 fn = norm(cross(sub(v3[1], v3[0]), sub(v3[2], v3[0])));
+        for (int k = 0; k < 3; k++) {
+            out.push_back(v3[k].x); out.push_back(v3[k].y); out.push_back(v3[k].z);
+            out.push_back(fn.x); out.push_back(fn.y); out.push_back(fn.z);
+            out.push_back(color[0]); out.push_back(color[1]); out.push_back(color[2]);
+            out.push_back(lightPos.x); out.push_back(lightPos.y); out.push_back(lightPos.z);
+        }
+    }
+}
+
+// Right/up basis for a mask facing `n`, using world up (0,1,0).
+Mask makeMask(F3 pos, F3 n, float r) {
+    n = norm(n);
+    F3 up = {0, 1, 0};
+    F3 t = cross(up, n);
+    if (dot(t, t) < 1e-6f) t = (F3){1, 0, 0};
+    t = norm(t);
+    F3 bit = norm(cross(n, t));
+    return {pos, n, t, bit, r, r, r};
+}
+}  // namespace
 
 RootScene::RootScene(const MetalContext& ctx, int w, int h) {
     const std::string shaderDir    = std::string(MIRROR_APP_SHADER_DIR);
@@ -32,6 +134,37 @@ RootScene::RootScene(const MetalContext& ctx, int w, int h) {
     rr_->pulse.enabled = true;
 
     buildSyntheticRoots(1u);
+
+    // Canonical face model (shared with the GL sdf_viewer assets).
+    loadObj(std::string(SDF_VIEWER_DIR) + "/assets/canonical_face_model.obj",
+            faceVerts_, faceTris_);
+    normalizeMesh(faceVerts_);
+    faceTris_ = cropOvalTris(faceVerts_, faceTris_, 0.72f, 0.98f);
+    rebuildFace();
+}
+
+void RootScene::rebuildFace() {
+    if (!rr_) return;
+    if (!showFace || faceVerts_.empty() || faceTris_.empty()) {
+        rr_->uploadFaceMesh({});
+        return;
+    }
+    const float maskColor[3] = {0.86f, 0.83f, 0.78f};
+    // A few masks around the trunk at staggered heights, facing outward, so the
+    // orbit reveals them and they depth-composite against the roots.
+    std::vector<float> data;
+    const int N = 3;
+    for (int i = 0; i < N; i++) {
+        float ang = 2.0f * (float)M_PI * i / N + 0.4f;
+        float h = 6.0f + 5.0f * i;
+        F3 dir = {std::sin(ang), 0.15f, std::cos(ang)};
+        F3 center = {target[0] + 5.0f * std::sin(ang),
+                     target[1] + h - 6.0f,
+                     target[2] + 5.0f * std::cos(ang)};
+        Mask m = makeMask(center, dir, 4.5f);
+        appendFaceVertexData(data, m, faceVerts_, faceTris_, faceScale, 3.0f, maskColor);
+    }
+    rr_->uploadFaceMesh(data);
 }
 
 void RootScene::ensureSize(int w, int h) {

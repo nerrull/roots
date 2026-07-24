@@ -66,6 +66,15 @@ public:
         bool  showGrid    = false;
         float gridSpacing = 5.0f;
     };
+    // Material for the face mid-geometry pass (mirrors FaceGL's knobs).
+    struct FaceParams {
+        float lightIntensity = 3.2f;
+        float lightFalloff   = 0.012f;
+        float specStrength   = 1.2f;
+        float veinColor[3]   = {0.55f, 0.53f, 0.50f};
+        float veinScale      = 0.6f;
+        float veinStrength    = 0.5f;
+    };
     struct WispDef {
         float basePos[3]  = {};
         float color[3]    = {0.8f, 0.9f, 1.0f};
@@ -95,6 +104,12 @@ public:
                         const std::vector<float>* frames = nullptr,
                         const std::vector<float>* aux    = nullptr);
 
+    // Face mid-geometry mesh: flat interleaved triangles, 12 floats/vertex
+    // (pos3, normal3, color3, lightPos3) — same layout as FaceGL's VBO. Drawn
+    // into the shared colour+depth target between the capsules and the fog.
+    // Empty data clears the face pass.
+    void uploadFaceMesh(const std::vector<float>& interleaved);
+
     // Encode both passes into cb; returns the final fogged colour texture.
     id<MTLTexture> render(id<MTLCommandBuffer> cb,
                           float azimuth, float elevation, float radius,
@@ -111,6 +126,7 @@ public:
     Fog        fog;
     Pulse      pulse;
     Overlay    overlay;
+    FaceParams face;
     WispDef    wisps[MAX_WISPS];
     int        wispCount        = 2;
     float      wispGlowStrength = 1.0f;
@@ -132,8 +148,12 @@ private:
     int w_ = 0, h_ = 0;
 
     id<MTLRenderPipelineState> geomPipe_ = nil;
+    id<MTLRenderPipelineState> facePipe_ = nil;
     id<MTLRenderPipelineState> fogPipe_  = nil;
     id<MTLDepthStencilState>   depthState_ = nil;
+
+    id<MTLBuffer> faceBuf_ = nil;
+    int faceVertCount_ = 0;
 
     id<MTLTexture> rootColorTex_ = nil;
     id<MTLTexture> rootDepthTex_ = nil;

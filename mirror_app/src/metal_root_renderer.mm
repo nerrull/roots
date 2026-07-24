@@ -54,8 +54,9 @@ MetalRootRenderer::MetalRootRenderer(const MetalContext& ctx, const std::string&
     : device_(ctx.device()), w_(w), h_(h) {
     // Pipelines: each MSL pass compiled with root_shared.h prepended.
     id<MTLLibrary> geomLib = ctx.newLibraryFromFiles({sharedHeaderPath, shaderDir + "/root_geom.metal"});
+    id<MTLLibrary> faceLib = ctx.newLibraryFromFiles({sharedHeaderPath, shaderDir + "/root_face.metal"});
     id<MTLLibrary> fogLib  = ctx.newLibraryFromFiles({sharedHeaderPath, shaderDir + "/root_fog.metal"});
-    if (!geomLib || !fogLib) { fprintf(stderr, "MetalRootRenderer: shader compile failed\n"); return; }
+    if (!geomLib || !faceLib || !fogLib) { fprintf(stderr, "MetalRootRenderer: shader compile failed\n"); return; }
 
     NSError* err = nil;
     {
@@ -66,6 +67,15 @@ MetalRootRenderer::MetalRootRenderer(const MetalContext& ctx, const std::string&
         d.depthAttachmentPixelFormat = kDepthFmt;
         geomPipe_ = [device_ newRenderPipelineStateWithDescriptor:d error:&err];
         if (!geomPipe_) { NSLog(@"geom pipeline failed: %@", err); return; }
+    }
+    {
+        MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+        d.vertexFunction   = [faceLib newFunctionWithName:@"root_face_vs"];
+        d.fragmentFunction = [faceLib newFunctionWithName:@"root_face_fs"];
+        d.colorAttachments[0].pixelFormat = kColorFmt;
+        d.depthAttachmentPixelFormat = kDepthFmt;
+        facePipe_ = [device_ newRenderPipelineStateWithDescriptor:d error:&err];
+        if (!facePipe_) { NSLog(@"face pipeline failed: %@", err); return; }
     }
     {
         MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
@@ -231,6 +241,13 @@ void MetalRootRenderer::uploadSegments(const std::vector<float>& nodesXYZ,
     auxBuf_   = makeBuffer(auxData.data(),   auxData.size()   * sizeof(float));
 }
 
+void MetalRootRenderer::uploadFaceMesh(const std::vector<float>& interleaved) {
+    faceVertCount_ = (int)(interleaved.size() / 12);
+    faceBuf_ = faceVertCount_ > 0
+        ? makeBuffer(interleaved.data(), interleaved.size() * sizeof(float))
+        : nil;
+}
+
 id<MTLTexture> MetalRootRenderer::render(id<MTLCommandBuffer> cb,
                                          float azimuth, float elevation, float radius,
                                          const float target3[3], float fov,
@@ -361,6 +378,29 @@ id<MTLTexture> MetalRootRenderer::render(id<MTLCommandBuffer> cb,
         [ge setFragmentTexture:noiseTex_ atIndex:0];
         [ge drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6
              instanceCount:(NSUInteger)segCount_];
+    }
+
+    // Face mid-geometry pass: mask triangles into the same colour+depth target,
+    // depth-composited against the capsules (matches RootRenderer's midGeometryHook).
+    if (faceVertCount_ > 0 && facePipe_) {
+        RootFaceU ffu = {};
+        ffu.viewProj = vp;
+        ffu.eye = gu.eye;
+        ffu.lightDir = gu.lightDir;
+        ffu.veinColor = (simd_float4){face.veinColor[0], face.veinColor[1], face.veinColor[2], 0};
+        ffu.lightIntensity = face.lightIntensity;
+        ffu.lightFalloff = face.lightFalloff;
+        ffu.specStrength = face.specStrength;
+        ffu.veinScale = face.veinScale;
+        ffu.veinStrength = face.veinStrength;
+        [ge setRenderPipelineState:facePipe_];
+        [ge setDepthStencilState:depthState_];
+        [ge setCullMode:MTLCullModeNone];
+        [ge setVertexBuffer:faceBuf_ offset:0 atIndex:0];
+        [ge setVertexBytes:&ffu length:sizeof(ffu) atIndex:1];
+        [ge setFragmentBytes:&ffu length:sizeof(ffu) atIndex:1];
+        [ge drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
+                vertexCount:(NSUInteger)faceVertCount_];
     }
     [ge endEncoding];
 

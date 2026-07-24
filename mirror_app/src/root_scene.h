@@ -12,6 +12,7 @@
 #include "metal_root_renderer.h"
 #include <memory>
 #include <string>
+#include <vector>
 
 class MetalContext;
 
@@ -34,6 +35,13 @@ public:
     // Regenerate the synthetic root structure with a new random seed.
     void reseed(uint32_t seed);
 
+    // Rebuild + re-upload the face mask mesh (call after changing faceScale /
+    // showFace / face placement).
+    void rebuildFace();
+
+    bool  showFace  = true;
+    float faceScale = 0.85f;
+
     // Camera / lighting (mirrors mask_relay_gui's controls).
     float azimuth   = 0.6f;
     float elevation = 0.35f;
@@ -48,5 +56,7 @@ private:
     void buildSyntheticRoots(uint32_t seed);
 
     std::unique_ptr<MetalRootRenderer> rr_;
+    std::vector<float> faceVerts_;   // canonical face model, local (3/vert)
+    std::vector<int>   faceTris_;    // triangle indices
     double t_ = 0.0;
 };

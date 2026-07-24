@@ -37,8 +37,12 @@ VS Code: **Build: mirror_app** / **Run: mirror_app**.
       axes/grid + wisp glow (`root_fog.metal`); two-pass `MetalRootRenderer`
       into offscreen RGBA16F/Depth32 targets. Divergence: Invert/XOR has no Metal
       fragment-logic-op equivalent → flat-white silhouette.
+- [x] **Face mid-geometry pass** (`root_face.metal`): mask meshes rasterized into
+      the shared colour+depth target between the capsules and the fog, marble
+      veining + per-face point light, depth-composited against the roots (GL clip-z
+      remapped to Metal's [0,1] so it matches the capsules' custom depth).
 - [ ] Root scene: live CPlantBox growth (currently a procedural stand-in in
-      `RootScene`; needs the GL-free `sdfsim` target) + the face mid-geometry pass
+      `RootScene`; needs the GL-free `sdfsim` target)
 - [ ] Transition (deferred — not yet defined)
 
 Headless checks: `mirror_app --selftest` (MLX→texture path), `mirror_app

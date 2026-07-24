@@ -401,6 +401,17 @@ int main(int argc, char** argv) {
                     ImGui::SliderFloat("pulse intensity", &R.pulse.intensity, 0.0f, 4.0f);
                     ImGui::ColorEdit3("pulse color", R.pulse.color);
                 }
+                if (ImGui::CollapsingHeader("face masks")) {
+                    if (ImGui::Checkbox("show faces", &roots.showFace)) roots.rebuildFace();
+                    if (ImGui::SliderFloat("face scale", &roots.faceScale, 0.3f, 1.5f))
+                        roots.rebuildFace();
+                    ImGui::SliderFloat("face light", &R.face.lightIntensity, 0.0f, 8.0f);
+                    ImGui::SliderFloat("face falloff", &R.face.lightFalloff, 0.001f, 0.1f);
+                    ImGui::SliderFloat("face spec", &R.face.specStrength, 0.0f, 3.0f);
+                    ImGui::ColorEdit3("vein color", R.face.veinColor);
+                    ImGui::SliderFloat("vein scale", &R.face.veinScale, 0.1f, 2.0f);
+                    ImGui::SliderFloat("vein strength", &R.face.veinStrength, 0.0f, 1.0f);
+                }
                 if (ImGui::CollapsingHeader("overlays")) {
                     ImGui::Checkbox("axes", &R.overlay.showAxes); ImGui::SameLine();
                     ImGui::Checkbox("grid", &R.overlay.showGrid);
