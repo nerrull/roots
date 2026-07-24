@@ -216,11 +216,62 @@ static int growshot(const char* path, int steps, float az, float el, float rad) 
     return 0;
 }
 
+// Headless GPU benchmark of the root render: grow the sim to completion, then
+// time `frames` full render()s (geometry + face + fog). Usage:
+//   --rootbench [downscale] [frames]
+static int rootbench(int downscale, int frames, int baseW, int baseH) {
+    MetalContext ctx;
+    if (!ctx.device()) { fprintf(stderr, "rootbench: no Metal device\n"); return 1; }
+    const int W = baseW / std::max(1, downscale), H = baseH / std::max(1, downscale);
+    RootScene roots(ctx, W, H);
+    if (!roots.valid()) { fprintf(stderr, "rootbench: invalid\n"); return 1; }
+    roots.autoOrbit = false;
+    if (const char* m = getenv("ROOTBENCH_MODE"))
+        roots.renderer().shaderMode = (MetalRootRenderer::ShaderMode)atoi(m);
+    if (const char* r = getenv("ROOTBENCH_RADIUS")) roots.radius = atof(r);
+
+    auto now = [] { return std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count(); };
+
+    // Grow to done, timing the CPU cost of advance() (sim step + geometry rebuild
+    // + buffer uploads) — this is what runs every frame while roots are growing.
+    double advAccum = 0.0; int advN = 0;
+    for (int i = 0; i < 4000 && !roots.simDone(); ++i) {
+        double a0 = now(); roots.advance(1.0 / 60.0); advAccum += now() - a0; advN++;
+    }
+    if (advN > 0)
+        printf("rootbench: advance() CPU during growth: %.3f ms/frame (%d frames)\n",
+               advAccum / advN * 1e3, advN);
+
+    @autoreleasepool {   // warmup
+        id<MTLCommandBuffer> cb = [ctx.queue() commandBuffer];
+        roots.render(cb); [cb commit]; [cb waitUntilCompleted];
+    }
+    double t0 = now();
+    for (int f = 0; f < frames; ++f) {
+        @autoreleasepool {
+            id<MTLCommandBuffer> cb = [ctx.queue() commandBuffer];
+            roots.render(cb); [cb commit]; [cb waitUntilCompleted];
+        }
+    }
+    double dt = (now() - t0) / frames;
+    printf("rootbench: %dx%d (ds=%d, sim done=%d): %.3f ms/frame (%.0f fps)\n",
+           W, H, downscale, roots.simDone() ? 1 : 0, dt * 1e3, 1.0 / dt);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--selftest") return selftest();
         if (a == "--roottest") return roottest();
+        if (a == "--rootbench") {
+            int ds = (i + 1 < argc) ? atoi(argv[i + 1]) : 1;
+            int fr = (i + 2 < argc) ? atoi(argv[i + 2]) : 200;
+            int bw = (i + 3 < argc) ? atoi(argv[i + 3]) : 1920;
+            int bh = (i + 4 < argc) ? atoi(argv[i + 4]) : 1080;
+            return rootbench(ds, fr, bw, bh);
+        }
         if (a == "--growshot") {
             const char* path = (i + 1 < argc) ? argv[i + 1] : "grow.ppm";
             int steps = (i + 2 < argc) ? atoi(argv[i + 2]) : 400;
@@ -283,7 +334,9 @@ int main(int argc, char** argv) {
     enum class Scene { Mirror = 0, Roots = 1 };
     int scene = (int)Scene::Mirror;
     int downscale = 4;       // mirror render-resolution divisor (low-res + upsample)
-    int rootDownscale = 1;   // roots render-resolution divisor
+    int rootDownscale = 1;   // roots render-resolution divisor (manual, when auto off)
+    bool rootAutoScale = true;   // cap the roots' internal resolution (see below)
+    int  rootTargetDim = 1920;   // target max internal dimension when auto-scaling
     int rootSeed = 1;
 
     double lastTime = glfwGetTime();
@@ -312,7 +365,19 @@ int main(int argc, char** argv) {
                 mirror.advance(dt);
                 sceneTex = mirror.render();
             } else if (scene == (int)Scene::Roots && roots.valid()) {
-                roots.ensureSize(fbw / std::max(1, rootDownscale), fbh / std::max(1, rootDownscale));
+                // The roots pass is overdraw-bound (per-fragment ray-capsule
+                // intersection, multiplied by how many capsules stack per pixel),
+                // so cost scales with pixels x overdraw. Rendering below the window
+                // resolution and bilinear-upsampling (present.metal) — with the fog
+                // pass's FXAA-lite smoothing the low-res image first — is the main
+                // lever. Auto-scale caps the internal max dimension so a 4K/Retina
+                // window stays fast instead of collapsing on a dense/zoomed nest.
+                int effDs = std::max(1, rootDownscale);
+                if (rootAutoScale) {
+                    int maxdim = std::max(fbw, fbh);
+                    effDs = std::max(1, (maxdim + rootTargetDim - 1) / rootTargetDim);
+                }
+                roots.ensureSize(fbw / effDs, fbh / effDs);
                 roots.advance(dt);
                 sceneTex = roots.render(cb);   // encodes geometry + fog passes into cb
             }
@@ -406,9 +471,15 @@ int main(int argc, char** argv) {
             } else {
                 MetalRootRenderer& R = roots.renderer();
                 ImGui::Text("%.0f fps   t=%5.1fs", fpsShown, roots.clock());
-                ImGui::Text("render %d x %d -> %d x %d",
+                ImGui::Text("render %d x %d -> %d x %d  (overdraw-bound)",
                             roots.width(), roots.height(), fbw, fbh);
-                ImGui::SliderInt("root downscale", &rootDownscale, 1, 6);
+                ImGui::Checkbox("auto render-scale", &rootAutoScale);
+                if (rootAutoScale) {
+                    ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+                    ImGui::SliderInt("target px", &rootTargetDim, 720, 3840);
+                } else {
+                    ImGui::SliderInt("root downscale", &rootDownscale, 1, 6);
+                }
                 ImGui::Separator();
                 // camera
                 ImGui::Checkbox("auto-orbit", &roots.autoOrbit); ImGui::SameLine();

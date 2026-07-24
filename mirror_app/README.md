@@ -59,6 +59,24 @@ growth then render), and `mlp_parity_test mirror_app/tests/fixtures` (MLP vs
 Python reference).
 Regenerate the pond weights with `assets/gen_pond_weights.py` (needs neuromirror's venv).
 
+## Root render performance
+
+`mirror_app --rootbench [downscale] [frames] [baseW] [baseH]` grows the sim to
+completion then times full `render()`s. Findings on the base M4:
+
+- The roots pass is **overdraw-bound**: cost ≈ pixels × how many capsules stack
+  per pixel, spent in the per-fragment ray-capsule intersection. **Lighting is
+  nearly free** — Phong vs a no-shading pass differs by only ~0.5 ms even under
+  heavy overdraw, so a depth pre-pass wouldn't help (it would still pay the
+  intersection to compute depth).
+- Framed view is cheap (~3 ms at 4K); a zoomed-in dense nest that fills a 4K frame
+  is the worst case (~15 ms). The lever is **internal render resolution**: ½-res
+  is ~3.6×, ⅓-res ~7×, since the fog pass's FXAA-lite + the bilinear present make a
+  downscaled render upsample cleanly.
+- The app therefore **auto-scales** the roots' internal resolution (cap the max
+  internal dimension, default 1920) so a 4K/Retina window stays fast instead of
+  collapsing; toggle/override in the roots panel.
+
 ## Layout
 
 - `src/main.mm` — window/app shell + main loop.
