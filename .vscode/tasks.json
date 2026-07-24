@@ -96,6 +96,28 @@
             "presentation": { "reveal": "always", "panel": "dedicated" }
         },
         {
+            "label": "Roottest: root scene (headless)",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/mirror_app/mirror_app",
+            "args": ["--roottest"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["Build: mirror_app"],
+            "group": { "kind": "test" },
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated" }
+        },
+        {
+            "label": "Rootshot: render root scene to PPM",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/mirror_app/mirror_app",
+            "args": ["--rootshot", "${workspaceFolder}/build/root.ppm"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["Build: mirror_app"],
+            "group": { "kind": "test" },
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated" }
+        },
+        {
             "label": "Selftest: mirror (headless)",
             "type": "shell",
             "command": "${workspaceFolder}/build/mirror_app/mirror_app",

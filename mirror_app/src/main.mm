@@ -119,8 +119,9 @@ static int roottest() {
 }
 
 // Headless render of the root scene to a PPM file for visual validation.
-// Usage: --rootshot <out.ppm> [az] [el] [radius]
-static int rootshot(const char* path, float az, float el, float rad) {
+// Usage: --rootshot <out.ppm> [az] [el] [radius] [mode] [overlays]
+// mode: 0 Phong (default), 1 PBR, 2 Invert.  overlays: 1 = axes + grid.
+static int rootshot(const char* path, float az, float el, float rad, int mode, bool overlays) {
     MetalContext ctx;
     if (!ctx.device()) { fprintf(stderr, "rootshot: no Metal device\n"); return 1; }
     const int W = 960, H = 540;
@@ -128,6 +129,11 @@ static int rootshot(const char* path, float az, float el, float rad) {
     if (!roots.valid()) { fprintf(stderr, "rootshot: root scene invalid\n"); return 1; }
     roots.autoOrbit = false;
     roots.azimuth = az; roots.elevation = el; roots.radius = rad;
+    roots.renderer().shaderMode = (MetalRootRenderer::ShaderMode)mode;
+    if (overlays) {
+        roots.renderer().overlay.showAxes = true;
+        roots.renderer().overlay.showGrid = true;
+    }
     id<MTLTexture> tex = nil;
     for (int i = 0; i < 3; ++i) {
         @autoreleasepool {
@@ -174,7 +180,9 @@ int main(int argc, char** argv) {
             float az  = (i + 2 < argc) ? atof(argv[i + 2]) : 0.6f;
             float el  = (i + 3 < argc) ? atof(argv[i + 3]) : 0.35f;
             float rad = (i + 4 < argc) ? atof(argv[i + 4]) : 42.0f;
-            return rootshot(path, az, el, rad);
+            int   md  = (i + 5 < argc) ? atoi(argv[i + 5]) : 0;
+            bool  ov  = (i + 6 < argc) ? atoi(argv[i + 6]) != 0 : false;
+            return rootshot(path, az, el, rad, md, ov);
         }
         if (a == "--bench") {
             int ds = (i + 1 < argc) ? atoi(argv[i + 1]) : 4;
