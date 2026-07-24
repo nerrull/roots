@@ -260,11 +260,115 @@ static int rootbench(int downscale, int frames, int baseW, int baseH) {
     return 0;
 }
 
+// Write an RGBA16F texture to a gamma-corrected PPM.
+static void writePPM(const char* path, id<MTLTexture> tex, int W, int H) {
+    std::vector<uint16_t> px((size_t)W * H * 4);
+    [tex getBytes:px.data() bytesPerRow:W * 4 * sizeof(uint16_t)
+       fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
+    auto h2f = [](uint16_t h) {
+        uint32_t s = (h >> 15) & 1, e = (h >> 10) & 0x1f, m = h & 0x3ff, bits;
+        if (e == 0) bits = (s << 31) | 0; else bits = (s << 31) | ((e + 112) << 23) | (m << 13);
+        float f; __builtin_memcpy(&f, &bits, 4); return f;
+    };
+    FILE* fp = fopen(path, "wb");
+    if (!fp) return;
+    fprintf(fp, "P6\n%d %d\n255\n", W, H);
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) {
+            const uint16_t* p = &px[((size_t)y * W + x) * 4];
+            for (int c = 0; c < 3; ++c) {
+                float v = h2f(p[c]); v = v <= 0.f ? 0.f : (v >= 1.f ? 1.f : v);
+                fputc((unsigned char)(powf(v, 1.0f / 2.2f) * 255.0f + 0.5f), fp);
+            }
+        }
+    fclose(fp);
+}
+
+// Build a field of cached root systems and render it. Usage:
+//   --fieldshot <out.ppm> [grid] [az] [el]
+static int fieldshot(const char* path, int grid, float az, float el) {
+    MetalContext ctx;
+    if (!ctx.device()) return 1;
+    const int W = 1280, H = 720;
+    RootScene roots(ctx, W, H);
+    if (!roots.valid()) { fprintf(stderr, "fieldshot: invalid\n"); return 1; }
+    const float spacing = 30.f;
+    roots.buildField(grid, spacing);
+    roots.autoOrbit = false;
+    roots.azimuth = az; roots.elevation = el;
+    roots.target[0] = 0; roots.target[1] = 10; roots.target[2] = 0;
+    roots.radius = grid * spacing * 0.85f;
+    id<MTLTexture> tex = nil;
+    for (int i = 0; i < 2; ++i) {
+        @autoreleasepool {
+            id<MTLCommandBuffer> cb = [ctx.queue() commandBuffer];
+            tex = roots.render(cb); [cb commit]; [cb waitUntilCompleted];
+        }
+    }
+    writePPM(path, tex, W, H);
+    MetalRootRenderer& R = roots.renderer();
+    printf("fieldshot: wrote %s  instances=%d visible=%d culled=%d drawnSegs=%ld\n",
+           path, R.instanceCount(), R.lastVisibleInstances, R.lastCulledInstances,
+           R.lastDrawnSegments);
+    return 0;
+}
+
+// Benchmark a field with/without culling+LOD. Usage: --fieldbench [grid] [frames]
+static int fieldbench(int grid, int frames) {
+    MetalContext ctx;
+    if (!ctx.device()) return 1;
+    const int W = 1920, H = 1080;
+    RootScene roots(ctx, W, H);
+    if (!roots.valid()) { fprintf(stderr, "fieldbench: invalid\n"); return 1; }
+    const float spacing = 30.f;
+    roots.buildField(grid, spacing);
+    roots.autoOrbit = false;
+    // Immersive viewpoint: camera low and near the field edge looking across it,
+    // so a good share of systems fall off-screen (culling) and the rest recede
+    // into the distance (LOD) — the target end-goal viewing condition.
+    roots.target[0] = grid * spacing * 0.15f; roots.target[1] = 8; roots.target[2] = 0;
+    roots.radius = spacing * 1.6f;
+    roots.elevation = 0.12f; roots.azimuth = 0.9f;
+    MetalRootRenderer& R = roots.renderer();
+
+    auto now = [] { return std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count(); };
+    auto timeIt = [&](const char* label) {
+        @autoreleasepool { id<MTLCommandBuffer> cb = [ctx.queue() commandBuffer];
+            roots.render(cb); [cb commit]; [cb waitUntilCompleted]; }   // warmup
+        double t0 = now();
+        for (int f = 0; f < frames; ++f) @autoreleasepool {
+            id<MTLCommandBuffer> cb = [ctx.queue() commandBuffer];
+            roots.render(cb); [cb commit]; [cb waitUntilCompleted];
+        }
+        double dt = (now() - t0) / frames;
+        printf("fieldbench %-18s %.3f ms/frame (%.0f fps)  visible=%d culled=%d drawnSegs=%ld\n",
+               label, dt*1e3, 1.0/dt, R.lastVisibleInstances, R.lastCulledInstances, R.lastDrawnSegments);
+    };
+    printf("fieldbench: %dx%d field = %d instances @ %dx%d\n", grid, grid, R.instanceCount(), W, H);
+    R.cullInstances = false; R.subpixelCull = false; R.lodBias = 0.0001f;  timeIt("naive(all,full)");
+    R.cullInstances = false; R.subpixelCull = false; R.lodBias = 1.0f;     timeIt("LOD-only");
+    R.cullInstances = true;  R.subpixelCull = true;  R.lodBias = 1.0f;     timeIt("cull+subpx+LOD");
+    return 0;
+}
+
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--selftest") return selftest();
         if (a == "--roottest") return roottest();
+        if (a == "--fieldshot") {
+            const char* path = (i + 1 < argc) ? argv[i + 1] : "field.ppm";
+            int grid = (i + 2 < argc) ? atoi(argv[i + 2]) : 6;
+            float az = (i + 3 < argc) ? atof(argv[i + 3]) : 0.5f;
+            float el = (i + 4 < argc) ? atof(argv[i + 4]) : 0.35f;
+            return fieldshot(path, grid, az, el);
+        }
+        if (a == "--fieldbench") {
+            int grid = (i + 1 < argc) ? atoi(argv[i + 1]) : 8;
+            int fr   = (i + 2 < argc) ? atoi(argv[i + 2]) : 100;
+            return fieldbench(grid, fr);
+        }
         if (a == "--rootbench") {
             int ds = (i + 1 < argc) ? atoi(argv[i + 1]) : 1;
             int fr = (i + 2 < argc) ? atoi(argv[i + 2]) : 200;
@@ -338,6 +442,7 @@ int main(int argc, char** argv) {
     bool rootAutoScale = true;   // cap the roots' internal resolution (see below)
     int  rootTargetDim = 1920;   // target max internal dimension when auto-scaling
     int rootSeed = 1;
+    int fieldGrid = 6;           // NxN cached-system field for the LOD/cull demo
 
     double lastTime = glfwGetTime();
     double fpsAccum = 0.0; int fpsFrames = 0; double fpsShown = 0.0;
@@ -536,6 +641,19 @@ int main(int argc, char** argv) {
                     ImGui::ColorEdit3("vein color", R.face.veinColor);
                     ImGui::SliderFloat("vein scale", &R.face.veinScale, 0.1f, 2.0f);
                     ImGui::SliderFloat("vein strength", &R.face.veinStrength, 0.0f, 1.0f);
+                }
+                if (ImGui::CollapsingHeader("cached field: LOD & culling")) {
+                    ImGui::SliderInt("grid NxN", &fieldGrid, 2, 20);
+                    if (ImGui::Button("tile field")) roots.buildField(fieldGrid, 30.0f);
+                    ImGui::SameLine();
+                    if (ImGui::Button("clear field")) { R.clearInstances(); roots.regrow(); }
+                    ImGui::Checkbox("frustum cull", &R.cullInstances); ImGui::SameLine();
+                    ImGui::Checkbox("sub-pixel cull", &R.subpixelCull);
+                    ImGui::SliderFloat("cull below px", &R.instanceCullPx, 0.5f, 20.0f);
+                    ImGui::SliderFloat("LOD bias (>1 coarser)", &R.lodBias, 0.1f, 4.0f);
+                    ImGui::Text("instances %d   visible %d   culled %d",
+                                R.instanceCount(), R.lastVisibleInstances, R.lastCulledInstances);
+                    ImGui::Text("capsules drawn: %ld", R.lastDrawnSegments);
                 }
                 if (ImGui::CollapsingHeader("overlays")) {
                     ImGui::Checkbox("axes", &R.overlay.showAxes); ImGui::SameLine();

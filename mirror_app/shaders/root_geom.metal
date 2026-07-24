@@ -81,6 +81,15 @@ vertex GeomVOut root_geom_vs(uint vid       [[vertex_id]],
     float sry    = r * f / minW;
     float srx    = sry / aspect;
 
+    // Sub-pixel cull: if the capsule's projected radius is smaller than cullPx
+    // pixels, it can't contribute a visible fragment — degenerate the quad so no
+    // fragments (hence no ray-capsule intersections) are launched for it.
+    if (U.cullPx > 0.0 && sry * U.res.y * 0.5 < U.cullPx) {
+        o.pos = float4(0.0, 0.0, 0.0, -1.0);
+        o.ndc = float2(0.0);
+        return o;
+    }
+
     float2 lo = min(ndcA, ndcB) - float2(srx, sry);
     float2 hi = max(ndcA, ndcB) + float2(srx, sry);
 

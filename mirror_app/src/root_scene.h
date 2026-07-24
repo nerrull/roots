@@ -45,6 +45,10 @@ public:
     bool simActive() const { return useSim_; }
     bool simDone()   const;
 
+    // Grow one system, then cache it and tile a gridN x gridN field of instances
+    // (varied yaw/scale) to exercise LOD + frustum culling. Stops the live path.
+    void buildField(int gridN, float spacing);
+
     bool  showFace  = true;
     float faceScale = 0.85f;
     int   simStepsPerFrame = 2;   // growth steps advanced per rendered frame

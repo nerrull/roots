@@ -77,6 +77,25 @@ completion then times full `render()`s. Findings on the base M4:
   internal dimension, default 1920) so a 4K/Retina window stays fast instead of
   collapsing; toggle/override in the roots panel.
 
+### Many cached systems: LOD + culling
+
+For the end goal of rendering **many cached root systems** (mostly small/distant),
+`MetalRootRenderer` supports static instances (`addInstance`, baked to world space,
+uploaded once) with three complementary levers, tuned live in the roots panel's
+"cached field" section and measured by `--fieldbench [grid] [frames]`:
+
+- **Frustum culling** — whole systems outside the view are skipped on the CPU
+  (bounding sphere vs the six clip-space planes). The culled fraction grows with
+  world size, so cost tracks what's *visible*, not the total count.
+- **Distance LOD** — each system carries radius-percentile LODs (the thinnest
+  laterals drop first); the level is chosen by the bound's projected pixel size.
+- **Sub-pixel capsule cull** — the vertex shader degenerates any capsule whose
+  projected radius is below ~1 px, so no fragments/intersections are launched.
+
+On a 256-system field (immersive camera, 1080p, base M4): naive all-full **19.1 ms
+→ 10.1 ms** with cull+LOD+sub-pixel (760k → 198k capsules drawn, 117/256 culled).
+`--fieldshot <out.ppm> [grid az el]` renders a field for a visual check.
+
 ## Layout
 
 - `src/main.mm` — window/app shell + main loop.

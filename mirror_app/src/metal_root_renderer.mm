@@ -4,6 +4,7 @@
 #import <Foundation/Foundation.h>
 #include <simd/simd.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -45,6 +46,35 @@ struct V3 { float x, y, z; };
 inline float dot3(V3 a, V3 b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
 inline V3 cross3(V3 a, V3 b) { return {a.y*b.z-a.z*b.y, a.z*b.x-a.x*b.z, a.x*b.y-a.y*b.x}; }
 inline V3 norm3(V3 v) { float l = std::sqrt(dot3(v, v)); if (l < 1e-7f) l = 1.f; return {v.x/l, v.y/l, v.z/l}; }
+
+// Per-node arc-length from each root base, for the travelling-pulse effect
+// (shared by uploadSegments and addInstance). hopOffset pre-seeds each hop's
+// base node so consecutive masks' pulse trains are phase-shifted.
+std::vector<float> computeNodeDist(const float* nodesXYZ, const std::vector<int>& segs,
+                                   int nNodes, float hopOffset) {
+    std::vector<float> dist(std::max(1, nNodes), 0.f);
+    if (nNodes <= 0) return dist;
+    const int nSeg = (int)(segs.size() / 2);
+    std::vector<char> isChild(nNodes, 0);
+    for (int s = 0; s < nSeg; s++) {
+        int cy = segs[2*s + 1];
+        if (cy >= 0 && cy < nNodes) isChild[cy] = 1;
+    }
+    if (hopOffset != 0.0f) {
+        float hopBase = 0.f;
+        for (int i = 0; i < nNodes; i++)
+            if (!isChild[i]) { dist[i] = hopBase; hopBase += hopOffset; }
+    }
+    for (int s = 0; s < nSeg; s++) {
+        int pi = segs[2*s], ci = segs[2*s + 1];
+        if (pi < 0 || ci < 0 || pi >= nNodes || ci >= nNodes) continue;
+        float dx = nodesXYZ[3*ci]   - nodesXYZ[3*pi];
+        float dy = nodesXYZ[3*ci+1] - nodesXYZ[3*pi+1];
+        float dz = nodesXYZ[3*ci+2] - nodesXYZ[3*pi+2];
+        dist[ci] = dist[pi] + std::sqrt(dx*dx + dy*dy + dz*dz);
+    }
+    return dist;
+}
 }
 
 // ===========================================================================
@@ -185,27 +215,9 @@ void MetalRootRenderer::uploadSegments(const std::vector<float>& nodesXYZ,
     if (radData.empty()) radData.push_back(0.f);
 
     // Per-node arc-length from root base (pulse effect), incl. hopOffset seeding.
-    std::vector<float> distData(std::max(1, nNodes), 0.f);
-    if (nNodes > 0) {
-        std::vector<char> isChild(nNodes, 0);
-        for (int s = 0; s < nSeg; s++) {
-            int cy = segs[2*s + 1];
-            if (cy >= 0 && cy < nNodes) isChild[cy] = 1;
-        }
-        if (pulse.hopOffset != 0.0f) {
-            float hopBase = 0.f;
-            for (int i = 0; i < nNodes; i++)
-                if (!isChild[i]) { distData[i] = hopBase; hopBase += pulse.hopOffset; }
-        }
-        for (int s = 0; s < nSeg; s++) {
-            int pi = segs[2*s], ci = segs[2*s + 1];
-            if (pi < 0 || ci < 0 || pi >= nNodes || ci >= nNodes) continue;
-            float dx = nodesXYZ[3*ci]   - nodesXYZ[3*pi];
-            float dy = nodesXYZ[3*ci+1] - nodesXYZ[3*pi+1];
-            float dz = nodesXYZ[3*ci+2] - nodesXYZ[3*pi+2];
-            distData[ci] = distData[pi] + std::sqrt(dx*dx + dy*dy + dz*dz);
-        }
-    }
+    std::vector<float> distData =
+        computeNodeDist(nodesXYZ.empty() ? nodeData.data() : nodesXYZ.data(),
+                        segs, nNodes, pulse.hopOffset);
 
     const size_t segCap = std::max<size_t>(1, nSeg);
 
@@ -247,6 +259,101 @@ void MetalRootRenderer::uploadFaceMesh(const std::vector<float>& interleaved) {
         ? makeBuffer(interleaved.data(), interleaved.size() * sizeof(float))
         : nil;
 }
+
+// Constant per-segment attributes (prim=0, grp=0, frame=0, aux=(0,1,0,0)) that
+// capsule instances share; grown to the largest instance's LOD0 segment count.
+void MetalRootRenderer::ensureDefaults(int segCount) {
+    if (segCount <= defCap_) return;
+    int n = std::max(1, segCount);
+    std::vector<int>   zeros(n, 0);
+    std::vector<float> frame((size_t)n * 4, 0.f);
+    std::vector<float> aux((size_t)n * 4);
+    for (int i = 0; i < n; i++) { aux[4*i]=0.f; aux[4*i+1]=1.f; aux[4*i+2]=0.f; aux[4*i+3]=0.f; }
+    defPrim_  = makeBuffer(zeros.data(), (size_t)n * sizeof(int));
+    defGrp_   = makeBuffer(zeros.data(), (size_t)n * sizeof(int));
+    defFrame_ = makeBuffer(frame.data(), frame.size() * sizeof(float));
+    defAux_   = makeBuffer(aux.data(),   aux.size()   * sizeof(float));
+    defCap_ = n;
+}
+
+int MetalRootRenderer::addInstance(const std::vector<float>& nodesXYZ,
+                                   const std::vector<int>&   segs,
+                                   const std::vector<float>& radii,
+                                   const InstancePlacement&  place) {
+    const int nNodes = (int)(nodesXYZ.size() / 3);
+    const int nSeg   = (int)(segs.size() / 2);
+    if (nNodes == 0 || nSeg == 0) return -1;
+
+    // Bake nodes to world space (scale, yaw about Y, translate).
+    const float s = place.scale, cy = cosf(place.rotYaw), sy = sinf(place.rotYaw);
+    std::vector<float> wnodes((size_t)nNodes * 3);
+    float lo[3], hi[3];
+    for (int i = 0; i < nNodes; i++) {
+        float lx = nodesXYZ[3*i] * s, ly = nodesXYZ[3*i+1] * s, lz = nodesXYZ[3*i+2] * s;
+        float wx = lx * cy + lz * sy + place.translate[0];
+        float wy = ly + place.translate[1];
+        float wz = -lx * sy + lz * cy + place.translate[2];
+        wnodes[3*i] = wx; wnodes[3*i+1] = wy; wnodes[3*i+2] = wz;
+        if (i == 0) { lo[0]=hi[0]=wx; lo[1]=hi[1]=wy; lo[2]=hi[2]=wz; }
+        else {
+            lo[0]=std::min(lo[0],wx); hi[0]=std::max(hi[0],wx);
+            lo[1]=std::min(lo[1],wy); hi[1]=std::max(hi[1],wy);
+            lo[2]=std::min(lo[2],wz); hi[2]=std::max(hi[2],wz);
+        }
+    }
+
+    Instance inst;
+    inst.center[0] = 0.5f*(lo[0]+hi[0]);
+    inst.center[1] = 0.5f*(lo[1]+hi[1]);
+    inst.center[2] = 0.5f*(lo[2]+hi[2]);
+    float rad = 0.f;
+    for (int i = 0; i < nNodes; i++) {
+        float dx=wnodes[3*i]-inst.center[0], dy=wnodes[3*i+1]-inst.center[1], dz=wnodes[3*i+2]-inst.center[2];
+        rad = std::max(rad, std::sqrt(dx*dx+dy*dy+dz*dz));
+    }
+    inst.radius = rad;
+
+    inst.node = makeBuffer(wnodes.data(), wnodes.size() * sizeof(float));
+    std::vector<float> distData = computeNodeDist(wnodes.data(), segs, nNodes, pulse.hopOffset);
+    inst.dist = makeBuffer(distData.data(), distData.size() * sizeof(float));
+
+    // LOD thresholds by radius percentile: coarser LODs drop the thinnest
+    // laterals first (invisible once the system is small on screen).
+    std::vector<float> sortedR = radii;
+    std::sort(sortedR.begin(), sortedR.end());
+    auto pct = [&](float f) -> float {
+        if (sortedR.empty()) return 0.f;
+        int idx = std::min((int)sortedR.size() - 1, std::max(0, (int)(f * sortedR.size())));
+        return sortedR[idx];
+    };
+    const float thr[4] = { -1.f, pct(0.40f), pct(0.65f), pct(0.82f) };
+
+    for (int k = 0; k < 4; k++) {
+        std::vector<int>   lseg;
+        std::vector<float> lrad;
+        lseg.reserve(nSeg * 2);
+        for (int j = 0; j < nSeg; j++) {
+            float r = (j < (int)radii.size()) ? radii[j] : 0.f;
+            if (r >= thr[k]) {
+                lseg.push_back(segs[2*j]); lseg.push_back(segs[2*j+1]);
+                lrad.push_back(r);
+            }
+        }
+        InstanceLod lod;
+        lod.segCount = (int)lrad.size();
+        lod.seg = makeBuffer(lseg.empty() ? nullptr : lseg.data(),
+                             std::max<size_t>(1, lseg.size()) * sizeof(int));
+        lod.rad = makeBuffer(lrad.empty() ? nullptr : lrad.data(),
+                             std::max<size_t>(1, lrad.size()) * sizeof(float));
+        inst.lods.push_back(lod);
+    }
+
+    ensureDefaults(inst.lods[0].segCount);
+    instances_.push_back(inst);
+    return (int)instances_.size() - 1;
+}
+
+void MetalRootRenderer::clearInstances() { instances_.clear(); }
 
 id<MTLTexture> MetalRootRenderer::render(id<MTLCommandBuffer> cb,
                                          float azimuth, float elevation, float radius,
@@ -329,6 +436,7 @@ id<MTLTexture> MetalRootRenderer::render(id<MTLCommandBuffer> cb,
     gu.shaderMode = (int)shaderMode;
     gu.wispCount = active;
     gu.pulseEnabled = pulse.enabled ? 1 : 0;
+    gu.cullPx = subpixelCull ? 0.75f : 0.0f;
     int pc = paletteCount < 0 ? 0 : (paletteCount > MAX_GROUPS ? MAX_GROUPS : paletteCount);
     gu.paletteCount = pc;
     for (int i = 0; i < pc; i++) {
@@ -353,31 +461,84 @@ id<MTLTexture> MetalRootRenderer::render(id<MTLCommandBuffer> cb,
     gp.depthAttachment.storeAction = MTLStoreActionStore;
 
     id<MTLRenderCommandEncoder> ge = [cb renderCommandEncoderWithDescriptor:gp];
-    if (segCount_ > 0) {
-        [ge setRenderPipelineState:geomPipe_];
-        [ge setDepthStencilState:depthState_];
-        [ge setCullMode:MTLCullModeNone];
-        // vertex stage
-        [ge setVertexBuffer:nodeBuf_ offset:0 atIndex:0];
-        [ge setVertexBuffer:segBuf_  offset:0 atIndex:1];
-        [ge setVertexBuffer:radBuf_  offset:0 atIndex:2];
-        [ge setVertexBuffer:primBuf_ offset:0 atIndex:5];
-        [ge setVertexBuffer:frameBuf_ offset:0 atIndex:6];
-        [ge setVertexBytes:&gu length:sizeof(gu) atIndex:8];
-        // fragment stage
-        [ge setFragmentBuffer:nodeBuf_ offset:0 atIndex:0];
-        [ge setFragmentBuffer:segBuf_  offset:0 atIndex:1];
-        [ge setFragmentBuffer:radBuf_  offset:0 atIndex:2];
-        [ge setFragmentBuffer:distBuf_ offset:0 atIndex:3];
-        [ge setFragmentBuffer:grpBuf_  offset:0 atIndex:4];
-        [ge setFragmentBuffer:primBuf_ offset:0 atIndex:5];
-        [ge setFragmentBuffer:frameBuf_ offset:0 atIndex:6];
-        [ge setFragmentBuffer:auxBuf_  offset:0 atIndex:7];
-        [ge setFragmentBytes:&gu length:sizeof(gu) atIndex:8];
-        [ge setFragmentBytes:wispBuf.data() length:wispBuf.size() * sizeof(RootWisp) atIndex:9];
-        [ge setFragmentTexture:noiseTex_ atIndex:0];
+    [ge setRenderPipelineState:geomPipe_];
+    [ge setDepthStencilState:depthState_];
+    [ge setCullMode:MTLCullModeNone];
+    [ge setVertexBytes:&gu length:sizeof(gu) atIndex:8];
+    [ge setFragmentBytes:&gu length:sizeof(gu) atIndex:8];
+    [ge setFragmentBytes:wispBuf.data() length:wispBuf.size() * sizeof(RootWisp) atIndex:9];
+    [ge setFragmentTexture:noiseTex_ atIndex:0];
+
+    lastVisibleInstances = 0; lastCulledInstances = 0; lastDrawnSegments = 0;
+
+    // Bind one capsule set's buffers and draw it (6 verts x segc instances).
+    auto drawSet = [&](id<MTLBuffer> node, id<MTLBuffer> seg, id<MTLBuffer> rad,
+                       id<MTLBuffer> dist, id<MTLBuffer> grp, id<MTLBuffer> prim,
+                       id<MTLBuffer> frame, id<MTLBuffer> aux, int segc) {
+        if (segc <= 0) return;
+        [ge setVertexBuffer:node  offset:0 atIndex:0];
+        [ge setVertexBuffer:seg   offset:0 atIndex:1];
+        [ge setVertexBuffer:rad   offset:0 atIndex:2];
+        [ge setVertexBuffer:prim  offset:0 atIndex:5];
+        [ge setVertexBuffer:frame offset:0 atIndex:6];
+        [ge setFragmentBuffer:node  offset:0 atIndex:0];
+        [ge setFragmentBuffer:seg   offset:0 atIndex:1];
+        [ge setFragmentBuffer:rad   offset:0 atIndex:2];
+        [ge setFragmentBuffer:dist  offset:0 atIndex:3];
+        [ge setFragmentBuffer:grp   offset:0 atIndex:4];
+        [ge setFragmentBuffer:prim  offset:0 atIndex:5];
+        [ge setFragmentBuffer:frame offset:0 atIndex:6];
+        [ge setFragmentBuffer:aux   offset:0 atIndex:7];
         [ge drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6
-             instanceCount:(NSUInteger)segCount_];
+             instanceCount:(NSUInteger)segc];
+        lastDrawnSegments += segc;
+    };
+
+    // The live/dynamic system (re-uploaded each frame) draws in full, unculled.
+    if (segCount_ > 0) {
+        drawSet(nodeBuf_, segBuf_, radBuf_, distBuf_, grpBuf_, primBuf_, frameBuf_, auxBuf_, segCount_);
+        lastVisibleInstances++;
+    }
+
+    // Cached instances: frustum-cull whole systems, pick a LOD by projected size.
+    if (!instances_.empty()) {
+        // Six frustum planes from vp (Gribb-Hartmann). vp is column-major, so
+        // clip-space row i = (col0[i], col1[i], col2[i], col3[i]).
+        simd_float4 r0 = {vp.columns[0].x, vp.columns[1].x, vp.columns[2].x, vp.columns[3].x};
+        simd_float4 r1 = {vp.columns[0].y, vp.columns[1].y, vp.columns[2].y, vp.columns[3].y};
+        simd_float4 r2 = {vp.columns[0].z, vp.columns[1].z, vp.columns[2].z, vp.columns[3].z};
+        simd_float4 r3 = {vp.columns[0].w, vp.columns[1].w, vp.columns[2].w, vp.columns[3].w};
+        simd_float4 planes[6] = { r3 + r0, r3 - r0, r3 + r1, r3 - r1, r3 + r2, r3 - r2 };
+        for (int k = 0; k < 6; k++) {
+            float l = simd_length(planes[k].xyz);
+            if (l > 1e-8f) planes[k] /= l;
+        }
+        simd_float3 eye = {ex, ey, ez};
+        float pxScale = f * 0.5f * (float)h_;   // NDC radius r*f/d -> pixels (*0.5*h)
+        const float lodThresh[3] = {300.f, 120.f, 45.f};   // px boundaries between LODs
+
+        for (auto& inst : instances_) {
+            simd_float3 c = {inst.center[0], inst.center[1], inst.center[2]};
+            if (cullInstances) {
+                bool out = false;
+                for (int k = 0; k < 6; k++)
+                    if (simd_dot(planes[k].xyz, c) + planes[k].w < -inst.radius) { out = true; break; }
+                if (out) { lastCulledInstances++; continue; }
+            }
+            float dist = simd_length(c - eye);
+            if (dist < 1e-3f) dist = 1e-3f;
+            float screenPx = inst.radius * pxScale / dist;
+            if (screenPx < instanceCullPx) { lastCulledInstances++; continue; }
+
+            int nl = (int)inst.lods.size();
+            int lod = 0;
+            for (int k = 0; k < 3 && k < nl - 1; k++)
+                if (screenPx < lodThresh[k] * lodBias) lod = k + 1;
+            const InstanceLod& L = inst.lods[lod];
+            drawSet(inst.node, L.seg, L.rad, inst.dist,
+                    defGrp_, defPrim_, defFrame_, defAux_, L.segCount);
+            lastVisibleInstances++;
+        }
     }
 
     // Face mid-geometry pass: mask triangles into the same colour+depth target,

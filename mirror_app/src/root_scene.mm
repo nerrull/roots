@@ -172,6 +172,34 @@ void RootScene::regrow() {
 
 bool RootScene::simDone() const { return sim_ && sim_->done(); }
 
+void RootScene::buildField(int gridN, float spacing) {
+    if (!rr_ || !sim_) return;
+    // Ensure the template system is fully grown.
+    for (int i = 0; i < 6000 && !sim_->done(); ++i) sim_->step();
+    std::vector<float> nodes, radii; std::vector<int> segs;
+    sim_->geometry(nodes, segs, radii);
+    if (nodes.empty() || segs.empty()) return;
+
+    rr_->clearInstances();
+    std::mt19937 rng(1234);
+    std::uniform_real_distribution<float> U(0.f, 1.f);
+    const float half = (gridN - 1) * 0.5f;
+    for (int gz = 0; gz < gridN; gz++)
+        for (int gx = 0; gx < gridN; gx++) {
+            MetalRootRenderer::InstancePlacement pl;
+            pl.translate[0] = (gx - half) * spacing;
+            pl.translate[1] = 0.f;
+            pl.translate[2] = (gz - half) * spacing;
+            pl.rotYaw = U(rng) * 6.2831853f;
+            pl.scale  = 0.8f + 0.4f * U(rng);
+            rr_->addInstance(nodes, segs, radii, pl);
+        }
+    // The field is the cached instances; stop the single live system + face pass.
+    rr_->uploadSegments({}, {}, {});
+    rr_->uploadFaceMesh({});
+    useSim_ = false;
+}
+
 void RootScene::uploadFaceFromMasks() {
     if (!rr_ || !sim_) return;
     if (!showFace || faceVerts_.empty() || faceTris_.empty()) { rr_->uploadFaceMesh({}); return; }

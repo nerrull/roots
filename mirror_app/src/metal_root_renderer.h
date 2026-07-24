@@ -110,6 +110,36 @@ public:
     // Empty data clears the face pass.
     void uploadFaceMesh(const std::vector<float>& interleaved);
 
+    // --- cached instances (many static root systems, LOD + culling) ----------
+    // Placement of a cached system in the world (applied once, baked into the
+    // uploaded vertices — cached systems are static).
+    struct InstancePlacement {
+        float translate[3] = {0.f, 0.f, 0.f};
+        float rotYaw       = 0.f;   // radians about world Y
+        float scale        = 1.f;
+    };
+    // Add a cached capsule system, baked to world space, with LOD levels built by
+    // radius (thin laterals drop first) and a world bounding sphere for culling.
+    // Uploaded once; drawn each frame only if visible, at the LOD its projected
+    // size warrants. Returns the instance index.
+    int  addInstance(const std::vector<float>& nodesXYZ,
+                     const std::vector<int>&   segs,
+                     const std::vector<float>& radii,
+                     const InstancePlacement&  place);
+    void clearInstances();
+    int  instanceCount() const { return (int)instances_.size(); }
+
+    // Culling / LOD tuning.
+    bool  cullInstances = true;    // frustum-cull whole systems
+    float instanceCullPx = 2.0f;   // skip systems whose bound projects smaller than this
+    bool  subpixelCull   = true;   // drop sub-pixel capsules in the vertex shader
+    float lodBias        = 1.0f;   // >1 favours coarser LODs sooner (cheaper)
+
+    // Stats from the most recent render() (for UI / benchmarking).
+    int  lastVisibleInstances = 0;
+    int  lastCulledInstances  = 0;
+    long lastDrawnSegments    = 0;
+
     // Encode both passes into cb; returns the final fogged colour texture.
     id<MTLTexture> render(id<MTLCommandBuffer> cb,
                           float azimuth, float elevation, float radius,
@@ -163,6 +193,22 @@ private:
     id<MTLBuffer> nodeBuf_ = nil, segBuf_ = nil, radBuf_ = nil, distBuf_ = nil;
     id<MTLBuffer> grpBuf_ = nil, primBuf_ = nil, frameBuf_ = nil, auxBuf_ = nil;
     int segCount_ = 0;
+
+    // A cached, static capsule system. node/dist are per-node (shared across LODs);
+    // each LOD holds a per-segment {seg, rad} subset. Constant per-segment
+    // attributes (prim/aux/grp/frame) for capsule instances come from shared
+    // default buffers grown to the largest LOD segment count.
+    struct InstanceLod { id<MTLBuffer> seg = nil, rad = nil; int segCount = 0; };
+    struct Instance {
+        id<MTLBuffer> node = nil, dist = nil;
+        std::vector<InstanceLod> lods;    // lods[0] = full detail
+        float center[3] = {0, 0, 0};
+        float radius = 0.f;               // world-space bounding-sphere radius
+    };
+    std::vector<Instance> instances_;
+    id<MTLBuffer> defPrim_ = nil, defAux_ = nil, defGrp_ = nil, defFrame_ = nil;
+    int defCap_ = 0;
+    void ensureDefaults(int segCount);
 
     static constexpr MTLPixelFormat kColorFmt = MTLPixelFormatRGBA16Float;
     static constexpr MTLPixelFormat kDepthFmt = MTLPixelFormatDepth32Float;

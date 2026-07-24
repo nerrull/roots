@@ -129,6 +129,17 @@
             "presentation": { "reveal": "always", "panel": "dedicated" }
         },
         {
+            "label": "Fieldbench: cached-system LOD + culling",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/mirror_app/mirror_app",
+            "args": ["--fieldbench", "12", "60"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["Build: mirror_app"],
+            "group": { "kind": "test" },
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated" }
+        },
+        {
             "label": "Selftest: mirror (headless)",
             "type": "shell",
             "command": "${workspaceFolder}/build/mirror_app/mirror_app",

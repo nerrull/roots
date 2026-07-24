@@ -72,7 +72,7 @@ struct RootGeomU {
     RS_INT  wispCount;
     RS_INT  paletteCount;
     RS_INT  pulseEnabled;
-    RS_INT  _pad0;
+    float   cullPx;       // drop capsules projecting smaller than this (0 = off)
     RS_INT  _pad1;
     RS_F4   palette[ROOT_MAX_GROUPS];
     RS_F4   paletteTip[ROOT_MAX_GROUPS];
