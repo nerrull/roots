@@ -118,6 +118,17 @@
             "presentation": { "reveal": "always", "panel": "dedicated" }
         },
         {
+            "label": "Growshot: live CPlantBox growth to PPM",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/mirror_app/mirror_app",
+            "args": ["--growshot", "${workspaceFolder}/build/grow.ppm", "500"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["Build: mirror_app"],
+            "group": { "kind": "test" },
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated" }
+        },
+        {
             "label": "Selftest: mirror (headless)",
             "type": "shell",
             "command": "${workspaceFolder}/build/mirror_app/mirror_app",

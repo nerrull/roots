@@ -10,6 +10,7 @@
 
 #import <Metal/Metal.h>
 #include "metal_root_renderer.h"
+#include "root_sim.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -39,8 +40,14 @@ public:
     // showFace / face placement).
     void rebuildFace();
 
+    // Restart the live CPlantBox growth (no-op if the sim failed to load).
+    void regrow();
+    bool simActive() const { return useSim_; }
+    bool simDone()   const;
+
     bool  showFace  = true;
     float faceScale = 0.85f;
+    int   simStepsPerFrame = 2;   // growth steps advanced per rendered frame
 
     // Camera / lighting (mirrors mask_relay_gui's controls).
     float azimuth   = 0.6f;
@@ -54,8 +61,11 @@ public:
 
 private:
     void buildSyntheticRoots(uint32_t seed);
+    void uploadFaceFromMasks();      // build face verts from the live sim's masks
 
     std::unique_ptr<MetalRootRenderer> rr_;
+    std::unique_ptr<rootsim::RootSim>  sim_;
+    bool useSim_ = false;
     std::vector<float> faceVerts_;   // canonical face model, local (3/vert)
     std::vector<int>   faceTris_;    // triangle indices
     double t_ = 0.0;

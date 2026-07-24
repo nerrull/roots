@@ -81,6 +81,19 @@ target_link_libraries(mirror_core PUBLIC mlx)
 
 target_link_libraries(mirror_app PRIVATE mirror_core)
 
+# --- mirror_sim (live CPlantBox root growth) ---------------------------------
+# GL-free "mask relay" growth, reusing sdf_viewer's MaskCavities/RootAttractors
+# headers and CPlantBox directly. Pure C++ (CPlantBox types hidden behind pimpl),
+# so it links into the ObjC++ app cleanly.
+add_library(mirror_sim STATIC src/root_sim.cpp)
+target_include_directories(mirror_sim PRIVATE
+    src ${CMAKE_CURRENT_SOURCE_DIR}/../sdf_viewer)
+target_link_libraries(mirror_sim PUBLIC CPlantBox)
+
+target_link_libraries(mirror_app PRIVATE mirror_sim)
+target_compile_definitions(mirror_app PRIVATE
+    ROOTSIM_PARAM_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../CPlantBox/modelparameter/structural/rootsystem/")
+
 # --- tests -------------------------------------------------------------------
 add_executable(mlp_parity_test tests/mlp_parity_test.cpp)
 target_link_libraries(mlp_parity_test PRIVATE mirror_core)

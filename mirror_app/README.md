@@ -41,14 +41,22 @@ VS Code: **Build: mirror_app** / **Run: mirror_app**.
       the shared colour+depth target between the capsules and the fog, marble
       veining + per-face point light, depth-composited against the roots (GL clip-z
       remapped to Metal's [0,1] so it matches the capsules' custom depth).
-- [ ] Root scene: live CPlantBox growth (currently a procedural stand-in in
-      `RootScene`; needs the GL-free `sdfsim` target)
+- [x] **Live CPlantBox growth** (`RootSim`): a GL-free, incremental port of the
+      GL app's "mask relay" driver — masks placed by phyllotaxis on a cone, a root
+      system grown hop-by-hop (travel → dwell/wrap) confined by cavity geometry and
+      steered by attraction tropism. Reuses sdf_viewer's `MaskCavities`/
+      `RootAttractors` headers + CPlantBox directly (CPlantBox types hidden behind a
+      pimpl, so it links into the ObjC++ app). `RootScene` steps it per frame,
+      re-uploads geometry, and drives the face pass from the revealed masks. Falls
+      back to the procedural stand-in if the parameter files aren't present.
 - [ ] Transition (deferred — not yet defined)
 
 Headless checks: `mirror_app --selftest` (MLX→texture path), `mirror_app
 --roottest` (root MSL compile + render + readback), `mirror_app --rootshot
-<out.ppm> [az el radius]` (render the root scene to an image), and
-`mlp_parity_test mirror_app/tests/fixtures` (MLP vs Python reference).
+<out.ppm> [az el radius mode overlays]` (render the root scene to an image),
+`mirror_app --growshot <out.ppm> [steps az el radius]` (step the live CPlantBox
+growth then render), and `mlp_parity_test mirror_app/tests/fixtures` (MLP vs
+Python reference).
 Regenerate the pond weights with `assets/gen_pond_weights.py` (needs neuromirror's venv).
 
 ## Layout

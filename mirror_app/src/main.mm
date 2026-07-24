@@ -170,11 +170,65 @@ static int rootshot(const char* path, float az, float el, float rad, int mode, b
     return 0;
 }
 
+// Headless live-growth check: steps the CPlantBox sim `steps` frames, then
+// renders to a PPM. Usage: --growshot <out.ppm> [steps] [az] [el] [radius]
+static int growshot(const char* path, int steps, float az, float el, float rad) {
+    MetalContext ctx;
+    if (!ctx.device()) { fprintf(stderr, "growshot: no Metal device\n"); return 1; }
+    const int W = 960, H = 540;
+    RootScene roots(ctx, W, H);
+    if (!roots.valid()) { fprintf(stderr, "growshot: root scene invalid\n"); return 1; }
+    printf("growshot: sim active = %d\n", roots.simActive() ? 1 : 0);
+    roots.autoOrbit = false;
+    if (rad > 0) roots.radius = rad;
+    roots.azimuth = az; roots.elevation = el;
+    id<MTLTexture> tex = nil;
+    for (int i = 0; i < steps; ++i) roots.advance(1.0 / 60.0);   // grow (no GPU work)
+    for (int i = 0; i < 2; ++i) {
+        @autoreleasepool {
+            id<MTLCommandBuffer> cb = [ctx.queue() commandBuffer];
+            tex = roots.render(cb);
+            [cb commit]; [cb waitUntilCompleted];
+        }
+    }
+    std::vector<uint16_t> px((size_t)W * H * 4);
+    [tex getBytes:px.data() bytesPerRow:W * 4 * sizeof(uint16_t)
+       fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
+    auto h2f = [](uint16_t h) {
+        uint32_t s = (h >> 15) & 1, e = (h >> 10) & 0x1f, m = h & 0x3ff, bits;
+        if (e == 0) bits = (s << 31) | 0; else bits = (s << 31) | ((e + 112) << 23) | (m << 13);
+        float f; __builtin_memcpy(&f, &bits, 4); return f;
+    };
+    FILE* fp = fopen(path, "wb");
+    if (!fp) { fprintf(stderr, "growshot: cannot open %s\n", path); return 1; }
+    fprintf(fp, "P6\n%d %d\n255\n", W, H);
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) {
+            const uint16_t* p = &px[((size_t)y * W + x) * 4];
+            for (int c = 0; c < 3; ++c) {
+                float v = h2f(p[c]); v = v <= 0.f ? 0.f : (v >= 1.f ? 1.f : v);
+                fputc((unsigned char)(powf(v, 1.0f / 2.2f) * 255.0f + 0.5f), fp);
+            }
+        }
+    fclose(fp);
+    printf("growshot: wrote %s (%dx%d, %d steps, done=%d)\n",
+           path, W, H, steps, roots.simDone() ? 1 : 0);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--selftest") return selftest();
         if (a == "--roottest") return roottest();
+        if (a == "--growshot") {
+            const char* path = (i + 1 < argc) ? argv[i + 1] : "grow.ppm";
+            int steps = (i + 2 < argc) ? atoi(argv[i + 2]) : 400;
+            float az  = (i + 3 < argc) ? atof(argv[i + 3]) : 0.6f;
+            float el  = (i + 4 < argc) ? atof(argv[i + 4]) : 0.2f;
+            float rad = (i + 5 < argc) ? atof(argv[i + 5]) : -1.f;
+            return growshot(path, steps, az, el, rad);
+        }
         if (a == "--rootshot") {
             const char* path = (i + 1 < argc) ? argv[i + 1] : "root.ppm";
             float az  = (i + 2 < argc) ? atof(argv[i + 2]) : 0.6f;

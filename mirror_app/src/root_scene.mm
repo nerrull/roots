@@ -133,18 +133,65 @@ RootScene::RootScene(const MetalContext& ctx, int w, int h) {
 
     rr_->pulse.enabled = true;
 
-    buildSyntheticRoots(1u);
-
     // Canonical face model (shared with the GL sdf_viewer assets).
     loadObj(std::string(SDF_VIEWER_DIR) + "/assets/canonical_face_model.obj",
             faceVerts_, faceTris_);
     normalizeMesh(faceVerts_);
     faceTris_ = cropOvalTris(faceVerts_, faceTris_, 0.72f, 0.98f);
-    rebuildFace();
+
+    // Try the live CPlantBox growth; fall back to the procedural stand-in if the
+    // parameter files aren't present.
+    sim_ = std::make_unique<rootsim::RootSim>();
+    regrow();
+    if (useSim_) {
+        // Frame the whole cone (grows +Y in render space, height ~Hh).
+        target[0] = 0.f; target[1] = 22.f; target[2] = 0.f;
+        radius = 78.f;
+        rr_->fog.refDist = radius;
+        rr_->radiusScale = 1.4f;
+        rr_->radiusMin = 0.03f;
+        rr_->radiusMax = 0.35f;
+        // The masks are small; soften the per-face light so they read as faces
+        // rather than blown-out blobs.
+        rr_->face.lightIntensity = 1.8f;
+        rr_->face.lightFalloff   = 0.05f;
+    } else {
+        buildSyntheticRoots(1u);
+        rebuildFace();
+    }
+}
+
+void RootScene::regrow() {
+    if (!sim_) return;
+    rootsim::SimParams sp;
+    sp.paramDir = ROOTSIM_PARAM_DIR;
+    sp.speciesXml = "Zea_mays_6_Leitner_2014.xml";
+    sp.N = 5;
+    useSim_ = sim_->reset(sp);
+}
+
+bool RootScene::simDone() const { return sim_ && sim_->done(); }
+
+void RootScene::uploadFaceFromMasks() {
+    if (!rr_ || !sim_) return;
+    if (!showFace || faceVerts_.empty() || faceTris_.empty()) { rr_->uploadFaceMesh({}); return; }
+    const float maskColor[3] = {0.86f, 0.83f, 0.78f};
+    std::vector<float> data;
+    for (const auto& sm : sim_->revealedMasks()) {
+        Mask m;
+        m.pos = {sm.pos[0], sm.pos[1], sm.pos[2]};
+        m.normal = {sm.normal[0], sm.normal[1], sm.normal[2]};
+        m.tangent = {sm.tangent[0], sm.tangent[1], sm.tangent[2]};
+        m.bitangent = {sm.bitangent[0], sm.bitangent[1], sm.bitangent[2]};
+        m.rDepth = sm.rDepth; m.rWidth = sm.rWidth; m.rHeight = sm.rHeight;
+        appendFaceVertexData(data, m, faceVerts_, faceTris_, faceScale, 3.0f, maskColor);
+    }
+    rr_->uploadFaceMesh(data);
 }
 
 void RootScene::rebuildFace() {
     if (!rr_) return;
+    if (useSim_) { uploadFaceFromMasks(); return; }
     if (!showFace || faceVerts_.empty() || faceTris_.empty()) {
         rr_->uploadFaceMesh({});
         return;
@@ -245,6 +292,16 @@ void RootScene::advance(double dt) {
     rr_->fog.driftTime += (float)dt * rr_->fog.driftSpeed;
     rr_->pulse.time    += (float)dt;
     rr_->wispTime      += (float)dt;
+
+    // Live growth: advance a few steps, then re-upload geometry + revealed masks.
+    if (useSim_ && sim_ && !sim_->done()) {
+        for (int i = 0; i < std::max(1, simStepsPerFrame) && !sim_->done(); ++i)
+            sim_->step();
+        std::vector<float> nodes, radii; std::vector<int> segs;
+        sim_->geometry(nodes, segs, radii);
+        rr_->uploadSegments(nodes, segs, radii);
+        uploadFaceFromMasks();
+    }
 }
 
 id<MTLTexture> RootScene::render(id<MTLCommandBuffer> cb) {
