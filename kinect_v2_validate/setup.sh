@@ -2,11 +2,55 @@
 # Build libfreenect2 (from source, no brew formula exists) into a local
 # install prefix, then build the validator. Idempotent-ish: re-running
 # rebuilds. macOS / Apple Silicon.
+#
+# `--voice` additionally provisions the Python venv for tools/voice_server.py.
+# It is opt-in because it pulls several GB of MLX + model weights, and the demo
+# runs fine without it -- the voice panel just reports "server down".
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 f2="$here/external/libfreenect2"
 prefix="$f2/install"
+venv="$here/.venv-voice"
+
+want_voice=0
+for a in "$@"; do
+  case "$a" in
+    --voice) want_voice=1 ;;
+    --voice-only) want_voice=2 ;;
+    -h|--help)
+      echo "usage: $0 [--voice | --voice-only]"
+      echo "  --voice       also set up the voice-cloning Python venv"
+      echo "  --voice-only  set up only that venv, skipping the C++ build"
+      exit 0 ;;
+    *) echo "unknown argument: $a (try --help)" >&2; exit 2 ;;
+  esac
+done
+
+setup_voice() {
+  echo "==> provisioning the voice-cloning venv at $venv"
+  # 3.12 rather than whatever `python3` happens to be: mlx-audio's dependency
+  # tree does not yet have wheels for the newest CPython, and building them
+  # from source is a much worse failure than pinning.
+  if command -v uv >/dev/null 2>&1; then
+    uv venv --python 3.12 "$venv"
+    VIRTUAL_ENV="$venv" uv pip install mlx-audio
+  else
+    echo "!! uv not found (brew install uv) -- falling back to python3 -m venv" >&2
+    python3 -m venv "$venv"
+    "$venv/bin/pip" install --upgrade pip
+    "$venv/bin/pip" install mlx-audio
+  fi
+  echo
+  echo "voice server ready. start it with:"
+  echo "  $venv/bin/python $here/tools/voice_server.py"
+  echo "first run downloads model weights (~2 GB for the default Chatterbox)."
+}
+
+if [[ $want_voice -eq 2 ]]; then
+  setup_voice
+  exit 0
+fi
 
 if [[ ! -d "$f2" ]]; then
   echo "cloning libfreenect2..."
@@ -52,6 +96,11 @@ cmake --install "$f2/build"
 echo "==> building validator"
 cmake -S "$here" -B "$here/build" -DCMAKE_BUILD_TYPE=Release
 cmake --build "$here/build" -j"$(sysctl -n hw.ncpu)"
+
+if [[ $want_voice -eq 1 ]]; then
+  echo
+  setup_voice
+fi
 
 echo
 echo "done. run:  $here/build/kinect_v2_validate -t 10"

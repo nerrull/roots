@@ -623,6 +623,33 @@ void AudioCapture::beamLevels(int count, float* peak, float* rms) const {
                  write_pos_.load(std::memory_order_acquire), count, peak, rms);
 }
 
+uint64_t AudioCapture::beamDrain(uint64_t& cursor, std::vector<float>& out) const {
+  const uint64_t w = write_pos_.load(std::memory_order_acquire);
+  if (beam_ring_.empty() || w <= cursor) {
+    cursor = std::min(cursor, w);  // a restart rewinds write_pos_ to 0
+    return 0;
+  }
+
+  // Anything older than kRingSize samples has already been overwritten by the
+  // render callback. Report the loss instead of emitting whatever now sits in
+  // those slots, which would be recent audio spliced in at the wrong position.
+  uint64_t dropped = 0;
+  uint64_t start = cursor;
+  if (w - start > static_cast<uint64_t>(kRingSize)) {
+    start = w - static_cast<uint64_t>(kRingSize);
+    dropped = start - cursor;
+  }
+
+  const size_t base = out.size();
+  out.resize(base + static_cast<size_t>(w - start));
+  for (uint64_t i = start; i < w; ++i) {
+    out[base + static_cast<size_t>(i - start)] =
+        beam_ring_[static_cast<size_t>(i & (kRingSize - 1))];
+  }
+  cursor = w;
+  return dropped;
+}
+
 bool AudioCapture::looksLikeSilence() const {
   if (!running_ || framesCaptured() == 0) return false;
   for (int c = 0; c < channels_; ++c) {

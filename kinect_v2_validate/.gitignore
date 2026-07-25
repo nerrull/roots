@@ -2,3 +2,6 @@ build/
 external/
 # Written by ImGui at runtime (window layout state).
 imgui.ini
+# Python venv for tools/voice_server.py. Several GB once MLX and the model
+# weights are in it; setup.sh --voice recreates it from scratch.
+.venv-voice/

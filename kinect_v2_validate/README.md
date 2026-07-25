@@ -8,7 +8,8 @@ Tools to validate Kinect v2 (Xbox One sensor) streams on macOS via
   dropped-frame count, plus a depth sanity check.
 - **`kinect_v2_demo`** — ImGui viewer: RGB left, depth right, 4-channel mic-array
   scope underneath, with per-stream poll-rate control. See
-  [Demo viewer](#demo-viewer).
+  [Demo viewer](#demo-viewer). Also does live on-device
+  [transcription](#speech-to-text) and [voice cloning](#voice-cloning).
 
 Validated streams: **RGB (1920×1080), IR (512×424), Depth (512×424 float mm),
 audio (4ch @ 16 kHz).**
@@ -72,12 +73,20 @@ Note that only one process can hold the sensor: if `openDevice` fails with
 ## Build
 
 ```sh
-./setup.sh
+./setup.sh              # sensor + demo
+./setup.sh --voice      # ...and the voice-cloning Python venv
+./setup.sh --voice-only # just that venv
 ```
 
 This clones + builds libfreenect2 into `external/libfreenect2/install` (no
 Homebrew formula exists), then builds the validator into `build/`. Requires
 Homebrew deps: `libusb`, `jpeg-turbo`, `glfw` (the script installs them).
+
+`--voice` is separate because it pulls several GB of MLX and model weights into
+`.venv-voice/` (gitignored). The demo runs fine without it — the voice panel
+just reports `server down`. It pins **Python 3.12**: mlx-audio's dependency tree
+does not yet have wheels for the newest CPython, and building those from source
+is a far worse failure than pinning.
 
 ## Run
 
@@ -125,6 +134,10 @@ RGB left, Turbo-colourmapped depth right, four mic-array scopes underneath.
 | `--audio-name <substr>` | Match a display-name substring |
 | `--audio-allow-fallback` | Permit falling back to the system default input |
 | `--no-usb-reset` | Skip the sensor USB reset on open (it is on by default) |
+| `--transcribe` | Start live transcription immediately (otherwise toggle it in the SPEECH panel) |
+| `--asr-backend <b>` | `auto` (default), `analyzer`, or `sfspeech` — see [Speech-to-text](#speech-to-text) |
+| `--asr-locale <id>` | BCP-47 locale for transcription, default `en-US` |
+| `--voice-url <url>` | Voice-cloning server, default `http://127.0.0.1:8765` |
 
 **Poll rate.** `video poll Hz` and `depth poll Hz` (1–30, independent, each with a
 `pause` box, plus an `unthrottled` box) set how often the *UI pulls* the newest
@@ -228,6 +241,168 @@ physical property of the bar that only a real measurement can confirm.
 **Full step-by-step procedure, including what to do if it will not converge:**
 [`documentation/notes/kinect_mic_array_calibration.md`](../documentation/notes/kinect_mic_array_calibration.md)
 
+## Speech-to-text
+
+The `SPEECH` panel (right of the DSP column) transcribes the **beam** — the
+steered, compressed mono output, not a raw mic — on device, live. Off until you
+tick `transcribe`, because it prompts for a permission and holds a recogniser
+open on everything the sensor hears.
+
+Two backends sit behind one interface (`src/demo/transcriber.h`):
+
+| Backend | API | Requires |
+| --- | --- | --- |
+| `SpeechAnalyzer` | `SpeechAnalyzer` + `SpeechTranscriber` (WWDC25) | **macOS 26** to build *and* run |
+| `SFSpeechRecognizer` | the previous API | macOS 10.15+ |
+
+> ### ⚠️ SpeechAnalyzer is not built on macOS 15 and earlier
+>
+> It is Swift-only and needs the **macOS 26 SDK**. CMake detects this and says
+> which you got at configure time:
+>
+> ```
+> -- transcription: SFSpeechRecognizer only (SDK 14.5 < 26.0, so SpeechAnalyzer
+>    is unavailable; build against the macOS 26 SDK to enable it)
+> ```
+>
+> On an older SDK, `src/demo/transcriber_analyzer.swift` is excluded from the
+> build entirely and `--asr-backend analyzer` fails with an explanation rather
+> than a link error. **That Swift backend has therefore never been compiled or
+> run** — it was written against the documented API and the WWDC sample flow,
+> but it is unverified until someone builds it on macOS 26.
+>
+> The SFSpeechRecognizer path is a complete implementation, not a stub. Rebuild
+> (`cmake -S . -B build`) after upgrading and the analyzer backend appears; the
+> UI shows which one is live, and greys out an explanatory note when it is not
+> compiled in.
+
+**Recognition is on-device or nothing.** `requiresOnDeviceRecognition` is set and
+`supportsOnDeviceRecognition` is checked before starting; if the locale has no
+local model, startup fails with instructions rather than quietly shipping mic
+audio of whoever walked past the sensor to Apple's servers.
+
+**The old API is per-utterance, so the task is recycled.** `SFSpeechRecognizer`
+accumulates one growing recognition and hits an undocumented duration limit.
+The backend closes the task after ~1.2 s of silence (or 50 s regardless),
+promoting any un-finalised partial to a final first so recycling never eats
+words. `SpeechAnalyzer` needs none of this — it is built for streaming.
+
+**Permission.** These are plain CLI binaries with no bundle, so macOS attributes
+the request to the *parent* terminal: grant it under System Settings → Privacy &
+Security → **Speech Recognition** (separate from Microphone). The usage strings
+live in `src/demo/Info.plist`, embedded into the binary's `__TEXT,__info_plist`
+section by the linker — without that, asking a bare executable for
+speech-recognition authorisation does not work.
+
+**Audio is drained, not sampled.** `beamSnapshot()` returns the newest N samples,
+which is right for a scope and wrong here: polling it once per UI frame drops
+everything in between. Transcription and reference capture each hold a cursor
+and call `AudioCapture::beamDrain()`, which is gap-free and reports any samples
+lost to a UI stall longer than the ring's ~2 s of history.
+
+## Voice cloning
+
+Record a few seconds of whoever is in front of the sensor, then synthesise
+arbitrary text in their voice. The model runs **out of process**, in
+`tools/voice_server.py`.
+
+```sh
+./setup.sh --voice-only          # provision .venv-voice (several GB)
+.venv-voice/bin/python tools/voice_server.py
+./build/kinect_v2_demo           # the SPEECH panel finds it on 127.0.0.1:8765
+```
+
+Then: **record reference** (8 s by default — talk continuously, not a held
+vowel), type text or tick `speak the transcript`, and hit **speak**.
+
+Why a server rather than C++: every zero-shot cloning model worth using is a
+Python artefact reaching the GPU through MLX, which has no C++ inference path
+for them. The split also keeps model loading (20–30 s) and generation off the
+render loop, and lets you swap models or curl the thing by hand without a
+rebuild.
+
+### Which model
+
+Model choice is a flag. `--model` takes a preset or any HF repo id mlx-audio can
+load; the server introspects `model.generate`'s signature and maps the request's
+neutral parameter names onto whatever that model actually calls them, because
+the vocabularies differ (Chatterbox has `exaggeration`/`cfg_weight`, Qwen3-TTS
+wants a `ref_text` transcript).
+
+Measured on this machine — **M4, 10-core, 32 GB** — warm, cloning from a 6.9 s
+reference. RTF under 1.0 is faster than real time:
+
+| `--model` | audio | wall | RTF |
+| --- | --- | --- | --- |
+| `chatterbox` (default) | 3.00 s | 3.76 s | **1.25** |
+| `chatterbox` , longer text | 4.76 s | 5.65 s | 1.19 |
+| `chatterbox-turbo` | 2.92 s | 1.83 s | **0.63** |
+| `qwen3-tts` (0.6B bf16) | 2.72 s | 7.75 s | **2.85** |
+
+**Pick `chatterbox` for expression, `chatterbox-turbo` for immediacy.** The
+default is the full model: the emotion-exaggeration knob is the reason to want
+Chatterbox at all, and 1.25 buys a ~3.8 s wait on a 3 s utterance. If the
+interaction has to feel live, `--model chatterbox-turbo` is comfortably
+faster than real time and audibly flatter. `qwen3-tts` is here to compare
+against, not to run an installation on — at ~2.8× real time it is the slowest of
+the three even at 0.6B.
+
+### The models disagree about emotion, so both controls travel
+
+There is no honest conversion between a scalar and a sentence, so the request
+carries both and each model picks up the one it understands:
+
+| | Chatterbox | Qwen3-TTS |
+| --- | --- | --- |
+| emotion | `emotion` slider → `exaggeration` (0–1) | `style` text → `instruct`, e.g. *"speak warmly and slowly"* |
+| reference | audio only | audio **+ `ref_text`**, a transcript of the clip |
+
+**Qwen needs the reference transcript.** Without it the clone still renders, just
+worse — a silent quality regression, so the server logs a warning when a model
+accepts `ref_text` and none was supplied.
+
+Supplying it is where the two speech features meet: **if transcription is
+running while you record the reference clip, the demo fills the transcript in
+automatically.** The field keeps updating for 2.5 s past the end of the clip
+(recognition only finalises an utterance after the talker stops, which is by
+definition after the recording ended), and any keystroke in the field stops the
+auto-fill rather than fighting you for the cursor. With transcription off, type
+it yourself or leave it blank.
+
+Note this is all GPU, not "a core or two" — MLX dispatches to the Metal GPU, and
+these numbers are unreachable on CPU.
+
+**The first request is warmed up at startup.** Loading weights is not the whole
+cost; the first generation also compiles the MLX graph. Unwarmed, request #1
+took **12.9 s against a steady-state 1.8 s** (RTF 4.62 vs 0.63). The server now
+generates one throwaway utterance at load — 0.9 s, once — so nobody's first
+interaction is seven times slower than every one after it.
+
+### Notes on getting a good clone
+
+- The reference is taken from the **beam**, so it is already steered at the
+  talker and de-noised. The trade is that the dynamics chain is baked in, which
+  flattens the clone slightly — worth it against the room noise it removes.
+- A quiet reference produces a clone that sounds like nobody in particular. The
+  panel reports the captured peak and warns below 0.05, because that failure is
+  otherwise invisible until you hear the output.
+- `emotion` (Chatterbox's exaggeration): ~0.3 flat, 0.5 natural, past ~0.8 it
+  goes theatrical and starts losing the speaker's identity.
+
+### ⚠️ MLX streams are per-thread
+
+`ThreadingHTTPServer` hands every request a fresh thread, and evaluating an MLX
+graph on a thread that did not create the stream fails outright:
+
+```
+RuntimeError: There is no Stream(gpu, 0) in current thread.
+```
+
+So the model is loaded and every generation runs on **one dedicated worker
+thread**, with request handlers submitting work to it and waiting. That also
+serialises access, which is correct anyway — MLX graphs are not reentrant and
+concurrent requests on one GPU only trade latency for latency.
+
 ### Tests
 
 Headless, hardware-free, synthetic-signal tests for the parts that are otherwise
@@ -242,6 +417,12 @@ ctest --test-dir build --output-on-failure
   on/off-axis rejection (measured 6.17 dB, theory 10·log₁₀4 = 6.02 dB), and DOA
   accuracy (within ~1.3° across ±60°, 8/8 noisy trials within 10°, and silence
   correctly yielding near-zero confidence).
+- `voice` — transcript accumulation (volatile results replacing rather than
+  appending, finals superseding the partial they refined, the cap dropping
+  oldest first), WAV round-tripping within 16-bit quantisation **and clipping
+  rather than wrapping** on out-of-range samples, reference-clip capture
+  including the oversized-block overrun guard, and that a transcription backend
+  can never report itself runtime-available when it was not compiled in.
 - `person_tracker` — azimuth against analytically-derived angles, a near person
   beating a full-frame back wall, **depth speckle failing to hijack the track**,
   undersized-blob rejection, hold-then-release timing, and smoothing convergence.

@@ -134,6 +134,22 @@ class AudioCapture {
   void beamSnapshot(int count, std::vector<float>& out) const;
   void beamLevels(int count, float* peak, float* rms) const;
 
+  // Gap-free sequential read of the beam ring.
+  //
+  // beamSnapshot() returns the most recent N samples, which is right for a
+  // scope and wrong for anything that must not miss audio: poll it twice and
+  // the samples between the two windows are simply gone. A transcriber fed that
+  // way drops syllables. So consumers that need continuity hold a cursor
+  // instead and drain forward from it.
+  //
+  // Start with beamCursorNow(), then call beamDrain() as often as you like.
+  // Appends everything written since `cursor` to `out` and advances it.
+  // A consumer that falls more than kRingSize behind cannot be served the
+  // samples it missed -- they have been overwritten -- so those are skipped and
+  // counted in the return value rather than silently papered over.
+  uint64_t beamCursorNow() const { return write_pos_.load(std::memory_order_acquire); }
+  uint64_t beamDrain(uint64_t& cursor, std::vector<float>& out) const;
+
   // Compressor gain reduction (negative dB) as of the last processed block.
   float gainReductionDb() const { return gain_reduction_db_.load(); }
   // Beam latency introduced by the steering delay lines.

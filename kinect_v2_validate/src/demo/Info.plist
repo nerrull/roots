@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Embedded into the kinect_v2_demo binary's __TEXT,__info_plist section (see
+  CMakeLists.txt), because this is a plain CLI tool with no .app bundle to put
+  a plist in.
+
+  TCC reads the usage strings from here. Without them, requesting speech
+  recognition on a non-bundled executable either fails silently or terminates
+  the process, depending on the OS version -- and the prompt, when it appears,
+  has nothing to show the user about why we are asking.
+
+  Note that a CLI binary still has no bundle identity of its own, so macOS
+  attributes the grant to the *parent* application (your terminal or IDE). That
+  is where it shows up in System Settings, and it is why these strings talk
+  about the sensor rather than about this executable by name.
+-->
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>kinect_v2_demo</string>
+  <key>CFBundleIdentifier</key>
+  <string>dev.jardins-racine.kinect-v2-demo</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Captures the Kinect v2 sensor's 4-microphone array to display live audio scopes, steer a beamformer at the person in front of the sensor, and optionally record a short reference clip for voice cloning.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Transcribes speech picked up by the Kinect v2 microphone array. Recognition runs entirely on this device; no audio is sent to Apple.</string>
+</dict>
+</plist>

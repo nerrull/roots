@@ -1,10 +1,16 @@
 // kinect_v2_demo — ImGui viewer for all three Kinect v2 stream families.
 //
 //   [ RGB 1920x1080 ]  [ depth 512x424 ]
-//   [   4-channel mic-array scope       ]
+//   [ mic scopes | DSP + steering | speech ]
 //
 // Layout is fixed (video left, depth right, audio underneath) with a controls
 // strip; the poll rate of the colour and depth streams is adjustable at runtime.
+//
+// The speech column does two things with the beamformed output, both optional
+// and both off until asked for:
+//   * live transcription, on-device (transcriber.h)
+//   * voice cloning -- record a reference clip of the person in front of the
+//     sensor, then synthesise arbitrary text in their voice (voice_clone.h)
 //
 // Notes on the choices here, since the point of this tool is stability:
 //   * ImGui runs on GLFW + Metal (the repo convention), so we never share an
@@ -20,6 +26,8 @@
 #include "dsp.h"
 #include "kinect_source.h"
 #include "person_tracker.h"
+#include "transcriber.h"
+#include "voice_clone.h"
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
@@ -30,6 +38,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <memory>
 #include <vector>
 
 #define GLFW_INCLUDE_NONE
@@ -322,6 +331,14 @@ int main(int argc, char** argv) {
   bool want_audio = true;
   KinectSource::UsbReset usb_reset = KinectSource::UsbReset::kReset;
 
+  // Speech features are opt-in at runtime. Transcription in particular triggers
+  // an OS permission prompt and holds a recogniser open on everything the mic
+  // hears, which is not something to start doing without being asked.
+  bool want_transcribe = false;
+  transcribe::Backend asr_backend = transcribe::Backend::kAuto;
+  std::string asr_locale = "en-US";
+  std::string voice_url = "http://127.0.0.1:8765";
+
   // Default: pin the Kinect v2 by its USB VID:PID and require the 4-mic array.
   // No name matching, and no falling back to the system default input.
   AudioSelector audio_sel;
@@ -361,6 +378,27 @@ int main(int argc, char** argv) {
       audio_sel.allow_default_fallback = true;
     } else if (a == "--no-usb-reset") {
       usb_reset = KinectSource::UsbReset::kSkip;
+    } else if (a == "--transcribe") {
+      want_transcribe = true;
+    } else if (a == "--asr-backend" && i + 1 < argc) {
+      const std::string b = argv[++i];
+      if (b == "auto") {
+        asr_backend = transcribe::Backend::kAuto;
+      } else if (b == "analyzer") {
+        asr_backend = transcribe::Backend::kSpeechAnalyzer;
+      } else if (b == "sfspeech") {
+        asr_backend = transcribe::Backend::kSpeechRecognizer;
+      } else {
+        std::fprintf(stderr,
+                     "unknown --asr-backend '%s' "
+                     "(auto | analyzer | sfspeech)\n",
+                     b.c_str());
+        return 2;
+      }
+    } else if (a == "--asr-locale" && i + 1 < argc) {
+      asr_locale = argv[++i];
+    } else if (a == "--voice-url" && i + 1 < argc) {
+      voice_url = argv[++i];
     } else if (a == "-h" || a == "--help") {
       std::printf(
           "usage: %s [options]\n"
@@ -382,8 +420,20 @@ int main(int argc, char** argv) {
           "  --audio-allow-fallback  permit falling back to the system default\n"
           "                          input if the selector matches nothing\n"
           "                          (off by default: a silent fallback is how\n"
-          "                          you end up recording the wrong mic)\n",
-          argv[0], kKinectV2ModelUid);
+          "                          you end up recording the wrong mic)\n"
+          "\n"
+          "Speech (both off until enabled; see the SPEECH panel):\n"
+          "  --transcribe            start live transcription immediately\n"
+          "  --asr-backend <b>       auto | analyzer | sfspeech.\n"
+          "                          'analyzer' is SpeechAnalyzer, which needs\n"
+          "                          macOS 26 both to build and to run; this\n"
+          "                          binary was built %s it.\n"
+          "  --asr-locale <id>       BCP-47 locale, default en-US\n"
+          "  --voice-url <url>       voice-cloning server, default\n"
+          "                          http://127.0.0.1:8765 "
+          "(tools/voice_server.py)\n",
+          argv[0], kKinectV2ModelUid,
+          transcribe::BuiltWithSpeechAnalyzer() ? "with" : "without");
       return 0;
     } else {
       std::fprintf(stderr, "unknown argument: %s (try --help)\n", a.c_str());
@@ -397,7 +447,7 @@ int main(int argc, char** argv) {
   const float scale =
       ImGui_ImplGlfw_GetContentScaleForMonitor(glfwGetPrimaryMonitor());
   glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-  GLFWwindow* window = glfwCreateWindow(int(1500 * scale), int(950 * scale),
+  GLFWwindow* window = glfwCreateWindow(int(1800 * scale), int(980 * scale),
                                         "Kinect v2 — streams", nullptr, nullptr);
   if (!window) {
     glfwTerminate();
@@ -533,7 +583,96 @@ int main(int argc, char** argv) {
   float ui_aperture_m = 0.16f;
   bool show_beam = true;
 
+  // --- speech: transcription + voice cloning -------------------------------
+  //
+  // Both consume the *beam*, not a raw mic: it is already steered at the person
+  // and run through the dynamics chain, which is the cleanest signal available
+  // and the one a recogniser or a cloning model does best with.
+  //
+  // Both drain through their own cursor rather than beamSnapshot(). A snapshot
+  // returns the newest N samples, so polling it once per UI frame would drop
+  // everything that arrived between frames -- fine for a scope, ruinous for a
+  // recogniser.
+  std::unique_ptr<transcribe::Transcriber> asr;
+  std::string asr_err;
+  bool asr_on = false;
+  bool asr_authorized = false;
+  uint64_t asr_cursor = 0;
+  uint64_t asr_dropped = 0;
+  transcribe::TranscriptLog transcript;
+  std::vector<transcribe::Result> asr_results;
+  std::vector<float> speech_buf;
+
+  voice::VoiceCloner cloner;
+  cloner.setEndpoint(voice_url);
+  cloner.probeAsync();
+  double last_voice_probe = NowSeconds();
+
+  voice::ReferenceRecorder ref_rec;
+  uint64_t ref_cursor = 0;
+  float ref_seconds = 8.f;
+  std::string ref_path;   // where the captured clip lives on disk
+  std::string ref_status;
+  bool ref_status_bad = false;
+
+  // Transcript of the reference clip. Qwen3-TTS conditions on it; Chatterbox
+  // ignores it. When transcription happens to be running during the capture we
+  // already know what was said, so it is filled in automatically -- the one
+  // point where the two speech features feed each other.
+  //
+  // Auto-fill is best-effort and always overridable. Recognition lags the audio
+  // (a final result only lands after ~1.2 s of silence), so the fill continues
+  // for a grace period past the end of the clip, and any keystroke in the field
+  // stops it for good rather than fighting the user for the cursor.
+  char ref_text_buf[1024] = {0};
+  size_t ref_finals_at_start = 0;
+  double ref_autofill_until = 0.0;
+  bool ref_text_edited = false;
+  char style_buf[256] = {0};
+
+  char speak_text[1024] =
+      "Hello. This is my voice, cloned from a few seconds of audio.";
+  float ui_exaggeration = 0.5f;
+  float ui_cfg = 0.5f;
+  float ui_temperature = 0.8f;
+  // Feeding the transcript straight back into the cloner is the demo that makes
+  // the whole pipeline legible: say something, hear it back in your own voice.
+  bool speak_from_transcript = false;
+
   tracker.setIntrinsics(kinect.depthIntrinsics());
+
+  // Starting transcription is a distinct step from constructing the backend:
+  // it prompts for authorisation and may download a model, so it happens on an
+  // explicit toggle rather than at startup.
+  auto start_asr = [&]() {
+    asr_err.clear();
+    if (!audio_ok) {
+      asr_err = "no audio capture, so there is nothing to transcribe";
+      return;
+    }
+    if (!asr_authorized &&
+        !transcribe::RequestAuthorization(30.0, asr_err)) {
+      return;
+    }
+    asr_authorized = true;
+    if (!asr) {
+      asr = transcribe::Create(asr_backend, asr_err);
+      if (!asr) return;
+    }
+    if (!asr->start(audio.sampleRate(), asr_locale, asr_err)) return;
+    // Start from *now*: the ring holds a couple of seconds of history, and
+    // replaying it on every toggle would transcribe the same words twice.
+    asr_cursor = audio.beamCursorNow();
+    asr_dropped = 0;
+    asr_on = true;
+  };
+
+  auto stop_asr = [&]() {
+    if (asr) asr->stop();
+    asr_on = false;
+  };
+
+  if (want_transcribe) start_asr();
 
   while (!glfwWindowShouldClose(window)) {
     @autoreleasepool {
@@ -657,6 +796,86 @@ int main(int argc, char** argv) {
         audio.controls.beamform.store(ui_beamform);
         audio.controls.aperture_m.store(ui_aperture_m);
         audio.controls.steer_deg.store(beam_deg);
+      }
+
+      // --- speech: drain the beam into whoever is listening -------------------
+      //
+      // Once per UI frame, which at 16 kHz is ~530 samples at 30 fps -- well
+      // inside what either consumer wants per call, and far coarser than the
+      // audio callback, so nothing here can perturb the realtime thread.
+      if (audio_ok && asr_on && asr) {
+        speech_buf.clear();
+        asr_dropped += audio.beamDrain(asr_cursor, speech_buf);
+        if (!speech_buf.empty()) {
+          asr->feed(speech_buf.data(), int(speech_buf.size()));
+        }
+        asr_results.clear();
+        asr->poll(asr_results);
+        for (const transcribe::Result& r : asr_results) transcript.add(r);
+
+        // A backend that dies mid-stream otherwise looks exactly like a quiet
+        // room, so surface it and stop pretending to listen.
+        const std::string e = asr->error();
+        if (!e.empty()) {
+          asr_err = e;
+          stop_asr();
+        }
+      }
+
+      if (audio_ok && ref_rec.recording()) {
+        speech_buf.clear();
+        audio.beamDrain(ref_cursor, speech_buf);
+        if (ref_rec.feed(speech_buf.data(), int(speech_buf.size()))) {
+          // Clip complete: write it out where the server can read it.
+          ref_path = std::string(NSTemporaryDirectory().UTF8String) +
+                     "kv2_voice_reference.wav";
+          std::string werr;
+          if (!ref_rec.save(ref_path, werr)) {
+            ref_status = werr;
+            ref_status_bad = true;
+            ref_path.clear();
+          } else {
+            const float pk = ref_rec.peak();
+            char msg[256];
+            // A too-quiet reference is the failure that is invisible until you
+            // hear the clone, so it is called out at capture time instead.
+            ref_status_bad = pk < 0.05f;
+            std::snprintf(msg, sizeof(msg), "%.1f s captured, peak %.2f%s",
+                          ref_rec.capturedSeconds(), pk,
+                          ref_status_bad
+                              ? "  — very quiet; the clone will be poor"
+                              : "");
+            ref_status = msg;
+          }
+          // Keep collecting recognised words for a moment: the recogniser only
+          // finalises a utterance after the talker stops, which is by
+          // definition after the clip ended.
+          ref_autofill_until = NowSeconds() + 2.5;
+        }
+      }
+
+      // Assemble the reference transcript from whatever was recognised between
+      // the start of the capture and now.
+      if (ref_autofill_until > 0.0 && !ref_text_edited &&
+          NowSeconds() < ref_autofill_until) {
+        const std::vector<std::string>& fs = transcript.finals();
+        std::string joined;
+        for (size_t i = ref_finals_at_start; i < fs.size(); ++i) {
+          if (!joined.empty()) joined += ' ';
+          joined += fs[i];
+        }
+        if (!transcript.partial().empty()) {
+          if (!joined.empty()) joined += ' ';
+          joined += transcript.partial();
+        }
+        std::snprintf(ref_text_buf, sizeof(ref_text_buf), "%s", joined.c_str());
+      }
+
+      // Cheap, and the answer changes when the user starts the server by hand
+      // after the demo is already up.
+      if (NowSeconds() - last_voice_probe > 3.0) {
+        last_voice_probe = NowSeconds();
+        cloner.probeAsync();
       }
 
       // --- frame setup -------------------------------------------------------
@@ -884,11 +1103,12 @@ int main(int argc, char** argv) {
         const int win =
             std::max(16, int(audio_window_ms * 0.001 * audio.sampleRate()));
 
-        // Scopes left, DSP + steering right.
-        const float panel_w = std::min(360.f * scale,
-                                       ImGui::GetContentRegionAvail().x * 0.42f);
+        // Scopes left, DSP + steering middle, speech right.
+        const float total_w = ImGui::GetContentRegionAvail().x;
+        const float panel_w = std::min(340.f * scale, total_w * 0.30f);
+        const float speech_w = std::min(400.f * scale, total_w * 0.34f);
         const float scopes_w =
-            ImGui::GetContentRegionAvail().x - panel_w - style.ItemSpacing.x;
+            total_w - panel_w - speech_w - style.ItemSpacing.x * 2.f;
 
         ImGui::BeginChild("##scopes", ImVec2(scopes_w, 0));
         {
@@ -929,7 +1149,7 @@ int main(int argc, char** argv) {
 
         ImGui::SameLine();
 
-        ImGui::BeginChild("##dsp", ImVec2(0, 0));
+        ImGui::BeginChild("##dsp", ImVec2(panel_w, 0));
         {
           DrawGainReductionMeter(audio.gainReductionDb(), 24.f,
                                  ImVec2(ImGui::GetContentRegionAvail().x,
@@ -1009,6 +1229,268 @@ int main(int argc, char** argv) {
           ImGui::TextDisabled("beam latency %.2f ms", audio.beamLatencyMs());
         }
         ImGui::EndChild();
+
+        ImGui::SameLine();
+
+        // --- speech: transcription + voice cloning --------------------------
+        ImGui::BeginChild("##speech", ImVec2(0, 0), ImGuiChildFlags_Borders);
+        {
+          ImGui::Text("SPEECH");
+          ImGui::SameLine();
+          ImGui::TextDisabled("| beam @ %.0f Hz", audio.sampleRate());
+
+          // -- transcription --
+          bool toggle = asr_on;
+          if (ImGui::Checkbox("transcribe", &toggle)) {
+            if (toggle) {
+              start_asr();
+            } else {
+              stop_asr();
+            }
+          }
+          ImGui::SameLine();
+          if (asr_on && asr) {
+            ImGui::TextColored(ImVec4(0.6f, 1.f, 0.7f, 1.f), "%s",
+                               transcribe::BackendName(asr->backend()));
+          } else {
+            ImGui::TextDisabled("off");
+          }
+          ImGui::SameLine();
+          if (ImGui::SmallButton("clear")) transcript.clear();
+
+          // The SDK question and the OS question have different answers and
+          // different fixes, so they are never collapsed into one line.
+          if (!transcribe::BuiltWithSpeechAnalyzer()) {
+            ImGui::TextDisabled("SpeechAnalyzer not compiled in");
+            if (ImGui::IsItemHovered()) {
+              ImGui::SetTooltip(
+                  "SpeechAnalyzer (the current speech-to-text API) needs the\n"
+                  "macOS 26 SDK to build and macOS 26 to run. This binary was\n"
+                  "built against an older SDK, so it uses SFSpeechRecognizer.\n"
+                  "Rebuild on macOS 26 to switch: cmake -S . -B build");
+            }
+          }
+
+          if (!asr_err.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 140, 120, 255));
+            ImGui::TextWrapped("%s", asr_err.c_str());
+            ImGui::PopStyleColor();
+          }
+          if (asr_dropped > 0) {
+            // Only possible if the UI stalled for more than the ring's ~2 s of
+            // history, so it is a real gap in the transcript, not a nicety.
+            ImGui::TextColored(ImVec4(1.f, 0.8f, 0.3f, 1.f),
+                               "dropped %llu samples (UI stalled)",
+                               (unsigned long long)asr_dropped);
+          }
+
+          // Transcript: finals dim, the in-flight hypothesis bright, so it is
+          // obvious at a glance which text is still being revised.
+          const float log_h = std::max(70.f * scale,
+                                       ImGui::GetContentRegionAvail().y * 0.30f);
+          ImGui::BeginChild("##transcript", ImVec2(0, log_h),
+                            ImGuiChildFlags_Borders);
+          {
+            const std::vector<std::string>& fs = transcript.finals();
+            for (const std::string& s : fs) ImGui::TextWrapped("%s", s.c_str());
+            if (!transcript.partial().empty()) {
+              ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(120, 210, 255, 255));
+              ImGui::TextWrapped("%s", transcript.partial().c_str());
+              ImGui::PopStyleColor();
+            }
+            if (fs.empty() && transcript.partial().empty()) {
+              ImGui::TextDisabled(asr_on ? "listening..."
+                                         : "transcription is off");
+            }
+            // Follow the tail only while it is already at the bottom, so
+            // scrolling back to read something is not fought by new results.
+            if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.f) {
+              ImGui::SetScrollHereY(1.f);
+            }
+          }
+          ImGui::EndChild();
+
+          ImGui::Separator();
+
+          // -- voice cloning --
+          const voice::ServerInfo vi = cloner.info();
+          ImGui::Text("VOICE CLONE");
+          ImGui::SameLine();
+          if (!vi.reachable) {
+            ImGui::TextColored(ImVec4(1.f, 0.8f, 0.3f, 1.f), "server down");
+            if (ImGui::IsItemHovered()) {
+              ImGui::SetTooltip(
+                  "No voice server at %s\n\n"
+                  "Start it with:  ./tools/voice_server.py\n"
+                  "%s",
+                  cloner.endpoint().c_str(), vi.detail.c_str());
+            }
+          } else if (!vi.model_loaded) {
+            ImGui::TextColored(ImVec4(1.f, 0.8f, 0.3f, 1.f), "loading model...");
+          } else {
+            ImGui::TextColored(ImVec4(0.6f, 1.f, 0.7f, 1.f), "%s",
+                               vi.model.c_str());
+          }
+
+          // Reference clip.
+          ImGui::PushItemWidth(110 * scale);
+          ImGui::SliderFloat("ref sec", &ref_seconds, 3.f, 20.f, "%.0f");
+          ImGui::PopItemWidth();
+          ImGui::SameLine();
+          if (ref_rec.recording()) {
+            if (ImGui::Button("stop")) ref_rec.cancel();
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1.f, 0.5f, 0.5f, 1.f), "REC %.1f/%.0f s",
+                               ref_rec.capturedSeconds(),
+                               ref_rec.targetSeconds());
+          } else {
+            ImGui::BeginDisabled(!audio_ok);
+            if (ImGui::Button("record reference")) {
+              ref_cursor = audio.beamCursorNow();
+              ref_rec.begin(ref_seconds, int(audio.sampleRate()));
+              ref_status = "recording — have the person talk continuously";
+              ref_status_bad = false;
+              // Baseline the transcript so the auto-fill picks up only what is
+              // said during this clip.
+              ref_finals_at_start = transcript.finals().size();
+              ref_text_edited = false;
+              ref_autofill_until = 0.0;
+              ref_text_buf[0] = '\0';
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered()) {
+              ImGui::SetTooltip(
+                  "Records the beamformed output, so it captures whoever the\n"
+                  "beam is currently steered at. Continuous natural speech\n"
+                  "clones far better than a held vowel or a stop-start read.");
+            }
+          }
+          if (!ref_status.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                                  ref_status_bad ? IM_COL32(255, 200, 120, 255)
+                                                 : IM_COL32(150, 155, 170, 255));
+            ImGui::TextWrapped("%s", ref_status.c_str());
+            ImGui::PopStyleColor();
+          }
+          if (!ref_path.empty()) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("play ref")) {
+              std::string perr;
+              if (!cloner.playFile(ref_path, perr)) {
+                ref_status = perr;
+                ref_status_bad = true;
+              }
+            }
+          }
+
+          // Reference transcript. Only worth screen space once there is a clip
+          // to describe.
+          if (!ref_path.empty()) {
+            ImGui::PushItemWidth(-1);
+            if (ImGui::InputTextWithHint("##reftext",
+                                         "reference transcript (Qwen3-TTS "
+                                         "uses this; Chatterbox ignores it)",
+                                         ref_text_buf, sizeof(ref_text_buf))) {
+              ref_text_edited = true;  // stop fighting the user for the cursor
+            }
+            ImGui::PopItemWidth();
+            if (ref_text_buf[0] == '\0') {
+              ImGui::TextDisabled("no transcript — turn on 'transcribe' before "
+                                  "recording, or type it");
+            }
+          }
+
+          ImGui::Checkbox("speak the transcript", &speak_from_transcript);
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Send the transcript instead of the text box: say something,\n"
+                "hear it back in the cloned voice.");
+          }
+          ImGui::BeginDisabled(speak_from_transcript);
+          ImGui::PushItemWidth(-1);
+          ImGui::InputTextMultiline("##speaktext", speak_text,
+                                    sizeof(speak_text),
+                                    ImVec2(0, 46 * scale));
+          ImGui::PopItemWidth();
+          ImGui::EndDisabled();
+
+          ImGui::PushItemWidth(-1);
+          ImGui::InputTextWithHint("##style",
+                                   "style, e.g. \"speak warmly and slowly\" "
+                                   "(Qwen3-TTS)",
+                                   style_buf, sizeof(style_buf));
+          ImGui::PopItemWidth();
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "The two model families specify emotion differently and there\n"
+                "is no honest conversion between them, so both travel and each\n"
+                "model uses the one it understands:\n"
+                "  Chatterbox  -> the 'emotion' slider below\n"
+                "  Qwen3-TTS   -> this sentence");
+          }
+
+          ImGui::PushItemWidth(120 * scale);
+          ImGui::SliderFloat("emotion", &ui_exaggeration, 0.f, 1.f, "%.2f");
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Emotional intensity. ~0.3 is flat and even, 0.5 natural;\n"
+                "past ~0.8 it turns theatrical and starts losing the\n"
+                "speaker's identity.");
+          }
+          ImGui::SliderFloat("cfg", &ui_cfg, 0.f, 1.f, "%.2f");
+          ImGui::SliderFloat("temp", &ui_temperature, 0.1f, 1.5f, "%.2f");
+          ImGui::PopItemWidth();
+
+          const voice::State vs = cloner.state();
+          const std::string to_say =
+              speak_from_transcript ? transcript.full() : std::string(speak_text);
+          const bool can_speak = vi.reachable && vs != voice::State::kGenerating &&
+                                 !to_say.empty();
+          ImGui::BeginDisabled(!can_speak);
+          if (ImGui::Button("speak")) {
+            voice::SpeakParams p;
+            p.text = to_say;
+            p.reference_wav = ref_path;  // empty = the model's default voice
+            p.reference_text = ref_text_buf;
+            p.style = style_buf;
+            p.exaggeration = ui_exaggeration;
+            p.cfg = ui_cfg;
+            p.temperature = ui_temperature;
+            cloner.speak(p);
+          }
+          ImGui::EndDisabled();
+          ImGui::SameLine();
+          if (ImGui::Button("stop##voice")) cloner.stopPlayback();
+          ImGui::SameLine();
+          if (ref_path.empty()) {
+            ImGui::TextDisabled("(default voice — no reference yet)");
+          } else {
+            ImGui::TextDisabled("(cloned)");
+          }
+
+          switch (vs) {
+            case voice::State::kGenerating:
+              ImGui::TextColored(ImVec4(1.f, 0.85f, 0.4f, 1.f),
+                                 "generating...");
+              break;
+            case voice::State::kError:
+              ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 140, 120, 255));
+              ImGui::TextWrapped("%s", cloner.errorText().c_str());
+              ImGui::PopStyleColor();
+              break;
+            default:
+              break;
+          }
+          if (cloner.lastAudioSeconds() > 0.0) {
+            // The ratio is what decides whether a model is usable live, so it
+            // is shown rather than left to be computed by hand.
+            const double gen = cloner.lastGenerateSeconds();
+            const double dur = cloner.lastAudioSeconds();
+            ImGui::TextDisabled("%.2f s audio in %.2f s  (RTF %.2f)", dur, gen,
+                                gen / std::max(dur, 1e-6));
+          }
+        }
+        ImGui::EndChild();
       }
       ImGui::EndChild();
 
@@ -1034,7 +1516,13 @@ int main(int argc, char** argv) {
     }
   }
 
-  // Stop capture before tearing down the UI so no callback outlives its state.
+  // Stop consumers before producers, then producers before the UI, so nothing
+  // outlives the state it reads. The transcriber holds a reference to the
+  // sample rate and buffers we are about to drop; the audio callback holds the
+  // rings both of them read.
+  stop_asr();
+  asr.reset();
+  cloner.stopPlayback();
   audio.stop();
   kinect.close();
 
