@@ -20,6 +20,10 @@
 
 #include "metal_context.h"
 #include "mirror_scene.h"
+#include "fit_target.h"
+#if MIRROR_HAVE_KINECT
+#include "kinect_target.h"
+#endif
 #include "root_scene.h"
 #include "fullscreen_present.h"
 
@@ -314,6 +318,47 @@ static int fieldshot(const char* path, int grid, float az, float el) {
 }
 
 // Benchmark a field with/without culling+LOD. Usage: --fieldbench [grid] [frames]
+
+// Load an image as h*w*3 floats in [0,1] for fitting. NSImage handles whatever
+// the user drops in (png/jpeg/heic/tiff), and the explicit bitmap context
+// normalises colour space and alpha so the fit target does not silently depend
+// on the file's encoding.
+// Fit loop settings, shared between the UI and the frame loop.
+int   g_fit_steps_per_frame = 1;
+float g_fit_lr = 3e-3f;
+int   g_fit_downscale = 2;      // fit grid = display size / this
+bool  g_fit_live = false;       // retarget from the camera every frame
+#if MIRROR_HAVE_KINECT
+mirror::KinectFitTarget g_kinect;
+#endif
+
+static bool LoadImageRGB(const char* path, int w, int h,
+                         std::vector<float>& out, std::string& err) {
+    @autoreleasepool {
+        NSString* p = [NSString stringWithUTF8String:path];
+        NSImage* img = [[NSImage alloc] initWithContentsOfFile:p];
+        if (!img) { err = std::string("could not open ") + path; return false; }
+        CGImageRef cg = [img CGImageForProposedRect:nil context:nil hints:nil];
+        if (!cg) { err = "could not decode image"; return false; }
+
+        std::vector<uint8_t> rgba(size_t(w) * h * 4, 0);
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        CGContextRef ctx = CGBitmapContextCreate(
+            rgba.data(), w, h, 8, size_t(w) * 4, cs,
+            kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+        CGColorSpaceRelease(cs);
+        if (!ctx) { err = "could not create bitmap context"; return false; }
+        CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), cg);
+        CGContextRelease(ctx);
+
+        out.resize(size_t(w) * h * 3);
+        for (size_t i = 0; i < size_t(w) * h; ++i) {
+            for (int c = 0; c < 3; ++c) out[i * 3 + c] = rgba[i * 4 + c] / 255.0f;
+        }
+        return true;
+    }
+}
+
 static int fieldbench(int grid, int frames) {
     MetalContext ctx;
     if (!ctx.device()) return 1;
@@ -468,6 +513,26 @@ int main(int argc, char** argv) {
             if (scene == (int)Scene::Mirror && mirror.valid()) {
                 mirror.ensureSize(fbw / std::max(1, downscale), fbh / std::max(1, downscale));
                 mirror.advance(dt);
+                // Training runs here, not inside render(): one place, once per
+                // frame, so the cost is attributable and the displayed frame is
+                // always the post-step state.
+                if (mirror.pond().fitting()) {
+#if MIRROR_HAVE_KINECT
+                    // Live feed: swap the target, keeping weights and Adam
+                    // state. beginFit() here would reset the optimiser every
+                    // frame and the fit would never build enough momentum to
+                    // follow motion (measured 677x worse tracking error).
+                    if (g_fit_live && g_kinect.isOpen()) {
+                        static std::vector<float> live_rgb;
+                        const int fw = std::max(8, mirror.lowW() / g_fit_downscale);
+                        const int fh = std::max(8, mirror.lowH() / g_fit_downscale);
+                        if (g_kinect.poll(fw, fh, live_rgb)) {
+                            mirror.pond().updateFitTarget(live_rgb, fh, fw);
+                        }
+                    }
+#endif
+                    mirror.fitSteps(g_fit_steps_per_frame, g_fit_lr);
+                }
                 sceneTex = mirror.render();
             } else if (scene == (int)Scene::Roots && roots.valid()) {
                 // The roots pass is overdraw-bound (per-fragment ray-capsule
@@ -520,6 +585,165 @@ int main(int argc, char** argv) {
                     ImGui::SameLine(); ImGui::SetNextItemWidth(120);
                     ImGui::SliderFloat("radius", &P.core_radius, 0.02f, 0.5f);
                 }
+                ImGui::Separator();
+                // --- live fitting -----------------------------------------
+                {
+                    static char fit_path[512] =
+                        "/Users/erichan/Documents/Development/neuromirror/"
+                        "emotion/_track_frames/f0016.png";
+                    int&   fit_res = g_fit_downscale;
+                    int&   fit_steps = g_fit_steps_per_frame;
+                    float& fit_lr = g_fit_lr;
+                    static std::string fit_err;
+
+                    ImGui::Text("FIT  %s", mirror.pond().fitted()
+                                    ? (mirror.pond().fitting() ? "training" : "held")
+                                    : "not fitted");
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("| %d steps | loss %.5f",
+                                        mirror.pond().fitSteps(), mirror.lastLoss());
+
+                    ImGui::PushItemWidth(-1);
+                    ImGui::InputText("##fitpath", fit_path, sizeof(fit_path));
+                    ImGui::PopItemWidth();
+
+#if MIRROR_HAVE_KINECT
+                    {
+                        ImGui::Separator();
+                        const bool open = g_kinect.isOpen();
+                        ImGui::Text("LIVE");
+                        ImGui::SameLine();
+                        if (open) {
+                            ImGui::TextColored(ImVec4(0.6f, 1.f, 0.7f, 1.f), "%s",
+                                               g_kinect.deviceInfo().c_str());
+                        } else {
+                            ImGui::TextDisabled("sensor closed");
+                        }
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("| %llu frames",
+                                            (unsigned long long)g_kinect.frames());
+
+                        if (ImGui::Button(open ? "close sensor" : "open sensor")) {
+                            if (open) {
+                                g_fit_live = false;
+                                g_kinect.close();
+                            } else {
+                                std::string kerr;
+                                if (!g_kinect.open(kerr)) fit_err = kerr;
+                                else fit_err.clear();
+                            }
+                        }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "Only one process can hold the sensor -- close\n"
+                                "kinect_v2_demo first, or opening fails with\n"
+                                "LIBUSB_ERROR_NO_DEVICE.");
+                        }
+                        ImGui::SameLine();
+                        ImGui::BeginDisabled(!open || !mirror.pond().fitted());
+                        if (ImGui::Checkbox("track live feed", &g_fit_live)) {
+                            if (g_fit_live) mirror.pond().beginFit(
+                                std::vector<float>(size_t(std::max(8, mirror.lowW() / fit_res)) *
+                                                   std::max(8, mirror.lowH() / fit_res) * 3, 0.f),
+                                std::max(8, mirror.lowH() / fit_res),
+                                std::max(8, mirror.lowW() / fit_res), P);
+                        }
+                        ImGui::EndDisabled();
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "Retarget from the camera every frame. The fit\n"
+                                "never finishes -- it tracks, running a few\n"
+                                "hundred ms behind whoever is in front of the\n"
+                                "sensor. That lag is the effect.");
+                        }
+                        if (open) {
+                            bool mir = g_kinect.mirrored();
+                            if (ImGui::Checkbox("mirror image", &mir)) g_kinect.setMirrored(mir);
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "A mirror should put your left hand on your\n"
+                                    "left. The sensor does not.");
+                            }
+                        }
+                        ImGui::Separator();
+                    }
+#endif
+                    ImGui::PushItemWidth(110);
+                    ImGui::SliderInt("fit downscale", &fit_res, 1, 8);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "Fit resolution as a divisor of the display size.\n"
+                            "A step costs roughly 3x a render over the same\n"
+                            "points, so fitting at display resolution cannot\n"
+                            "share a frame with drawing. 2 (quarter area) is\n"
+                            "the usual choice; the network is continuous, so\n"
+                            "the result still renders at full size.");
+                    }
+                    ImGui::SameLine();
+                    ImGui::SliderInt("steps/frame", &fit_steps, 1, 8);
+                    ImGui::SameLine();
+                    ImGui::SliderFloat("lr", &fit_lr, 1e-4f, 2e-2f, "%.4f",
+                                       ImGuiSliderFlags_Logarithmic);
+                    ImGui::PopItemWidth();
+
+                    if (ImGui::Button(mirror.pond().fitting() ? "stop" : "fit")) {
+                        if (mirror.pond().fitting()) {
+                            mirror.pond().stopFit();
+                        } else {
+                            const int fw = std::max(8, mirror.lowW() / fit_res);
+                            const int fh = std::max(8, mirror.lowH() / fit_res);
+                            std::vector<float> rgb;
+                            fit_err.clear();
+                            if (LoadImageRGB(fit_path, fw, fh, rgb, fit_err)) {
+                                mirror.pond().beginFit(rgb, fh, fw, P);
+                            }
+                        }
+                    }
+                    ImGui::SameLine();
+                    ImGui::BeginDisabled(!mirror.pond().fitted());
+                    if (ImGui::Button("clear fit")) mirror.pond().clearFit();
+                    ImGui::EndDisabled();
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(clear returns to the generated field)");
+
+                    if (!fit_err.empty()) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 140, 120, 255));
+                        ImGui::TextWrapped("%s", fit_err.c_str());
+                        ImGui::PopStyleColor();
+                    }
+                    if (mirror.pond().fitted()) {
+                        ImGui::TextDisabled(
+                            "weights are learned: detail / contrast / tilt no "
+                            "longer apply");
+                    }
+                }
+
+                ImGui::Separator();
+                // --- hybrid sine/tanh -------------------------------------
+                ImGui::SliderInt("sine layers (0 = tanh only)", &P.sine_layers,
+                                 0, 5);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "SIREN sine activations on the leading hidden layers,\n"
+                        "tanh behind them. One layer is enough: measured on a\n"
+                        "face fit, 1 sine layer scores 0.00250 against 0.00273\n"
+                        "for all-sine and 0.00562 for all-tanh.\n\n"
+                        "Changing this rebuilds the weights (sine layers are\n"
+                        "SIREN-initialised) and recompiles the kernel.");
+                }
+                ImGui::BeginDisabled(P.sine_layers == 0);
+                ImGui::SliderFloat("sine w0 (composition)", &P.sine_w0, 1.0f, 60.0f,
+                                   "%.1f", ImGuiSliderFlags_Logarithmic);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "How many regions the field breaks into. Low (2-10)\n"
+                        "gives large open areas with detail only at the\n"
+                        "boundaries; past ~40 the frame is uniform texture with\n"
+                        "no background left.\n\n"
+                        "Pairs with 'detail' below, which sets how hard those\n"
+                        "boundaries are without changing the layout.");
+                }
+                ImGui::EndDisabled();
                 ImGui::Separator();
                 // weight shaping
                 ImGui::SliderFloat("detail (w hidden)", &P.detail, 0.5f, 10.0f);

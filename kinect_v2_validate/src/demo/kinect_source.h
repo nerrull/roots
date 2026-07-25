@@ -110,8 +110,16 @@ class KinectSource {
   // If the requested reset policy fails to open the device, the other one is
   // tried once before giving up; usedUsbReset() reports what actually happened.
   //
+  // `want_depth = false` starts the colour stream only. This is not the same as
+  // pausing depth polling: the depth pipeline decodes on the GPU whether or not
+  // anyone reads the result, so a consumer that only wants colour is paying for
+  // depth processing it discards -- measured at ~4 ms/frame of GPU contention
+  // against another MLX workload on an M4. Leave it true unless depth is
+  // genuinely unused; depthIntrinsics() and pollDepth() are inert without it.
+  //
   // On failure returns false and fills `err`.
-  bool open(bool use_opengl, UsbReset reset, std::string& err);
+  bool open(bool use_opengl, UsbReset reset, std::string& err,
+            bool want_depth = true);
   void close();
   bool isOpen() const { return dev_ != nullptr; }
 
@@ -154,7 +162,8 @@ class KinectSource {
                   std::atomic<float>& hz, std::atomic<bool>& paused,
                   double& next_due);
 
-  bool openOnce(bool use_opengl, bool with_reset, std::string& err);
+  bool openOnce(bool use_opengl, bool with_reset, std::string& err,
+                bool want_depth);
 
   libfreenect2::Freenect2 fn2_;
   libfreenect2::Freenect2Device* dev_ = nullptr;

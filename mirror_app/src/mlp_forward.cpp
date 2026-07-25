@@ -23,6 +23,12 @@ inline float fused_apply_act(float v, uint act) {
         case 0: return max(v, 0.0f);        // relu
         case 1: return precise::tanh(v);    // tanh
         case 2: return 1.0f / (1.0f + precise::exp(-v)); // sigmoid
+        // SIREN (Sitzmann 2020): periodic activation. Reaches high frequencies
+        // from raw coordinates, so it needs no Fourier input encoding -- and
+        // therefore leaves none of that encoding's axis-aligned grid in the
+        // image. The frequency scale w0 is folded into the weights by the
+        // caller (w0*W is just a scaled W), so nothing extra is passed in.
+        case 4: return precise::sin(v);     // sine
         default: return v;                  // identity / none
     }
 }
@@ -80,7 +86,8 @@ const char* kGemmOut = R"MSL(
     for (uint layer = 0; layer < NUM_LAYERS; ++layer) {
         uint K  = (layer == 0)              ? IN_DIM_PAD  : HIDDEN;
         uint Nn = (layer == NUM_LAYERS - 1) ? OUT_DIM_PAD : HIDDEN;
-        uint act = (layer == NUM_LAYERS - 1) ? OUT_ACT : ACT;
+        uint act = (layer == NUM_LAYERS - 1) ? OUT_ACT
+                 : (layer < SPLIT ? ACT_FIRST : ACT);
 
         // Stream this layer's weights (K x Nn, row-major) into wbuf.
         for (uint idx = tid; idx < K * Nn; idx += THREADS) {
@@ -173,6 +180,8 @@ std::vector<TArg> base_template(const MLPConfig& cfg) {
         {"OUT_DIM_PAD", cfg.out_dim_pad()},
         {"OUT_DIM", cfg.out_dim},
         {"ACT", cfg.act_code()},
+        {"ACT_FIRST", cfg.act_first_code()},
+        {"SPLIT", cfg.split},
         {"OUT_ACT", cfg.out_act_code()},
         {"TILE_ROWS", kTileRows},
         {"SIMDGROUPS", kSimdGroups},
@@ -200,6 +209,17 @@ int MLPConfig::total_weights() const {
 
 mx::array fused_mlp_forward(mx::array coords, mx::array weights, const MLPConfig& cfg) {
     if (kTileRows % 16 != 0) throw std::runtime_error("TILE_ROWS must be a multiple of 16");
+    // Checked here rather than left to Metal: the failure is otherwise a
+    // pipeline-load exception from deep inside MLX, at the first frame, with no
+    // hint that hidden_dim is the knob at fault.
+    if (fused_mlp_threadgroup_bytes(cfg.hidden_dim) > kMaxThreadgroupBytes) {
+        throw std::runtime_error(
+            "fused MLP: hidden_dim=" + std::to_string(cfg.hidden_dim) +
+            " needs " + std::to_string(fused_mlp_threadgroup_bytes(cfg.hidden_dim)) +
+            " bytes of threadgroup memory, over the " +
+            std::to_string(kMaxThreadgroupBytes) +
+            " byte limit (max hidden_dim is 80 with this kernel)");
+    }
     if (coords.ndim() != 2) throw std::runtime_error("coords must be 2D");
     const int n = coords.shape(0);
     const int in_cols = coords.shape(1);

@@ -28,6 +28,15 @@ public:
 
     void reseed() { pond_.reseed(); }
 
+    // --- live fitting -------------------------------------------------------
+    // Exposed straight through: the scene owns the Pond, and fitting is a
+    // property of the network rather than of the render target.
+    mirror::Pond& pond() { return pond_; }
+    // Runs `steps` optimiser steps. Returns the last loss, or -1 if not
+    // fitting. Called once per frame from the app loop, before render().
+    float fitSteps(int steps, float lr);
+    float lastLoss() const { return last_loss_; }
+
     bool valid() const { return tex_ != nil; }
     int  lowW() const { return lw_; }
     int  lowH() const { return lh_; }
@@ -37,6 +46,7 @@ public:
 
 private:
     void makeTexture();
+    float last_loss_ = -1.f;
 
     const MetalContext& ctx_;
     mirror::Pond pond_;

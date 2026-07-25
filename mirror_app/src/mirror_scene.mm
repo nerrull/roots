@@ -38,6 +38,12 @@ void MirrorScene::advance(double dt) {
         params_.transition = std::min(1.0f, std::max(0.0f, params_.transition + (float)dt * params_.trans_rate));
 }
 
+float MirrorScene::fitSteps(int steps, float lr) {
+    if (!pond_.fitting()) return -1.f;
+    for (int i = 0; i < steps; ++i) last_loss_ = pond_.fitStep(lr, params_);
+    return last_loss_;
+}
+
 id<MTLTexture> MirrorScene::render() {
     auto img = pond_.render(lh_, lw_, t_, params_);   // (lh, lw, 3) fp32 [0,1]
     auto rgb16 = mx::astype(img, mx::float16);

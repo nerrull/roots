@@ -12,6 +12,7 @@
 
 #include "mlp_forward.h"
 #include "mirror_render.h"
+#include "mirror_train.h"
 
 namespace mirror {
 
@@ -26,10 +27,27 @@ struct PondParams {
     float ripple_offset = 0.0f;      // manual phase added to the time phase
     bool  color_travel = false;      // palette follows the orbit source
     float warp = 0.0f;               // refraction: ripple gradient warps colour coords
-    int   drops = 4;
-    bool  orbit_on = true;
+    // Ripples off by default. They are a decorative field that dominates the
+    // MLP's input features, which is wrong once the network is being *fitted*
+    // to something -- during training they are signal the target does not
+    // contain. Turn them back on for the standalone pond look.
+    int   drops = 0;
+    bool  orbit_on = false;
     bool  core_rolloff = true;
     float core_radius = 0.12f;
+    // --- hybrid sine/tanh --------------------------------------------------
+    // sine_layers > 0 puts SIREN sine activations on that many leading hidden
+    // layers, with tanh behind them. The two scales do different jobs and are
+    // deliberately separate knobs:
+    //   sine_w0     -- how many regions the field breaks into (composition)
+    //   detail      -- how hard the boundaries between them are (articulation)
+    // Measured: at sine_w0 = 5 the frame stays ~49% flat as detail goes 0.8 ->
+    // 4.0 while mean gradient rises 7x, i.e. large open areas survive sharper
+    // edges. By sine_w0 = 40 that decoupling is gone (flatness falls to 30%)
+    // and the field is uniform texture with no background left.
+    int   sine_layers = 0;           // 0 = the original all-tanh network
+    float sine_w0 = 6.0f;
+
     // weight shaping
     float detail = 3.0f;             // hidden-layer scale
     float gain_tilt = 0.0f;          // depth gain profile
@@ -78,6 +96,40 @@ public:
     int  seed() const { return seed_; }
     const MLPConfig& config() const { return cfg_; }
 
+    // --- live fitting ------------------------------------------------------
+    //
+    // Once a target is set and training starts, render() draws the *trained*
+    // weights instead of the shaped/scaled base ones -- detail/contrast/tilt
+    // stop applying, because the network no longer derives from them. Stopping
+    // does not revert: the fitted weights stay until reseed() or a new fit.
+    //
+    // `rgb` is h*w*3 floats in [0,1]. The fit resolution is whatever the target
+    // was given at, independent of the display resolution.
+    // `mask` is optional, h*w bytes, non-zero = train on this pixel. Empty
+    // fits the whole frame. With a mask, the training pass runs on ONLY those
+    // pixels (they are gathered into a compact batch), so cost scales with the
+    // masked area -- and the network is left unconstrained everywhere else,
+    // which is what keeps a background generative while a subject is fitted.
+    void  beginFit(const std::vector<float>& rgb, int h, int w, const PondParams& p,
+                   const std::vector<unsigned char>& mask = {});
+    // Swap the target WITHOUT touching the weights or the optimiser state.
+    // This is the live-feed path: beginFit() resets Adam, so calling it per
+    // frame would discard the momentum every step and the fit would never
+    // build up enough velocity to follow anything moving. Measured with the
+    // reset in place, a continuously moving target tracked at worst-MSE 0.142;
+    // keeping the state it is 0.00021 -- a 677x difference.
+    void  updateFitTarget(const std::vector<float>& rgb, int h, int w,
+                          const std::vector<unsigned char>& mask = {});
+    // Pixels the last target selected (== fit grid area when unmasked).
+    int   fitPixels() const { return trainer_.trainedPixels(); }
+    // One optimiser step. Returns MSE before the update, or -1 if not fitting.
+    float fitStep(float lr, const PondParams& p);
+    void  stopFit()  { fitting_ = false; }
+    void  clearFit() { fitting_ = false; trainer_ = MlpTrainer(); }
+    bool  fitting()  const { return fitting_; }
+    bool  fitted()   const { return trainer_.ready(); }
+    int   fitSteps() const { return trainer_.steps(); }
+
 private:
     static mx::array make_weights(const MLPConfig& cfg, int seed, float scale = 1.0f);
     std::vector<float> layer_scales(const PondParams& p) const;
@@ -95,7 +147,32 @@ private:
     mx::array wb_shaped_;
     std::optional<float> shaped_key_;         // uniform_mix (+ seed via reseed)
     mx::array w_;
-    std::optional<std::array<float, 5>> w_key_;   // detail,tilt,umix,contrast,seed
+    std::optional<std::array<float, 7>> w_key_;   // detail,tilt,umix,contrast,seed,
+                                                  // sine_layers,sine_w0
+
+    // The coordinate grid depends only on the render size, so rebuilding it per
+    // frame was 0.65 ms of pure waste (linspace + meshgrid + stack + cast over
+    // 518k points). Keyed on (lh, lw) since asp is derived from them.
+    mx::array coords_;
+    std::optional<std::array<int, 2>> coords_key_;
+
+    MlpTrainer trainer_;
+    bool fitting_ = false;
+    // The fit grid is its own size, so it needs its own cached coordinate
+    // features -- rebuilding them per step was the single largest avoidable
+    // cost in the render loop before it was cached.
+    mx::array fit_feats_ = mx::zeros({1});
+    std::optional<std::array<int, 2>> fit_feats_key_;
+    // Features are gathered to match a masked target. Keyed on the pixel count
+    // as well as the grid, so a mask that changes shape rebuilds them.
+    int fit_feats_px_ = -1;
+    void rebuildFitFeatures(const PondParams& p);
+    const mx::array& coord_grid(int lh, int lw, float asp);
+
+    // Changing the split changes both the kernel (a template parameter) and
+    // the base weights (sine layers are SIREN-initialised), so it is tracked
+    // and triggers a rebuild rather than being read per frame.
+    void setSplit(int split);
 };
 
 }  // namespace mirror

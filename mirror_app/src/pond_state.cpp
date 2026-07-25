@@ -22,20 +22,48 @@ std::vector<int> weight_bounds(const MLPConfig& cfg) {
 }  // namespace
 
 Pond::Pond(int seed)
-    : cfg_(MLPConfig{ENRICHED_DIM, 64, 3, 6, Act::Tanh, Act::Sigmoid}),
+    : cfg_(MLPConfig{ENRICHED_DIM, 32, 3, 6, Act::Tanh, Act::Sigmoid}),
       seed_(seed),
       wb_(make_weights(cfg_, seed)),
       wb_shaped_(mx::zeros({1})),
-      w_(mx::zeros({1})) {}
+      w_(mx::zeros({1})),
+      coords_(mx::zeros({1})) {}
+
+// The grid is a pure function of the render size, so it is built once and
+// reused. Evaluated eagerly on build: leaving it lazy would splice the whole
+// linspace/meshgrid graph into the first frame that uses it every time.
+const mx::array& Pond::coord_grid(int lh, int lw, float asp) {
+    const std::array<int, 2> key{lh, lw};
+    if (!coords_key_ || *coords_key_ != key) {
+        coords_ = make_coord_grid(lh, lw, -asp, asp, -1.f, 1.f);
+        mx::eval(coords_);
+        coords_key_ = key;
+    }
+    return coords_;
+}
 
 mx::array Pond::make_weights(const MLPConfig& cfg, int seed, float scale) {
     // Same MLX RNG as helpers.make_weights → bit-identical base weights.
     mx::random::seed(static_cast<uint64_t>(seed));
     std::vector<mx::array> parts;
-    for (auto& kn : cfg.layer_dims()) {
-        const int k = kn.first, n = kn.second;
-        const float std_ = scale / std::sqrt(static_cast<float>(k));
-        auto w = mx::multiply(mx::random::normal({k * n}, mx::float32), S(std_));
+    const auto dims = cfg.layer_dims();
+    for (size_t i = 0; i < dims.size(); ++i) {
+        const int k = dims[i].first, n = dims[i].second;
+        mx::array w = mx::zeros({1});
+        if (static_cast<int>(i) < cfg.split) {
+            // SIREN init for sine layers: uniform(-1/k, 1/k). The frequency
+            // itself arrives later as a layer scale, so the base stays at unit
+            // frequency here. Gaussian would work too -- what matters is the
+            // scale -- but the uniform bound is what the paper's variance
+            // analysis is derived for, and it is what keeps deep stacks stable.
+            w = mx::multiply(
+                mx::subtract(mx::multiply(S(2.f), mx::random::uniform({k * n}, mx::float32)),
+                             S(1.f)),
+                S(1.0f / static_cast<float>(k)));
+        } else {
+            const float std_ = scale / std::sqrt(static_cast<float>(k));
+            w = mx::multiply(mx::random::normal({k * n}, mx::float32), S(std_));
+        }
         parts.push_back(mx::astype(w, mx::float16));
     }
     return mx::concatenate(parts);
@@ -45,8 +73,16 @@ std::vector<float> Pond::layer_scales(const PondParams& p) const {
     const int n_hidden = cfg_.num_layers - 1;
     std::vector<float> s;
     for (int i = 0; i < n_hidden; ++i) {
-        float f = (n_hidden > 1) ? (static_cast<float>(i) / (n_hidden - 1) - 0.5f) : 0.0f;
-        s.push_back(p.detail * std::exp(p.gain_tilt * f));
+        if (i < p.sine_layers) {
+            // A sine layer's scale IS its frequency: sin(w*Wx) and sin((w*W)x)
+            // are the same thing, so folding it into the weight is exact.
+            // gain_tilt deliberately does not apply -- it shapes the tanh
+            // stack's depth profile, and tilting a frequency is meaningless.
+            s.push_back(p.sine_w0);
+        } else {
+            float f = (n_hidden > 1) ? (static_cast<float>(i) / (n_hidden - 1) - 0.5f) : 0.0f;
+            s.push_back(p.detail * std::exp(p.gain_tilt * f));
+        }
     }
     s.push_back(p.contrast);
     return s;
@@ -80,8 +116,9 @@ const mx::array& Pond::shaped_base(const PondParams& p) {
 }
 
 const mx::array& Pond::weights(const PondParams& p) {
-    std::array<float, 5> key{p.detail, p.gain_tilt, p.uniform_mix, p.contrast,
-                             static_cast<float>(seed_)};
+    std::array<float, 7> key{p.detail, p.gain_tilt, p.uniform_mix, p.contrast,
+                             static_cast<float>(seed_),
+                             static_cast<float>(cfg_.split), p.sine_w0};
     if (w_key_ && *w_key_ == key) return w_;
     const auto bounds = weight_bounds(cfg_);
     const auto scales = layer_scales(p);
@@ -95,6 +132,7 @@ const mx::array& Pond::weights(const PondParams& p) {
 }
 
 void Pond::reseed() {
+    clearFit();
     seed_ += 1;
     wb_ = make_weights(cfg_, seed_);
     shaped_key_.reset();
@@ -183,10 +221,75 @@ mx::array Pond::apply_transition(const mx::array& img, const mx::array& coords,
     return clip01(mx::multiply(scene, edge));
 }
 
+void Pond::setSplit(int split) {
+    split = std::max(0, std::min(split, cfg_.num_layers - 1));
+    if (split == cfg_.split) return;
+    cfg_.split = split;
+    // Sine layers use a different initialiser, so the base weights are not
+    // reusable across a split change.
+    wb_ = make_weights(cfg_, seed_);
+    shaped_key_.reset();
+    w_key_.reset();
+}
+
+void Pond::beginFit(const std::vector<float>& rgb, int h, int w,
+                    const PondParams& p,
+                    const std::vector<unsigned char>& mask) {
+    setSplit(p.sine_layers);
+    // Start from the current weights so fitting continues from whatever is on
+    // screen, rather than discarding the aesthetic state and beginning at noise.
+    trainer_.reset(cfg_, weights(p));
+    trainer_.setTarget(rgb, h, w, mask);
+    fit_feats_key_.reset();
+    fit_feats_px_ = -1;
+    fitting_ = true;
+}
+
+void Pond::updateFitTarget(const std::vector<float>& rgb, int h, int w,
+                           const std::vector<unsigned char>& mask) {
+    if (!trainer_.ready()) return;
+    const bool resized = (h != trainer_.targetH() || w != trainer_.targetW());
+    trainer_.setTarget(rgb, h, w, mask);
+    if (resized) fit_feats_key_.reset();   // the fit grid moved; features stale
+    fitting_ = true;
+}
+
+void Pond::rebuildFitFeatures(const PondParams& p) {
+    const int h = trainer_.targetH(), w = trainer_.targetW();
+    const float asp = static_cast<float>(w) / static_cast<float>(h);
+    auto c = make_coord_grid(h, w, -asp, asp, -1.f, 1.f);
+    // Ripples are excluded from the fit deliberately: they are a decorative
+    // field the target does not contain, so training against them asks the
+    // network to reproduce them and the subject at once.
+    auto feats = multi_ripple_features(c, {}, p.ring_freq, p.decay,
+                                       p.z_amp * std::sin(p.z),
+                                       p.z_amp * std::cos(p.z), 0.f, 0.f);
+    if (trainer_.masked()) {
+        // Gather the rows the mask selected, so the forward and backward see
+        // only those pixels rather than the whole grid.
+        feats = mx::take(feats, trainer_.indices(), /*axis=*/0);
+    }
+    fit_feats_ = mx::contiguous(feats);
+    mx::eval(fit_feats_);
+    fit_feats_key_ = std::array<int, 2>{h, w};
+    fit_feats_px_ = trainer_.trainedPixels();
+}
+
+float Pond::fitStep(float lr, const PondParams& p) {
+    if (!fitting_ || !trainer_.hasTarget()) return -1.f;
+    const std::array<int, 2> key{trainer_.targetH(), trainer_.targetW()};
+    if (!fit_feats_key_ || *fit_feats_key_ != key ||
+        fit_feats_px_ != trainer_.trainedPixels()) {
+        rebuildFitFeatures(p);
+    }
+    return trainer_.step(fit_feats_, lr);
+}
+
 mx::array Pond::render(int lh, int lw, double t, const PondParams& p) {
+    setSplit(p.sine_layers);
     const int N = lh * lw;
     const float asp = static_cast<float>(lw) / static_cast<float>(lh);
-    auto coords = make_coord_grid(lh, lw, -asp, asp, -1.f, 1.f);
+    const auto& coords = coord_grid(lh, lw, asp);
 
     float offx = 0.f, offy = 0.f;
     if (p.color_travel) {
@@ -199,7 +302,13 @@ mx::array Pond::render(int lh, int lw, double t, const PondParams& p) {
                                        zv, zc, p.warp, p.core_rolloff ? p.core_radius : 0.f,
                                        offx, offy);
 
-    auto img = mx::reshape(fused_mlp_forward(feats, weights(p), cfg_), {lh, lw, 3});
+    // A fitted network is used as-is: its weights were learned, not derived
+    // from detail/contrast, so re-scaling them would undo the fit.
+    const mx::array& w_use = trainer_.ready()
+                                 ? trainer_.weights()
+                                 : weights(p);
+    auto img = mx::reshape(
+        fused_mlp_forward(feats, mx::astype(w_use, mx::float16), cfg_), {lh, lw, 3});
     img = clip01(mx::astype(img, mx::float32));
 
     // greyscale (single channel) → RGB, flat or amplitude-driven per pixel.

@@ -122,10 +122,11 @@ StreamStats LatestFrameListener::stats(libfreenect2::Frame::Type type) const {
 
 KinectSource::~KinectSource() { close(); }
 
-bool KinectSource::open(bool use_opengl, UsbReset reset, std::string& err) {
+bool KinectSource::open(bool use_opengl, UsbReset reset, std::string& err,
+                        bool want_depth) {
   const bool want_reset = (reset == UsbReset::kReset);
 
-  if (openOnce(use_opengl, want_reset, err)) {
+  if (openOnce(use_opengl, want_reset, err, want_depth)) {
     used_usb_reset_ = want_reset;
     return true;
   }
@@ -133,7 +134,7 @@ bool KinectSource::open(bool use_opengl, UsbReset reset, std::string& err) {
   // Whichever policy was asked for, the other is worth one try: a reset can
   // fail on a sensor that a no-reset open still drives fine, and vice versa.
   std::string other_err;
-  if (openOnce(use_opengl, !want_reset, other_err)) {
+  if (openOnce(use_opengl, !want_reset, other_err, want_depth)) {
     used_usb_reset_ = !want_reset;
     return true;
   }
@@ -145,7 +146,7 @@ bool KinectSource::open(bool use_opengl, UsbReset reset, std::string& err) {
 }
 
 bool KinectSource::openOnce(bool use_opengl, bool with_reset,
-                            std::string& err) {
+                            std::string& err, bool want_depth) {
   // Consumed by our local libfreenect2 patch (patches/) inside openDevice().
   ::setenv("FREENECT2_NO_RESET", with_reset ? "0" : "1", /*overwrite=*/1);
 
@@ -177,12 +178,16 @@ bool KinectSource::openOnce(bool use_opengl, bool with_reset,
 
   // We display color + depth only. IR is declined in the listener so the
   // decoder can recycle those buffers instead of us copying them.
-  listener_.setAccepted(libfreenect2::Frame::Color |
-                        libfreenect2::Frame::Depth);
+  listener_.setAccepted(want_depth ? (libfreenect2::Frame::Color |
+                                      libfreenect2::Frame::Depth)
+                                   : libfreenect2::Frame::Color);
   dev_->setColorFrameListener(&listener_);
-  dev_->setIrAndDepthFrameListener(&listener_);
+  if (want_depth) dev_->setIrAndDepthFrameListener(&listener_);
 
-  if (!dev_->start()) {
+  // startStreams rather than start(): declining the depth stream outright is
+  // what actually stops the depth pipeline from decoding, which pausing the
+  // poll does not.
+  if (!dev_->startStreams(/*rgb=*/true, /*depth=*/want_depth)) {
     err = "device start failed";
     dev_->close();
     dev_ = nullptr;
