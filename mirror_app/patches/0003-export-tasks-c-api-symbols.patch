@@ -1,0 +1,49 @@
+diff --git a/mediapipe/tasks/c/vision/core/BUILD b/mediapipe/tasks/c/vision/core/BUILD
+index 1cc8a96..458e514 100644
+--- a/mediapipe/tasks/c/vision/core/BUILD
++++ b/mediapipe/tasks/c/vision/core/BUILD
+@@ -47,6 +47,12 @@ cc_library(
+     name = "image",
+     srcs = ["image.cc"],
+     hdrs = ["image.h"],
++    # LOCAL PATCH (jardins_racine): same reason as the face_landmarker dylib
++    # deps. :image_c_lib carries alwayslink but only re-exports the header --
++    # the objects with MpImageCreateFromUint8Data / MpImageFree live here, and
++    # without alwayslink they are dropped from a shared library that does not
++    # otherwise reference them.
++    alwayslink = 1,
+     deps = IMAGE_DEPS,
+ )
+ 
+diff --git a/mediapipe/tasks/c/vision/face_landmarker/BUILD b/mediapipe/tasks/c/vision/face_landmarker/BUILD
+index 842703a..8f30d2d 100644
+--- a/mediapipe/tasks/c/vision/face_landmarker/BUILD
++++ b/mediapipe/tasks/c/vision/face_landmarker/BUILD
+@@ -151,7 +151,13 @@ cc_binary(
+         "nobuilder",
+         "notap",
+     ],
+-    deps = [":face_landmarker_lib"],
++    # LOCAL PATCH (jardins_racine): :face_landmarker_c_lib, not
++    # :face_landmarker_lib. They are the same sources, but only the _c_lib
++    # variant sets alwayslink = 1. Without it nothing *inside* the shared
++    # library references the C entry points, so the linker drops the object
++    # entirely and the resulting 14 MB dylib exports zero MpFaceLandmarker*
++    # symbols -- every consumer fails to link with undefined symbols.
++    deps = [":face_landmarker_c_lib"],
+ )
+ 
+ # bazel build --config darwin_arm64 -c opt --strip always --define MEDIAPIPE_DISABLE_GPU=1 \
+@@ -168,5 +174,11 @@ cc_binary(
+         "nobuilder",
+         "notap",
+     ],
+-    deps = [":face_landmarker_lib"],
++    # LOCAL PATCH (jardins_racine): :face_landmarker_c_lib, not
++    # :face_landmarker_lib. They are the same sources, but only the _c_lib
++    # variant sets alwayslink = 1. Without it nothing *inside* the shared
++    # library references the C entry points, so the linker drops the object
++    # entirely and the resulting 14 MB dylib exports zero MpFaceLandmarker*
++    # symbols -- every consumer fails to link with undefined symbols.
++    deps = [":face_landmarker_c_lib"],
+ )

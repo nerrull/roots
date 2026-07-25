@@ -1,0 +1,51 @@
+diff --git a/WORKSPACE b/WORKSPACE
+index c353b11..3824334 100644
+--- a/WORKSPACE
++++ b/WORKSPACE
+@@ -492,10 +492,14 @@ new_local_repository(
+ new_local_repository(
+     name = "macos_opencv",
+     build_file = "@//third_party:opencv_macos.BUILD",
+-    # For local MacOS builds, the path should point to an opencv@3 installation.
+-    # If you edit the path here, you will also need to update the corresponding
+-    # prefix in "opencv_macos.BUILD".
+-    path = "/usr/local",  # e.g. /usr/local/Cellar for HomeBrew
++    # LOCAL PATCH (jardins_racine): Apple Silicon Homebrew prefix, opencv@4.
++    #
++    # Upstream points at /usr/local with an opencv@3 install. On arm64 Homebrew
++    # lives at /opt/homebrew, and the plain `opencv` formula is now 5.x, whose
++    # headers sit under include/opencv5 and whose API MediaPipe does not build
++    # against (fatal error: opencv2/core/version.hpp not found).
++    # `brew install opencv@4` plus this path is what works.
++    path = "/opt/homebrew",
+ )
+ 
+ new_local_repository(
+diff --git a/third_party/opencv_macos.BUILD b/third_party/opencv_macos.BUILD
+index 4139f18..e3b3f72 100644
+--- a/third_party/opencv_macos.BUILD
++++ b/third_party/opencv_macos.BUILD
+@@ -35,7 +35,11 @@ exports_files(["LICENSE"])
+ # "include/opencv4/opencv2/**/*.h*" and the include prefix needs to be set to
+ # "include/opencv4".
+ 
+-PREFIX = "opt/opencv@3"
++# LOCAL PATCH (jardins_racine): opencv@4 on Apple Silicon Homebrew. Its headers
++# sit one level deeper than opencv@3's (include/opencv4/opencv2/...), so the
++# hdrs glob and includes prefix below are adjusted to match -- exactly the
++# adjustment the comment block above describes for opencv 4.x.
++PREFIX = "opt/opencv@4"
+ 
+ cc_library(
+     name = "opencv",
+@@ -51,8 +55,8 @@ cc_library(
+             paths.join(PREFIX, "lib/libopencv_videoio.dylib"),
+         ],
+     ),
+-    hdrs = glob([paths.join(PREFIX, "include/opencv2/**/*.h*")]),
+-    includes = [paths.join(PREFIX, "include/")],
++    hdrs = glob([paths.join(PREFIX, "include/opencv4/opencv2/**/*.h*")]),
++    includes = [paths.join(PREFIX, "include/opencv4/")],
+     linkstatic = 1,
+     visibility = ["//visibility:public"],
+ )

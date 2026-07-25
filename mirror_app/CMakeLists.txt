@@ -74,10 +74,74 @@ find_package(MLX CONFIG REQUIRED)
 # by the app and the parity test. Pure C++ (no ObjC).
 add_library(mirror_core STATIC
     src/mlp_forward.cpp
+    src/mlp_backward.cpp
+    src/mirror_train.cpp
+    src/fit_target.cpp
+    src/face_mask.cpp
+    src/face_tracker.cpp
     src/mirror_render.cpp
     src/pond_state.cpp)
 target_include_directories(mirror_core PUBLIC src ${MLX_INCLUDE_DIRS})
 target_link_libraries(mirror_core PUBLIC mlx)
+
+# --- MediaPipe face tracking -------------------------------------------------
+# Uses MediaPipe's OFFICIAL C Tasks API (mediapipe/tasks/c/vision/face_landmarker)
+# built as a shared library, not cpvrlab/libmediapipe: that wrapper pins
+# MediaPipe v0.8.11, which predates the Tasks API entirely (legacy 468-point
+# face_mesh, no blendshapes, no pose matrix) and is GPL-3.0. Upstream's C API
+# gives 478 landmarks + 52 blendshapes + a 4x4 transform under Apache-2.0.
+#
+# Build it once with (from external/mediapipe, needs a JDK on PATH):
+#   bazel build --config darwin_arm64 -c opt --strip always \
+#     --define MEDIAPIPE_DISABLE_GPU=1 --repo_env=HERMETIC_PYTHON_VERSION=3.12 \
+#     //mediapipe/tasks/c/vision/face_landmarker:libface_landmarker.dylib
+set(_mp ${CMAKE_CURRENT_SOURCE_DIR}/external/mediapipe)
+set(_mp_lib ${_mp}/bazel-bin/mediapipe/tasks/c/vision/face_landmarker/libface_landmarker.dylib)
+if(EXISTS ${_mp_lib})
+    # Bazel builds the dylib with install_name "libface_landmarker.dylib" -- a
+    # bare filename, which dyld treats as a literal path and never resolves
+    # against an rpath. Copy it out of bazel-bin (which is a symlink into a
+    # cache anyway) and rewrite the id to @rpath so the usual mechanism works.
+    set(_mp_stage ${CMAKE_CURRENT_BINARY_DIR}/mediapipe_lib)
+    file(MAKE_DIRECTORY ${_mp_stage})
+    execute_process(COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                            ${_mp_lib} ${_mp_stage}/libface_landmarker.dylib)
+    execute_process(COMMAND install_name_tool -id @rpath/libface_landmarker.dylib
+                            ${_mp_stage}/libface_landmarker.dylib
+                    ERROR_QUIET)
+    target_include_directories(mirror_core PUBLIC ${_mp})
+    target_link_libraries(mirror_core PUBLIC ${_mp_stage}/libface_landmarker.dylib)
+    # PUBLIC on a static lib propagates to whatever links mirror_core.
+    target_link_options(mirror_core PUBLIC "-Wl,-rpath,${_mp_stage}")
+    target_compile_definitions(mirror_core PUBLIC MIRROR_HAVE_MEDIAPIPE=1)
+    message(STATUS "mirror_app: MediaPipe face tracking enabled")
+else()
+    target_compile_definitions(mirror_core PUBLIC MIRROR_HAVE_MEDIAPIPE=0)
+    message(STATUS "mirror_app: MediaPipe face tracking disabled "
+                   "(no libface_landmarker.dylib -- see the bazel command above)")
+endif()
+
+# --- Kinect v2 as a live fitting target --------------------------------------
+# Reuses kinect_v2_validate's KinectSource rather than a second copy: it already
+# carries the USB-reset policy and the independent latest-wins listeners that
+# module exists to get right. Optional -- without freenect2 the app builds and
+# runs, just without the camera target.
+set(_kv2 ${CMAKE_CURRENT_SOURCE_DIR}/../kinect_v2_validate)
+list(APPEND CMAKE_PREFIX_PATH ${_kv2}/external/libfreenect2/install)
+find_package(freenect2 QUIET)
+if(freenect2_FOUND AND EXISTS ${_kv2}/src/demo/kinect_source.cpp)
+    target_sources(mirror_core PRIVATE
+        src/kinect_target.cpp
+        ${_kv2}/src/demo/kinect_source.cpp)
+    target_include_directories(mirror_core PUBLIC
+        ${_kv2}/src/demo ${freenect2_INCLUDE_DIRS})
+    target_link_libraries(mirror_core PUBLIC ${freenect2_LIBRARIES})
+    target_compile_definitions(mirror_core PUBLIC MIRROR_HAVE_KINECT=1)
+    message(STATUS "mirror_app: Kinect fit target enabled")
+else()
+    target_compile_definitions(mirror_core PUBLIC MIRROR_HAVE_KINECT=0)
+    message(STATUS "mirror_app: Kinect fit target disabled (no freenect2)")
+endif()
 
 target_link_libraries(mirror_app PRIVATE mirror_core)
 
@@ -101,6 +165,36 @@ target_link_libraries(mlp_parity_test PRIVATE mirror_core)
 add_executable(pond_parity_test tests/pond_parity_test.cpp)
 target_link_libraries(pond_parity_test PRIVATE mirror_core)
 
+# Fused ripple kernel vs. the op-graph reference it replaced. Needs a Metal
+# device but no fixtures, so unlike the two above it runs without a dump step.
+add_executable(ripple_parity_test tests/ripple_parity_test.cpp)
+target_link_libraries(ripple_parity_test PRIVATE mirror_core)
+
 # --- subsystems (wired in as they land) --------------------------------------
 # TODO(tracking): prebuilt libmediapipe .dylib for face_tracker.
 # TODO(roots): link sdfsim (GL-free CPlantBox sim) + MetalRootRenderer sources.
+
+# The fused MLP at hidden widths other than the fixture's 64. hidden_dim is a
+# kernel template parameter, so each width is a different kernel with a
+# different simdgroup decomposition; the fixture test cannot see any of that.
+add_executable(mlp_width_test tests/mlp_width_test.cpp)
+target_link_libraries(mlp_width_test PRIVATE mirror_core)
+
+# The fused backward against an fp32 MLX-op backprop, across widths, depths,
+# hybrid splits, activations and ragged row counts. No fixtures needed.
+add_executable(mlp_backward_test tests/mlp_backward_test.cpp)
+target_link_libraries(mlp_backward_test PRIVATE mirror_core)
+
+# End-to-end fit: loss falls AND the rendered image moves toward the target,
+# including at a resolution the fit never saw.
+add_executable(fit_test tests/fit_test.cpp)
+target_link_libraries(fit_test PRIVATE mirror_core)
+
+# Resampling + fitting a moving target (the camera case), with a synthetic feed
+# so it needs no sensor.
+add_executable(fit_target_test tests/fit_target_test.cpp)
+target_link_libraries(fit_target_test PRIVATE mirror_core)
+
+# Landmark outline -> training mask. Pure geometry; no MediaPipe needed.
+add_executable(face_mask_test tests/face_mask_test.cpp)
+target_link_libraries(face_mask_test PRIVATE mirror_core)

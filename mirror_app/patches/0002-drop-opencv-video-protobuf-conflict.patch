@@ -1,0 +1,24 @@
+diff --git a/third_party/opencv_macos.BUILD b/third_party/opencv_macos.BUILD
+index e3b3f72..96b92f4 100644
+--- a/third_party/opencv_macos.BUILD
++++ b/third_party/opencv_macos.BUILD
+@@ -51,7 +51,18 @@ cc_library(
+             paths.join(PREFIX, "lib/libopencv_highgui.dylib"),
+             paths.join(PREFIX, "lib/libopencv_imgcodecs.dylib"),
+             paths.join(PREFIX, "lib/libopencv_imgproc.dylib"),
+-            paths.join(PREFIX, "lib/libopencv_video.dylib"),
++            # LOCAL PATCH (jardins_racine): libopencv_video is deliberately NOT
++            # linked. It pulls libopencv_dnn, which links Homebrew's
++            # libprotobuf.35, while MediaPipe statically links its own
++            # protobuf. Loading both makes protobuf's generated descriptor
++            # tables get parsed by the wrong runtime during dyld's static
++            # initialisers, and any binary linking the resulting shared library
++            # segfaults before main() -- inside
++            # DescriptorPool::InternalAddGeneratedFile.
++            #
++            # MediaPipe's Image/ImageFrame path (which is all the Tasks C API
++            # needs) does not use the video module, so dropping it removes the
++            # conflict at the source rather than papering over it.
+             paths.join(PREFIX, "lib/libopencv_videoio.dylib"),
+         ],
+     ),
