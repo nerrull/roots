@@ -33,12 +33,26 @@ mx::array make_coord_grid(int h, int w,
 // Full port of features.multi_ripple_features: sin/cos ripple accumulation,
 // z/z_cos latents, domain-warp refraction, and core-radius damping.
 // coords: (N,2) → (N,8) fp16.
+//
+// Runs as a single fused Metal kernel. The op-graph formulation cost 9.9 ms at
+// 960x540 -- 38% of the frame -- because ~40 FLOPs/pixel became ~75 elementwise
+// kernels, each round-tripping the whole array through memory. Fused: 0.60 ms.
 mx::array multi_ripple_features(const mx::array& coords,
                                 const std::vector<RippleSource>& sources,
                                 float ring_freq = 3.f, float decay = 1.6f,
                                 float z = 0.f, float z_cos = 0.f,
                                 float warp = 0.f, float core_radius = 0.f,
                                 float x_offset = 0.f, float y_offset = 0.f);
+
+// The original op-graph implementation, kept as the readable reference the
+// kernel is checked against (see tests/ripple_parity_test.cpp) and as the path
+// taken when there are no sources at all. Not for per-frame use.
+mx::array multi_ripple_features_ops(const mx::array& coords,
+                                    const std::vector<RippleSource>& sources,
+                                    float ring_freq = 3.f, float decay = 1.6f,
+                                    float z = 0.f, float z_cos = 0.f,
+                                    float warp = 0.f, float core_radius = 0.f,
+                                    float x_offset = 0.f, float y_offset = 0.f);
 
 // Render a low-res RGBA fp16 image (lh, lw, 4): evaluate the MLP over the grid's
 // multi-ripple features and append an opaque alpha channel. out_dim must be 3.
