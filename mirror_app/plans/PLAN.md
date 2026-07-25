@@ -390,3 +390,17 @@ failure mode is a build that reports success and produces a useless library.
 CMake stages the dylib out of `bazel-bin` and rewrites its `install_name` to
 `@rpath/...` — bazel emits a bare filename, which dyld treats as a literal path
 and never resolves against an rpath.
+
+### Face mesh fitting — paused
+
+Fitting a 3D morphable face model to the MediaPipe landmarks (for the training
+mask and the root scene's mask placement) is **paused waiting on NVIDIA's
+`face_model2.nvf`**, which is EULA-gated and lives on another machine.
+
+`tools/export_ict_basis.py` works and produces `external/ict_basis.bin`
+(7813 verts, 100 identity + 53 ARKit expression modes, 14.6 MB) from
+ICT-FaceKit, which Maxine's model is a modified version of -- so the fitter can
+be written against ICT and re-pointed later.
+
+Full handoff, including the order to resume in and the gotchas already found:
+[`documentation/notes/face_mesh_fitting_resume.md`](../../documentation/notes/face_mesh_fitting_resume.md)
