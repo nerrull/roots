@@ -1,9 +1,38 @@
 # Neuromirror ⇄ Roots — unified Metal C++ app
 
-> Working plan, versioned with the code. The transition effect is **not yet
-> defined** — current focus is (1) scaffolding, (2) the C++ neural-mirror
-> implementation, (3) porting the mesh/root scene to Metal. The transition
-> state machine / effect and Wwise are deferred until the above lands.
+> Working plan, versioned with the code. **Status as of 2026-07-24:** the
+> scaffold, the C++ neural mirror, the full GLSL→Metal root/face port, and live
+> CPlantBox growth are all done and validated; a cached-system LOD/culling path is
+> in. Remaining: **libmediapipe face tracking** for the mirror, and the (still
+> undefined) **transition** between the two scenes. Wwise + ICT-FaceKit fitting
+> stay deferred.
+
+## Status snapshot
+
+Done (validated, on `jardins_racine` main):
+
+- **Scaffold** — Metal window shell (GLFW + CAMetalLayer + ImGui-metal +
+  `MetalContext`), superbuild wiring.
+- **Neural mirror** — MLX C++ fused-MLP + features + upsample, bit-exact vs the
+  Python reference; full `demo_panel` parity (weight shaping, ripples, z, colour,
+  hydro-dip transition); performance-matched to Python; `MirrorScene` → texture.
+- **Root render (Metal)** — `MetalRootRenderer`: capsule/blade sphere-tracer +
+  Phong/PBR, wisps, pulses (`root_geom.metal`); FXAA-lite + volumetric fog +
+  overlays + wisp glow (`root_fog.metal`); the face mask **mid-geometry pass**
+  (`root_face.metal`, depth-composited). Invert/XOR falls back to flat white (no
+  Metal fragment logic ops).
+- **Live CPlantBox** — `RootSim`: GL-free, incremental port of the "mask relay"
+  growth (per-frame state machine), reusing `MaskCavities`/`RootAttractors` +
+  CPlantBox behind a pimpl. `RootScene` steps it and drives the face pass.
+- **Scaling** — cached static instances (`addInstance`, baked, uploaded once) with
+  **frustum culling + distance LOD + sub-pixel capsule cull**; auto render-scale of
+  the roots' internal resolution. Profiled: the pass is overdraw-bound (lighting is
+  ~free); 256-system field 19.1→10.1 ms with cull+LOD.
+
+Not yet built: **libmediapipe face tracking** (needs the one-time Bazel build) and
+the **transition**. Headless coverage: `--selftest`, `--roottest`, `--rootshot`,
+`--growshot`, `--fieldshot`, `--rootbench`, `--fieldbench`, `mlp_parity_test`,
+`pond_parity_test`.
 
 ## Context
 
@@ -60,22 +89,37 @@ effect, not an alpha fade.
 | Face tracking | MediaPipe `face_landmarker.task` | via **libmediapipe** `.dylib` |
 | ICT-FaceKit fitting | `neuromirror/emotion/ict_*` | **Deferred** |
 
-## Current work breakdown (active scope)
+## Work breakdown
 
-1. **Scaffold** `mirror_app/`: CMake, `MetalContext`, minimal GLFW+CAMetalLayer+
-   ImGui-metal window shell (adapted from `reactor_cpp/main.mm`). Runnable checkpoint.
-2. **C++ neural mirror**: `mlp_forward` (MLX C++ port reusing verbatim MSL + features
-   + upsample), `face_tracker` (libmediapipe), `MirrorScene` → texture. MLP parity
-   test vs the Python reference.
-3. **Port root/mesh scene GLSL→Metal**: `MetalRootRenderer` mirroring `RootRenderer`'s
-   API; port `shader.frag`/`fog.frag`/`face.*` to MSL, GL TBOs → Metal buffers; live
-   CPlantBox growth; validate visually against `mask_relay_gui`.
-4. **Refactor** `sdf_viewer/CMakeLists.txt` to expose a GL-free `sdfsim` target;
-   make `RootRenderer` shader/param paths runtime-overridable; keep GL apps building.
+1. ✅ **Scaffold** `mirror_app/`: CMake, `MetalContext`, GLFW+CAMetalLayer+
+   ImGui-metal window shell.
+2. 🟡 **C++ neural mirror**: `mlp_forward` (MLX C++, verbatim MSL) + features +
+   upsample + `MirrorScene` **done** and parity-tested; **`face_tracker`
+   (libmediapipe) still to do** — this is the one remaining piece of item 2.
+3. ✅ **Port root/mesh scene GLSL→Metal**: `MetalRootRenderer` (geometry + fog +
+   face mid-pass), GL TBOs → Metal buffers, validated visually.
+4. ✅ **Live CPlantBox**: shipped as the GL-free `RootSim` module reusing
+   `MaskCavities`/`RootAttractors` + CPlantBox directly (rather than refactoring
+   `sdf_viewer`'s CMake into a separate `sdfsim` target — same "no parallel
+   reimplementation" goal, less churn to the GL apps).
+5. ✅ **Cached-system scaling**: instances + LOD + frustum/sub-pixel culling +
+   auto render-scale (`addInstance`, `RootScene::buildField`, `--fieldbench`).
 
-## Deferred (revisit after the above)
+## Next
 
-- Transition state machine (`SceneDirector`) + transition effect (`TransitionPass`).
+1. **libmediapipe face tracking** — one-time Bazel build → `.dylib`; feed 478
+   landmarks + 52 blendshapes + pose into the mirror and the root mask placement.
+   (Bazel may not be installed on the dev box — flagged.)
+2. **Transition** — still undefined. When defined: a `SceneDirector` single-sim
+   handoff (snapshot the outgoing scene to a static texture, stop its sim, run the
+   incoming one) + a `TransitionPass` MSL effect over `(fromTex, toTex, t, mask)`.
+   Both scenes already produce Metal textures + depth in one pipeline, so this can
+   be a real effect, not an alpha fade.
+
+## Deferred
+
 - Wwise audio layer.
 - ICT-FaceKit identity fitting (v1 drives the mask directly from tracked
   landmarks + blendshapes).
+- Per-instance model matrix (cached instances are baked-static today; add a
+  per-draw transform if the transition needs to move/scale whole systems).
