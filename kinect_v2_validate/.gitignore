@@ -1,0 +1,4 @@
+build/
+external/
+# Written by ImGui at runtime (window layout state).
+imgui.ini

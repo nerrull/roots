@@ -1,0 +1,28 @@
+diff --git a/src/libfreenect2.cpp b/src/libfreenect2.cpp
+index 631a578..067b057 100644
+--- a/src/libfreenect2.cpp
++++ b/src/libfreenect2.cpp
+@@ -1168,7 +1168,22 @@ Freenect2Device *Freenect2::openDevice(int idx)
+ 
+ Freenect2Device *Freenect2::openDevice(int idx, const PacketPipeline *pipeline)
+ {
+-  return impl_->openDevice(idx, pipeline, true);
++  // LOCAL PATCH (jardins_racine): make the open-time USB reset opt-out via
++  // FREENECT2_NO_RESET=1.
++  //
++  // libusb_reset_device() detaches every kernel driver bound to the sensor,
++  // including AppleUSBAudio. That makes the "Xbox NUI Sensor" CoreAudio device
++  // disappear, so the 4-mic array cannot be captured while libfreenect2 holds
++  // the sensor -- any in-flight audio stream freezes and AudioUnitRender starts
++  // failing. Skipping the reset lets audio and video/depth run simultaneously.
++  //
++  // The reset exists to recover a sensor left in a bad state by a previous
++  // process, so callers should fall back to a reset open if the no-reset open
++  // fails. openDevice() already treats attempting_reset=false as a valid path
++  // (see the LIBUSB_ERROR_NOT_FOUND retry below).
++  const char *no_reset = getenv("FREENECT2_NO_RESET");
++  const bool attempting_reset = !(no_reset && no_reset[0] == '1');
++  return impl_->openDevice(idx, pipeline, attempting_reset);
+ }
+ 
+ Freenect2Device *Freenect2Impl::openDevice(int idx, const PacketPipeline *pipeline, bool attempting_reset)
