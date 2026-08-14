@@ -1,0 +1,196 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+The content of this file includes portions of the AUDIOKINETIC Wwise Technology
+released in source code form as part of the SDK installer package.
+
+Commercial License Usage
+
+Licensees holding valid commercial licenses to the AUDIOKINETIC Wwise Technology
+may use this file in accordance with the end user license agreement provided
+with the software or, alternatively, in accordance with the terms contained in a
+written agreement between you and Audiokinetic Inc.
+
+Apache License Usage
+
+Alternatively, this file may be used under the Apache License, Version 2.0 (the
+"Apache License"); you may not use this file except in compliance with the
+Apache License. You may obtain a copy of the Apache License at
+http://www.apache.org/licenses/LICENSE-2.0.
+
+Unless required by applicable law or agreed to in writing, software distributed
+under the Apache License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES
+OR CONDITIONS OF ANY KIND, either express or implied. See the Apache License for
+the specific language governing permissions and limitations under the License.
+
+  Copyright (c) 2023 Audiokinetic Inc.
+-->
+<!--
+See https://www.audiokinetic.com/library/edge/?source=SDK&id=plugin__xml.html
+for the documentation about the plugin xml format
+-->
+<PluginModule>
+  <SourcePlugin Name="Macro Oscillator" CompanyID="64" PluginID="31225">
+    <PluginInfo>
+    <PlatformSupport>
+    <Platform Name="Any"></Platform>
+    </PlatformSupport>
+    </PluginInfo>
+    <Properties>
+      <Property Name="Engine" Type="int32" SupportRTPCType="Not Supported" DisplayName="Engine">
+        <DefaultValue>0</DefaultValue>
+        <AudioEnginePropertyID>0</AudioEnginePropertyID>
+        <Restrictions>
+          <ValueRestriction>
+            <Enumeration Type="int32">
+              <Value DisplayName="Virtual Analog VCF">0</Value>
+              <Value DisplayName="Phase Distortion">1</Value>
+              <Value DisplayName="6-Op FM A">2</Value>
+              <Value DisplayName="6-Op FM B">3</Value>
+              <Value DisplayName="6-Op FM C">4</Value>
+              <Value DisplayName="Wave Terrain">5</Value>
+              <Value DisplayName="String Machine">6</Value>
+              <Value DisplayName="Chiptune">7</Value>
+              <Value DisplayName="Virtual Analog">8</Value>
+              <Value DisplayName="Waveshaping">9</Value>
+              <Value DisplayName="FM">10</Value>
+              <Value DisplayName="Grain">11</Value>
+              <Value DisplayName="Additive">12</Value>
+              <Value DisplayName="Wavetable">13</Value>
+              <Value DisplayName="Chord">14</Value>
+              <Value DisplayName="Speech">15</Value>
+              <Value DisplayName="Swarm">16</Value>
+              <Value DisplayName="Noise">17</Value>
+              <Value DisplayName="Particle">18</Value>
+              <Value DisplayName="String">19</Value>
+              <Value DisplayName="Modal">20</Value>
+              <Value DisplayName="Bass Drum">21</Value>
+              <Value DisplayName="Snare Drum">22</Value>
+              <Value DisplayName="Hi-Hat">23</Value>
+            </Enumeration>
+          </ValueRestriction>
+        </Restrictions>
+      </Property>
+      <Property Name="Pitch" Type="Real32" SupportRTPCType="Exclusive" DisplayName="Pitch">
+        <UserInterface Step="1.0" Fine="0.001" Decimals="3" UIMin="12" UIMax="108" />
+        <DefaultValue>60</DefaultValue>
+        <AudioEnginePropertyID>1</AudioEnginePropertyID>
+        <Restrictions>
+          <ValueRestriction>
+            <Range Type="Real32">
+              <Min>12</Min>
+              <Max>108</Max>
+            </Range>
+          </ValueRestriction>
+        </Restrictions>
+      </Property>
+      <Property Name="Harmonics" Type="Real32" SupportRTPCType="Exclusive" DisplayName="Harmonics">
+        <UserInterface Step="0.01" Fine="0.001" Decimals="3" UIMin="0" UIMax="1" />
+        <DefaultValue>0.5</DefaultValue>
+        <AudioEnginePropertyID>2</AudioEnginePropertyID>
+        <Restrictions>
+          <ValueRestriction>
+            <Range Type="Real32">
+              <Min>0</Min>
+              <Max>1</Max>
+            </Range>
+          </ValueRestriction>
+        </Restrictions>
+      </Property>
+      <Property Name="Timbre" Type="Real32" SupportRTPCType="Exclusive" DisplayName="Timbre">
+        <UserInterface Step="0.01" Fine="0.001" Decimals="3" UIMin="0" UIMax="1" />
+        <DefaultValue>0.5</DefaultValue>
+        <AudioEnginePropertyID>3</AudioEnginePropertyID>
+        <Restrictions>
+          <ValueRestriction>
+            <Range Type="Real32">
+              <Min>0</Min>
+              <Max>1</Max>
+            </Range>
+          </ValueRestriction>
+        </Restrictions>
+      </Property>
+      <Property Name="Morph" Type="Real32" SupportRTPCType="Exclusive" DisplayName="Morph">
+        <UserInterface Step="0.01" Fine="0.001" Decimals="3" UIMin="0" UIMax="1" />
+        <DefaultValue>0.5</DefaultValue>
+        <AudioEnginePropertyID>4</AudioEnginePropertyID>
+        <Restrictions>
+          <ValueRestriction>
+            <Range Type="Real32">
+              <Min>0</Min>
+              <Max>1</Max>
+            </Range>
+          </ValueRestriction>
+        </Restrictions>
+      </Property>
+      <Property Name="Decay" Type="Real32" SupportRTPCType="Exclusive" DisplayName="Decay">
+        <UserInterface Step="0.01" Fine="0.001" Decimals="3" UIMin="0" UIMax="1" />
+        <DefaultValue>0.5</DefaultValue>
+        <AudioEnginePropertyID>5</AudioEnginePropertyID>
+        <Restrictions>
+          <ValueRestriction>
+            <Range Type="Real32">
+              <Min>0</Min>
+              <Max>1</Max>
+            </Range>
+          </ValueRestriction>
+        </Restrictions>
+      </Property>
+      <Property Name="LpgColour" Type="Real32" SupportRTPCType="Exclusive" DisplayName="LPG Colour">
+        <UserInterface Step="0.01" Fine="0.001" Decimals="3" UIMin="0" UIMax="1" />
+        <DefaultValue>0.5</DefaultValue>
+        <AudioEnginePropertyID>6</AudioEnginePropertyID>
+        <Restrictions>
+          <ValueRestriction>
+            <Range Type="Real32">
+              <Min>0</Min>
+              <Max>1</Max>
+            </Range>
+          </ValueRestriction>
+        </Restrictions>
+      </Property>
+      <Property Name="AuxMix" Type="Real32" SupportRTPCType="Exclusive" DisplayName="Aux Mix">
+        <UserInterface Step="0.01" Fine="0.001" Decimals="3" UIMin="0" UIMax="1" />
+        <DefaultValue>0.0</DefaultValue>
+        <AudioEnginePropertyID>7</AudioEnginePropertyID>
+        <Restrictions>
+          <ValueRestriction>
+            <Range Type="Real32">
+              <Min>0</Min>
+              <Max>1</Max>
+            </Range>
+          </ValueRestriction>
+        </Restrictions>
+      </Property>
+      <Property Name="Duration" Type="Real32" SupportRTPCType="Exclusive" DisplayName="Duration">
+        <UserInterface Step="1.0" Fine="0.001" Decimals="3" UIMin="0" UIMax="60" />
+        <DefaultValue>1.0</DefaultValue>
+        <AudioEnginePropertyID>8</AudioEnginePropertyID>
+        <Restrictions>
+          <ValueRestriction>
+            <Range Type="Real32">
+              <Min>0</Min>
+              <Max>60</Max>
+            </Range>
+          </ValueRestriction>
+        </Restrictions>
+      </Property>
+      <Property Name="Level" Type="Real32" SupportRTPCType="Exclusive" DisplayName="Level">
+        <UserInterface Step="1.0" Fine="0.001" Decimals="3" UIMin="-24" UIMax="24" />
+        <DefaultValue>0</DefaultValue>
+        <AudioEnginePropertyID>9</AudioEnginePropertyID>
+        <Restrictions>
+          <ValueRestriction>
+            <Range Type="Real32">
+              <Min>-24</Min>
+              <Max>24</Max>
+            </Range>
+          </ValueRestriction>
+        </Restrictions>
+      </Property>
+      <Property Name="Triggered" Type="bool" SupportRTPCType="Exclusive" DisplayName="Triggered">
+        <DefaultValue>true</DefaultValue>
+        <AudioEnginePropertyID>10</AudioEnginePropertyID>
+      </Property>
+    </Properties>
+  </SourcePlugin>
+</PluginModule>
