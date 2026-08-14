@@ -98,4 +98,113 @@ void RasteriseFaceMask(const std::vector<FaceLandmark>& landmarks,
     }
 }
 
+namespace {
+
+// One row of the squared-distance transform: the lower envelope of the
+// parabolas f(q) + (x - q)^2. `v` holds the parabola indices in the envelope and
+// `z` the boundaries between them; both are scratch of length n.
+void DT1D(const float* f, float* d, int n, int* v, float* z) {
+    const float kInf = 1e20f;
+    int k = 0;
+    v[0] = 0;
+    z[0] = -kInf;
+    z[1] = kInf;
+    for (int q = 1; q < n; ++q) {
+        // Where this parabola overtakes the one currently on top; pop while it
+        // does so before the top parabola's own start.
+        float s = ((f[q] + float(q) * q) - (f[v[k]] + float(v[k]) * v[k])) /
+                  (2.f * float(q) - 2.f * float(v[k]));
+        while (s <= z[k]) {
+            --k;
+            s = ((f[q] + float(q) * q) - (f[v[k]] + float(v[k]) * v[k])) /
+                (2.f * float(q) - 2.f * float(v[k]));
+        }
+        ++k;
+        v[k] = q;
+        z[k] = s;
+        z[k + 1] = kInf;
+    }
+    k = 0;
+    for (int q = 0; q < n; ++q) {
+        while (z[k + 1] < float(q)) ++k;
+        const float dq = float(q) - float(v[k]);
+        d[q] = dq * dq + f[v[k]];
+    }
+}
+
+}  // namespace
+
+void DistanceOutside(const std::vector<unsigned char>& mask, int w, int h,
+                     std::vector<float>& dist_px) {
+    dist_px.assign(size_t(std::max(w, 0)) * std::max(h, 0), 0.f);
+    if (w <= 0 || h <= 0 || mask.size() != size_t(w) * h) return;
+
+    const float kInf = 1e20f;
+    // Seed: zero on the mask, infinity elsewhere. An empty mask has no nearest
+    // pixel at all, so it stays infinite -- callers read that as "no region",
+    // which is the right answer when nobody is in frame.
+    std::vector<float> f(size_t(w) * h);
+    bool any = false;
+    for (size_t i = 0; i < f.size(); ++i) {
+        const bool on = mask[i] != 0;
+        any = any || on;
+        f[i] = on ? 0.f : kInf;
+    }
+    if (!any) { dist_px.assign(size_t(w) * h, kInf); return; }
+
+    const int n = std::max(w, h);
+    std::vector<float> buf(static_cast<size_t>(n)), out(static_cast<size_t>(n));
+    std::vector<float> z(static_cast<size_t>(n) + 1);
+    std::vector<int> v(static_cast<size_t>(n));
+
+    for (int x = 0; x < w; ++x) {                      // columns
+        for (int y = 0; y < h; ++y) buf[size_t(y)] = f[size_t(y) * w + x];
+        DT1D(buf.data(), out.data(), h, v.data(), z.data());
+        for (int y = 0; y < h; ++y) f[size_t(y) * w + x] = out[size_t(y)];
+    }
+    for (int y = 0; y < h; ++y) {                      // rows
+        DT1D(&f[size_t(y) * w], out.data(), w, v.data(), z.data());
+        for (int x = 0; x < w; ++x)
+            dist_px[size_t(y) * w + x] = std::sqrt(out[size_t(x)]);
+    }
+}
+
+void RasteriseBox(float cx, float cy, float hx, float hy, int w, int h,
+                  int pad_px, std::vector<unsigned char>& mask) {
+    mask.assign(size_t(std::max(w, 0)) * std::max(h, 0), 0);
+    if (w <= 0 || h <= 0 || hx <= 0.f || hy <= 0.f) return;
+
+    const int pad = std::max(pad_px, 0);
+    const int x0 = std::max(0, int(std::floor((cx - hx) * float(w))) - pad);
+    const int x1 = std::min(w - 1, int(std::ceil((cx + hx) * float(w))) + pad);
+    const int y0 = std::max(0, int(std::floor((cy - hy) * float(h))) - pad);
+    const int y1 = std::min(h - 1, int(std::ceil((cy + hy) * float(h))) + pad);
+    if (x1 < x0 || y1 < y0) return;   // entirely off-frame
+
+    for (int y = y0; y <= y1; ++y)
+        std::fill(mask.begin() + size_t(y) * w + x0,
+                  mask.begin() + size_t(y) * w + x1 + 1, (unsigned char)1);
+}
+
+void RasteriseFaceBox(const std::vector<FaceLandmark>& landmarks, int w, int h,
+                      float pad_frac, int pad_px,
+                      std::vector<unsigned char>& mask) {
+    mask.assign(size_t(std::max(w, 0)) * std::max(h, 0), 0);
+    if (w <= 0 || h <= 0 || landmarks.empty()) return;
+
+    float x0f = landmarks[0].x, x1f = x0f;
+    float y0f = landmarks[0].y, y1f = y0f;
+    for (const FaceLandmark& L : landmarks) {
+        x0f = std::min(x0f, L.x); x1f = std::max(x1f, L.x);
+        y0f = std::min(y0f, L.y); y1f = std::max(y1f, L.y);
+    }
+    // Padded in normalised space so the margin tracks the face's size, then
+    // taken to pixels once. Doing it the other way round would give a distant
+    // face the same absolute margin as a near one.
+    const float pf = 1.f + std::max(pad_frac, 0.f);
+    RasteriseBox(0.5f * (x0f + x1f), 0.5f * (y0f + y1f),
+                 0.5f * (x1f - x0f) * pf, 0.5f * (y1f - y0f) * pf,
+                 w, h, pad_px, mask);
+}
+
 }  // namespace mirror

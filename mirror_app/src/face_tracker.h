@@ -36,6 +36,10 @@ struct FaceResult {
     bool valid = false;
     std::vector<FaceLandmark> landmarks;   // 478 when valid
     std::vector<float> blendshapes;        // 52 when requested and valid
+    // Category names for `blendshapes`, in the same order ("jawOpen",
+    // "mouthSmileLeft", ...). Filled once and then left alone -- the tracker
+    // only refills it if it no longer matches the score count.
+    std::vector<std::string> blendshape_names;
     // Row-major 4x4 head pose, when requested. Identity if unavailable.
     float transform[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 
@@ -62,6 +66,39 @@ const std::vector<int>& FaceOvalIndices();
 void RasteriseFaceMask(const std::vector<FaceLandmark>& landmarks,
                        const std::vector<int>& indices, int w, int h,
                        int dilate_px, std::vector<unsigned char>& mask);
+
+// The landmarks' bounding box as a filled rectangle -- the "face crop" rather
+// than the face outline. Coarser than the hull on purpose: the hull cuts along
+// the silhouette, so the network is supervised on skin and never on the edge
+// between a person and the room, while a box hands it the whole crop including
+// hair, jawline and the background immediately around them.
+//
+// `pad_frac` grows the box by a fraction of its own size, so the margin scales
+// with how close the person is; `pad_px` adds a fixed margin on top of that.
+void RasteriseFaceBox(const std::vector<FaceLandmark>& landmarks, int w, int h,
+                      float pad_frac, int pad_px,
+                      std::vector<unsigned char>& mask);
+
+// Euclidean distance, in pixels, from each pixel to the nearest set pixel of
+// `mask`. Zero inside the mask, growing outward.
+//
+// This is what lets the soft edge follow a face instead of a rectangle: the
+// contours of a distance field are offset curves of whatever shape produced it,
+// evenly spaced in every direction. The analytic box it replaces normalised the
+// distance per axis, which made the fade band a different width horizontally
+// than vertically and flared it at the corners -- the gradient visibly pooling
+// along the box edges.
+//
+// Exact (Felzenszwalb & Huttenlocher's separable transform), O(w*h), and cheap
+// enough to redo every frame at fit-grid size.
+void DistanceOutside(const std::vector<unsigned char>& mask, int w, int h,
+                     std::vector<float>& dist_px);
+
+// The same fill from an explicit normalised box, for the head-centred fit mode:
+// there the crop is pinned to the middle of the frame while the landmarks are
+// off wherever the person is, so the box cannot be derived from them.
+void RasteriseBox(float cx, float cy, float hx, float hy, int w, int h,
+                  int pad_px, std::vector<unsigned char>& mask);
 
 class FaceTracker {
 public:

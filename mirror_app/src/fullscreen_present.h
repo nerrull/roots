@@ -9,6 +9,8 @@
 #import <Metal/Metal.h>
 #include <string>
 
+#include "text_overlay.h"
+
 class MetalContext;
 
 class FullscreenPresent {
@@ -17,11 +19,22 @@ public:
     FullscreenPresent(const MetalContext& ctx, const std::string& shaderPath,
                       MTLPixelFormat colorFormat);
 
-    // Draw `tex` over the full viewport into an already-open render encoder.
-    void encode(id<MTLRenderCommandEncoder> enc, id<MTLTexture> tex) const;
+    // Draw `tex` over the full viewport into an already-open render encoder,
+    // optionally compositing a text distance field over it (see text_overlay.h).
+    // `sdf` may be nil when the overlay is disabled -- a 1x1 stand-in is bound in
+    // its place, because the fragment function samples the slot unconditionally
+    // and an unbound texture there is undefined behaviour rather than a no-op.
+    void encode(id<MTLRenderCommandEncoder> enc, id<MTLTexture> tex,
+                id<MTLTexture> sdf, const mirror::TextUniforms& text) const;
+
+    // Without any overlay.
+    void encode(id<MTLRenderCommandEncoder> enc, id<MTLTexture> tex) const {
+        encode(enc, tex, nil, mirror::TextUniforms{});
+    }
 
     bool valid() const { return pipeline_ != nil; }
 
 private:
     id<MTLRenderPipelineState> pipeline_ = nil;
+    id<MTLTexture> dummy_ = nil;
 };

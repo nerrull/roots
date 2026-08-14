@@ -1,11 +1,10 @@
 # Neuromirror ⇄ Roots — unified Metal C++ app
 
-> Working plan, versioned with the code. **Status as of 2026-07-24:** the
-> scaffold, the C++ neural mirror, the full GLSL→Metal root/face port, and live
-> CPlantBox growth are all done and validated; a cached-system LOD/culling path is
-> in. Remaining: **libmediapipe face tracking** for the mirror, and the (still
-> undefined) **transition** between the two scenes. Wwise + ICT-FaceKit fitting
-> stay deferred.
+> Working plan, versioned with the code. **Status as of 2026-07-25:** the
+> scaffold, the C++ neural mirror, the full GLSL→Metal root/face port, live
+> CPlantBox growth, MediaPipe face tracking and the morphable face fit are all
+> done and validated; a cached-system LOD/culling path is in. Remaining: the
+> (still undefined) **transition** between the two scenes. Wwise stays deferred.
 
 ## Status snapshot
 
@@ -31,11 +30,18 @@ Done (validated, on `jardins_racine` main):
 - **Mirror perf** — fused ripple-features kernel + cached coord grid:
   **26.2 → 16.2 ms at 960×540 (38 → 62 fps)**, 108.8 → 64.5 ms at 1080p. See
   [Neural mirror performance](#neural-mirror-performance).
+- **Text overlay** — CoreText glyphs → exact Euclidean SDF (`text_sdf`) →
+  composited in the present pass as an **inversion** of the scene under it, with
+  the sample coordinate refracted by the *same* ripple gradient the feature
+  kernel uses. Crisp at any scale, over any scene, and it never touches the
+  network — see [Text](#text).
 
-Not yet built: **libmediapipe face tracking** (needs the one-time Bazel build) and
-the **transition**. Headless coverage: `--selftest`, `--roottest`, `--rootshot`,
-`--growshot`, `--fieldshot`, `--rootbench`, `--fieldbench`, `mlp_parity_test`,
-`pond_parity_test`, `ripple_parity_test`.
+Headless coverage: `--selftest`, `--roottest`, `--rootshot`,
+`--growshot`, `--fieldshot`, `--rootbench`, `--fieldbench`, `--facetest`,
+`--maskshot`, `--mirrorclip`, `--transhot`, `--textshot`,
+`mlp_parity_test`, `pond_parity_test`, `ripple_parity_test`, `face_fit_test`,
+`face_mask_test`, `cloth_test`, `text_sdf_test`. (`mlp_parity_test` and `pond_parity_test` read fixtures by
+relative path — run them from `mirror_app/tests/`.)
 
 ## Context
 
@@ -58,8 +64,9 @@ than reimplementing in parallel.
 
 - All-native C++; **unified Metal backend with a common shading pipeline** (port
   the GL root renderer to Metal — no GL/IOSurface interop).
-- Face tracking via **libmediapipe** (one-time Bazel build → `.dylib`, then
-  CMake-only, full 478-landmark + 52-blendshape + pose parity).
+- Face tracking via **MediaPipe's upstream C Tasks API** (one-time Bazel build →
+  `.dylib`, then CMake-only; 478 landmarks + 52 blendshapes + 4×4 pose). Not
+  cpvrlab/libmediapipe — see [MediaPipe face tracking](#mediapipe-face-tracking).
 - Roots via **live CPlantBox** simulation.
 - App lives at **`jardins_racine/mirror_app/`**; `sdf_viewer` refactored to expose
   reusable GL-free sim targets.
@@ -90,15 +97,15 @@ effect, not an alpha fade.
 | Root **rendering**: sphere-tracer + fog + capsule TBOs | `sdf_viewer/RootRenderer.{h,cpp}`, `shader/fog/face .vert/.frag` | **Port GLSL→MSL** (`MetalRootRenderer`) |
 | Fused MLP kernel | `neuromirror/mlx_fused_mlp/forward.py` (MSL) + `features.py` (`ENRICHED_DIM=8`) + `upsample.py` | **Port to MLX C++** reusing verbatim MSL |
 | Face tracking | MediaPipe `face_landmarker.task` | via **libmediapipe** `.dylib` |
-| ICT-FaceKit fitting | `neuromirror/emotion/ict_*` | **Deferred** |
+| Morphable face fitting | `neuromirror/emotion/ict_fit.py` | **Ported** to `face_fit.{h,cpp}` (no OpenCV, no NumPy) |
 
 ## Work breakdown
 
 1. ✅ **Scaffold** `mirror_app/`: CMake, `MetalContext`, GLFW+CAMetalLayer+
    ImGui-metal window shell.
-2. 🟡 **C++ neural mirror**: `mlp_forward` (MLX C++, verbatim MSL) + features +
-   upsample + `MirrorScene` **done** and parity-tested; **`face_tracker`
-   (libmediapipe) still to do** — this is the one remaining piece of item 2.
+2. ✅ **C++ neural mirror**: `mlp_forward` (MLX C++, verbatim MSL) + features +
+   upsample + `MirrorScene`, parity-tested; `face_tracker` on MediaPipe's C
+   Tasks API, feeding the landmark-hull training mask.
 3. ✅ **Port root/mesh scene GLSL→Metal**: `MetalRootRenderer` (geometry + fog +
    face mid-pass), GL TBOs → Metal buffers, validated visually.
 4. ✅ **Live CPlantBox**: shipped as the GL-free `RootSim` module reusing
@@ -110,20 +117,13 @@ effect, not an alpha fade.
 
 ## Next
 
-1. **libmediapipe face tracking** — one-time Bazel build → `.dylib`; feed 478
-   landmarks + 52 blendshapes + pose into the mirror and the root mask placement.
-   (Bazel may not be installed on the dev box — flagged.)
-2. **Transition** — still undefined. When defined: a `SceneDirector` single-sim
-   handoff (snapshot the outgoing scene to a static texture, stop its sim, run the
-   incoming one) + a `TransitionPass` MSL effect over `(fromTex, toTex, t, mask)`.
-   Both scenes already produce Metal textures + depth in one pipeline, so this can
-   be a real effect, not an alpha fade.
+1. **Scene handoff.** The hydro-dip transition itself is built (below); what is
+   still open is using it as the *director* between the two scenes — stopping the
+   mirror's sim, starting the roots', and running this effect over the seam.
 
 ## Deferred
 
 - Wwise audio layer.
-- ICT-FaceKit identity fitting (v1 drives the mask directly from tracked
-  landmarks + blendshapes).
 - Per-instance model matrix (cached instances are baked-static today; add a
   per-draw transform if the transition needs to move/scale whole systems).
 
@@ -391,16 +391,283 @@ CMake stages the dylib out of `bazel-bin` and rewrites its `install_name` to
 `@rpath/...` — bazel emits a bare filename, which dyld treats as a literal path
 and never resolves against an rpath.
 
-### Face mesh fitting — paused
+### Face mesh fitting — done
 
-Fitting a 3D morphable face model to the MediaPipe landmarks (for the training
-mask and the root scene's mask placement) is **paused waiting on NVIDIA's
-`face_model2.nvf`**, which is EULA-gated and lives on another machine.
+`face_model2.nvf` has since been obtained and its layout validated (neuromirror
+`emotion/TODO.md` now has the Maxine items checked), so the fitting is built and
+wired to both consumers.
 
-`tools/export_ict_basis.py` works and produces `external/ict_basis.bin`
-(7813 verts, 100 identity + 53 ARKit expression modes, 14.6 MB) from
-ICT-FaceKit, which Maxine's model is a modified version of -- so the fitter can
-be written against ICT and re-pointed later.
+**One tracker, two consumers.** `main.mm` runs the tracker once per frame,
+before either scene, so the mirror's mask and the roots' mesh come from the same
+detection rather than from two frames a scene apart:
 
-Full handoff, including the order to resume in and the gotchas already found:
-[`documentation/notes/face_mesh_fitting_resume.md`](../../documentation/notes/face_mesh_fitting_resume.md)
+| consumer | what it takes | how |
+| --- | --- | --- |
+| **mirror** | landmarks only | face-oval hull → `RasteriseFaceMask` → `updateFitTarget(rgb, h, w, mask)`. The network fits the person; the background is left unconstrained and stays generative. |
+| **roots** | landmarks + blendshapes + pose | morphable-model fit → `RootScene::setFittedFace` replaces `canonical_face_model.obj` on the placed masks. |
+
+That split is deliberate: the training mask only ever needed the hull, which is
+~40 lines and no model file. The [open question from the handoff
+note](../../documentation/notes/face_mesh_fitting_resume.md) — whether the
+fitted mesh beats the hull for the *mask* — is answered by not asking the mask
+to use it. The mesh earns its place on the root scene, where the hull has
+nothing to offer: a 3D surface that turns with the head.
+
+#### The two-basis export
+
+`tools/export_face_basis.py` (supersedes `export_ict_basis.py`) writes
+`external/face_basis.bin` carrying **two bases that share one set of
+coefficients**:
+
+- **render mesh** — Maxine/NVF topology: 2056 verts, 4048 tris, already cropped
+  to a face mask.
+- **landmark basis** — 68 points in dlib order, used only by the fitter.
+
+Because each source is good at a different thing. ICT-FaceKit has dlib-68
+ordering right (from `vertex_indices.json`); NVF's `LMRK` chunk stores an
+internal order that neuromirror had to *recover by nearest-neighbour matching*,
+which is the less trustworthy half of an otherwise validated parser. So: **fit
+against ICT's landmarks, draw with Maxine's triangles** — the bridge
+`nvf_live.py` proved out live, baked in at export time by resampling ICT's modes
+onto NVF's vertices (mean residual 0.196 model units). One `(alpha, expression)`
+pair drives both bases and the C++ side needs no mapping table.
+
+Falls out of that: **4.0 MB, down from 14.6**, and the 2056-vert mesh is light
+enough to re-evaluate per frame.
+
+#### The fit
+
+`face_fit.{h,cpp}`, a port of `emotion/ict_fit.py`, split the way the cost does:
+
+- **identity** — expensive, occasional. Alternates a 2D similarity (Umeyama) for
+  pose given shape with a ridge-regularised solve for the identity coefficients
+  given pose, over several collected frames sharing one identity. Expression is
+  *known* per frame and subtracted first, so a smile in the collected frames
+  does not get baked into the face.
+- **per frame** — cheap. Expression from blendshapes by ARKit name, rotation
+  from MediaPipe's 4×4, mesh as one weighted sum of modes.
+
+Two dependencies the Python version needs and this does not:
+
+- **OpenCV.** `solve_pose` ran `cv2.solvePnP`; the Tasks API already returns a
+  facial transformation matrix, so the rotation is read off it directly.
+- **NumPy.** The solves are small and dense — a 2×2 similarity over 68 points
+  and an 80×80 SPD system — so they are written out (Cholesky; the ridge term is
+  what guarantees positive-definiteness, so there is no pivoting path).
+
+**Identity frames are ranked, not thresholded** (`frontality * neutrality`, best
+`max_frames` retained, collected on a clock). A fixed threshold does not work:
+MediaPipe reports substantial baseline activation on an ordinary face — a frame
+of someone mid-sentence scores 0.04 neutrality, which is correct — so any
+threshold either accepts everything or stalls forever depending on the person
+and the lighting. See the note for the numbers.
+
+#### Texturing the mask from the neural fit
+
+The mask is coloured per vertex by projecting the fitted mesh into the mirror's
+*own output* and sampling it — so it wears the network's reconstruction of the
+face, not the camera's pixels. What crosses into the root scene is what the
+mirror made of the person.
+
+The colour is **captured, not looked up live.** Only one sim runs at a time, so
+by the time the roots are drawing, the mirror has stopped and there is no neural
+texture left to sample; capturing at the handoff is what lets the mask keep the
+face. `RootScene::setFaceColors` stores it, and the face pass already carried a
+per-vertex colour slot (12 floats/vertex: pos3, normal3, **color3**, lightPos3),
+so nothing in the shader had to change.
+
+#### A photo can stand in for the camera
+
+`Source::Photo` substitutes a still into the stream; nothing downstream knows the
+difference, so tracking → fit → mask → texture all run without a person in front
+of the sensor, reproducibly, on a known face. `LoadImageRGB` letterboxes rather
+than stretching — FHIBE's crops are square against a 4:3 canvas, and stretching
+would have the fit dutifully recover a squashed identity.
+
+#### Coverage
+
+`--facetest [image]` runs the whole path headless on a still photo: MediaPipe →
+landmarks → training mask, and → fit → mesh → `RootScene`. `face_fit_test`
+covers the solver against synthetic ground truth, but everything upstream of it
+— the tracker, the MP68 mapping, the blendshape name matching, the y-flip — only
+runs when a real detector looks at a real face. On `f0016.png`: 478 landmarks,
+52 named blendshapes, a 3.08% training mask, 25 of 53 expression modes active,
+and the projected mesh landing **8 px from the tracker's own face centre (11% of
+face width)** — which is the check that the flip, the mapping and the pose all
+agree.
+
+`face_fit_test` fits synthetic landmarks generated from a known identity.
+Against neuromirror's `fit_identity_frames` on identical input it reproduces
+**0.7609 / 0.8061 / 0.8443** correlation at ridge 6.0 / 1.0 / 0.1 to four
+decimals — so a drift there is a regression against the original, not a tuning
+question. The correlation is not near 1 *by design*: ridge shrinks toward the
+mean face and the modes are far from orthogonal once projected to 2D, so many
+coefficient vectors explain the same 68 points. Landmark residual is 0.27 px.
+
+
+## The pond → face transition
+
+A port of `neuromirror/cloth_cpp`, which prototyped the whole effect against two
+baked assets. Four phases on one timeline, one locked front-on camera:
+
+1. **hold** — the flat neural pond fills the frame
+2. **emerge** — the face rises, its normals refracting and embossing the pond
+3. **swap** — the flat pond becomes a 3D cloth over the *same screen pixels*
+4. **fall** — the cloth falls away behind the face
+
+The art is that phases 1–2 (screen-space) and 3–4 (real 3D) meet at the swap with
+no visible discontinuity. `src/transition_scene.{h,mm}`, `shaders/transition.metal`,
+`src/cloth.h` (the PBD solver, ported essentially unchanged — it was already
+GPU-free, which is why it moved without a rewrite).
+
+### What the combined app improves
+
+cloth_cpp ran on `pond.ppm` (one saved PondState frame) and `face.bin` (the
+neutral ICT mask flattened to height+coverage). Both static — and its own TODO
+list led with the consequences. This app has the live versions of both:
+
+| cloth_cpp TODO | how it is fixed here |
+| --- | --- |
+| "live pond and face" | the film is `MirrorScene`'s actual output texture, and the face is the live `FaceFitter` mesh |
+| "seam line", "boxy neck edge" | both were artifacts of the heightmap *shell*. The real fitted mesh is watertight, so they cannot occur |
+| "real ICT mesh would allow head pose" | the fitted mesh already carries identity, expression and head pose |
+| "refraction strength is a single constant" | scaled by d(emergence)/dt, so distortion tracks the actual motion rather than the timeline midpoint |
+| "swap softening — a 2–3 frame crossfade" | implemented, with the sheet held flat for its duration (see below) |
+| "timing is hard-coded" | `TransitionScene::Timing` — fields, not constants |
+
+The structural change: **the relief G-buffer is rendered, not baked.**
+`f_relief` rasterises the fitted mesh into the same (normal.xy, height,
+coverage) layout `face.bin` had, every frame. Same consumer, live producer.
+
+Also new: **the pin ring follows the face.** cloth_cpp pinned the cloth to a
+fixed ellipse because its face never moved; a fitted face is a different shape
+per person, so the ring is derived from the mesh silhouette (`Cloth::pinTo`).
+
+Deliberately not ported: cloth self-collision and sheet↔face collision, both
+listed as expensive and unnecessary while the sheet is pinned behind the face.
+Both still are.
+
+### The swap, measured
+
+cloth_cpp validated the swap by mean luminance being flat straight through it.
+Same check here, on `--transhot` output, over the last emerge frames plus the
+crossfade:
+
+| | max frame-to-frame step |
+| --- | --- |
+| first working version | **43.95** |
+| after the two fixes below | **0.89** (spread 1.44 over 9 frames) |
+
+Two distinct bugs, both instances of the brightness-match trap the shader notes
+describe, entered from directions the prototype could not hit:
+
+- **`Cloth::build` leaves normals zeroed**, and normals were only computed inside
+  the sim step. The flat sheet therefore shaded from a zero normal for the whole
+  crossfade — garbage after `normalize` — and only snapped to correct once
+  gravity started. Fixed by computing normals at build.
+- **Gravity started on the swap frame**, so the crossfade was blending two
+  *different* images and could not hide anything. The sheet is now held flat for
+  the fade's duration, which is what makes the blend pixel-identical.
+
+The second is arguably a latent flaw in the original design rather than in the
+port: a crossfade over a moving sheet was never going to do the job the TODO
+wanted from it.
+
+## Text
+
+The show needs legible text over the work. The neural mirror cannot supply it and
+was never going to: its input basis is eight features (`x, y, z, bias, sin_field,
+cos_field, z_cos, spare`) through six tanh layers of width 32 — a few thousand
+weights over one low-frequency radial field. That is why it reconstructs faces
+well, and it is the same reason letterforms come out as smudges: text is sharp
+edges and thin strokes everywhere. Fitting a glyph bitmap was considered and
+dropped for a second reason as well — the network is tracking a live face, and a
+text target would have to take the weights away from it.
+
+So the text is not in the network. It is a **signed distance field composited in
+the present pass**:
+
+```
+CoreText glyphs → 8-bit coverage → exact Euclidean SDF (text_sdf.cpp)
+                → R8Unorm texture → present.metal, over whichever scene is up
+```
+
+Three decisions carry the effect:
+
+- **A distance field, not a bitmap.** A bitmap is sharp at one scale and mush
+  either side of it. The field's edge is wherever the interpolated distance
+  crosses 0.5, so the fragment shader recovers a clean contour at any scale, with
+  the antialiasing width taken from `fwidth` — and stroke weight becomes a free
+  parameter (a bias on the distance) rather than a re-render.
+- **Inversion, not a fill.** The palette underneath is generated and changes
+  constantly, so no fixed colour stays legible across it. `1 - c` always does.
+  (`root_face.metal`'s invert falls back to flat white because Metal has no
+  framebuffer logic ops; here the scene colour is sampled in the fragment, so a
+  real inversion is available.)
+- **Refracted by the pond's own gradient.** The sample coordinate is warped by
+  the same radial wave-slope accumulation `kRippleSrc` uses for its colour
+  coords, from the sources the frame was *actually* rendered with
+  (`Pond::lastSources`, cached rather than recomputed from the clock — a second
+  evaluation would be a frame's phase out of step and would shear visibly once
+  the ripples move). The text therefore bends with the water while staying
+  exactly as sharp as it was before it moved. Sharpness comes from the field,
+  motion from the sim.
+
+Two things had to be got right in the shader, both recorded in the source: the
+field is sampled clamped and masked afterwards rather than early-returning, so
+`fwidth` stays in uniform control flow across the quad; and coverage is faded out
+where the footprint grows past what the band can resolve, because a strong warp
+folds the sample coordinate and a fold otherwise leaves a trail of half-lit
+specks off the ends of the words.
+
+Warp is low by default (0.08). Past ~0.15 the gradient displaces neighbouring
+fragments far enough apart to tear the letterforms open — a usable effect, and
+not the one anyone wants the first time they switch it on.
+
+### Emerge / dissolve
+
+`reveal` (0 → 1) is a timeline the word comes apart along. Implemented as a
+**per-pixel threshold from an fBm field**, not as an erosion of the distance:
+erosion is bounded by the encoded band, so thick stems would sit untouched
+through the whole transition and then pop out at once. The noise is sampled at
+the already-warped `p`, so with ripples running the dissolve flows with the water
+for free — no second field to keep in step with the first.
+
+Two calibrations, both found by rendering rather than by reasoning:
+
+- **fBm needs its contrast stretched** before it can serve as a threshold field.
+  Summed octaves cluster hard around the mean, so raw fBm makes every pixel cross
+  at nearly the same moment — a plain fade with a little noise on it. Stretched
+  2.6× about 0.5, the thresholds actually span the reveal and the word breaks
+  into patches.
+- **Scale 12, not 6.** At 6 the blobs are large enough to swallow whole letters;
+  at 12 the dissolve eats into the strokes, which is what erosion looks like.
+
+The interior is biased to survive slightly longer than the edges (a fixed term,
+not a knob), which is the difference between strokes visibly thinning out and
+uniform speckle.
+
+### Softness
+
+`edge softness` scales the sampled footprint to widen the antialiasing band. Two
+bugs lived here and are worth not reintroducing:
+
+- The fold-fade (above) originally multiplied by the *softened* width, so turning
+  softness up faded the text away entirely. The raw footprint and the softened
+  width are now separate quantities: the footprint says whether there is an edge
+  here at all, softness is only a look.
+- The band is clamped to 0.42 of the encoded range. Past that the ramp runs off
+  the end of the field, where the distance saturates flat, and it stops dead at a
+  fixed offset from the outline — which reads as a hard-edged halo tracing the
+  text. `spread` was also widened (0.08 → 0.15 of the raster height, costing only
+  padding) so there is more band to soften within.
+
+It is an antialiasing control, not a glow. A real glow would want a second,
+separately blurred tap.
+
+Coverage: `--textshot <out.ppm> [text] [warp] [reveal] [softness]` renders a live pond plus the
+overlay through the real present pipeline (the shader is compiled from disk at
+run time, so a clean build says nothing about it); `text_sdf_test` checks the
+distance transform against an analytic disc, which is the only way to catch the
+error an approximate transform makes — still smooth, still monotone, wrong by a
+fraction of a pixel in the places that make a straight stem wobble.

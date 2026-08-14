@@ -7,6 +7,7 @@
 #pragma once
 
 #include <mlx/mlx.h>
+#include <array>
 #include <optional>
 #include <vector>
 
@@ -69,6 +70,33 @@ struct PondParams {
     float z_amp = 1.0f;
     float z_rate = 0.0f;             // auto-advance /s
     float z_step = 0.10f;
+    // --- the fit region, and what it holds still ---------------------------
+    //
+    // A live fit is a person the network is reproducing surrounded by a field
+    // nothing constrains. These let the two behave differently in one frame:
+    // inside the region every input is frozen at what the fit was trained on,
+    // outside it the latent is free to animate and the colour to drain away.
+    // Without the region the whole canvas has to choose one or the other.
+    FitRegion region;
+    // The region's distance field, when region.use_field is set: fw*fh floats,
+    // distance in coord units outward from the trained shape (see
+    // DistanceOutside). Held here rather than pushed through a setter because
+    // it changes every frame, exactly like every other field in this struct.
+    std::vector<float> region_field;
+    // Animate z outside the region. Inside, z is pinned to the value captured
+    // at beginFit -- z is an MLP *input*, so moving it under a fitted network
+    // is not a colour tweak, it is asking a different question of the same
+    // weights and the face comes apart.
+    bool  z_free_outside = false;
+    // Drain colour outside the region: 0 keeps the frame as it is, 1 takes the
+    // outside to greyscale. The transition rides the same weight as the latent,
+    // so the two edges cannot disagree.
+    float grey_outside = 0.0f;
+    // Shift the MLP's input coordinates. The head-stabilised fit mode moves
+    // this with the subject so the network always sees them in the same place;
+    // colour travel adds to it. Applied to render and fit alike -- the two
+    // disagreeing would mean training one function and drawing another.
+    float coord_off_x = 0.0f, coord_off_y = 0.0f;
     // mask emergence transition
     float transition = 0.0f;
     bool  trans_auto = false;
@@ -129,6 +157,18 @@ public:
     bool  fitting()  const { return fitting_; }
     bool  fitted()   const { return trainer_.ready(); }
     int   fitSteps() const { return trainer_.steps(); }
+    // The z phase the fit was begun at. render() pins the region's interior to
+    // this, so `z` is free to animate everywhere else.
+    float fitZ()     const { return fit_z_; }
+
+    // The ripple sources the last render() actually used.
+    //
+    // Cached rather than recomputed by the caller from the clock: the text
+    // overlay refracts through this same field in the present pass, and a
+    // second evaluation would be a frame's phase out of step with the image it
+    // is drawn over -- close enough to look right when still and to shear
+    // visibly the moment the ripples move.
+    const std::vector<RippleSource>& lastSources() const { return last_src_; }
 
 private:
     static mx::array make_weights(const MLPConfig& cfg, int seed, float scale = 1.0f);
@@ -166,6 +206,14 @@ private:
     // Features are gathered to match a masked target. Keyed on the pixel count
     // as well as the grid, so a mask that changes shape rebuilds them.
     int fit_feats_px_ = -1;
+    // ...and on the input shift and the latent, which are what the features
+    // are *of*. Without these in the key, moving either would leave training
+    // running against the features built for the old ones -- silently, since
+    // nothing else notices.
+    std::array<float, 3> fit_feats_in_{0.f, 0.f, 0.f};
+    // The latent the fit was begun at, held for as long as the fit lives.
+    float fit_z_ = 0.f;
+    std::vector<RippleSource> last_src_;
     void rebuildFitFeatures(const PondParams& p);
     const mx::array& coord_grid(int lh, int lw, float asp);
 

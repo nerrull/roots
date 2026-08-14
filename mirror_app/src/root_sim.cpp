@@ -62,7 +62,20 @@ struct RootSim::Impl {
     void rebuildTropism(double mainW, double latW, bool travel, double dwellThreshold) {
         auto geom = buildCavityGeometry(localRevealed, p.R0, p.Hh, false, 2.0,
                                         tipRadius, p.viewCylLen, 0.9, p.taperPower);
-        rs->setGeometry(geom);
+        // The travel shell: intersecting the cavity-avoidance geometry with a
+        // thin shell around the cone makes the root crawl over the surface
+        // rather than cut through the middle. It only constrains the radial
+        // axis, which is orthogonal to the direction of travel, so it does not
+        // fight the tangential pull toward the target.
+        //
+        // The global cone apex sits at -offset in this hop's local coordinates.
+        std::shared_ptr<SignedDistanceFunction> growGeom = geom;
+        if (p.coneSurfaceTravel && travel) {
+            auto shell = buildConeShell(p.R0, p.Hh, tipRadius, p.taperPower,
+                                        p.coneShellThickness, offset.times(-1.0));
+            growGeom = std::make_shared<CPlantBox::SDF_Intersection>(geom, shell);
+        }
+        rs->setGeometry(growGeom);
         std::vector<Attractor> attrs;
         if (travel) {
             double reach = std::max((double)p.travelPullReach * hopLen, (double)p.R0);
@@ -73,17 +86,31 @@ struct RootSim::Impl {
         if (dwellThreshold >= 0.0) {
             rs->setTropism(combinedAttractionSplitTimed(
                 rs, base, attrs, p.mainTravelTrials, 6.0, p.sigma,
-                mainW, p.lateralWeight, latW, dwellThreshold, geom), -1);
+                mainW, p.lateralWeight, latW, dwellThreshold, growGeom), -1);
         } else {
             rs->setTropism(combinedAttractionSplit(
                 rs, base, attrs, p.mainTravelTrials, 6.0, p.sigma,
-                mainW, latW, geom, geom), -1);
+                mainW, latW, growGeom, growGeom), -1);
         }
     }
 
     void pushRevealedRender(const MaskNode& m) {
         Vector3d pos = toYup(m.pos), n = toYup(m.normal);
-        Vector3d t = toYup(m.tangent), b = toYup(m.bitangent);
+        // Rotate the frame 180 degrees about the normal.
+        //
+        // MaskCavities builds the cone in CPlantBox's grow space, where the
+        // cone hangs *downward* from a seed at z=0: the tip is at z=0 and the
+        // wide base at z=-height. Its bitangent is "up the surface" in that
+        // space, meaning toward the tip. toYup maps grow -z to render +y, so
+        // the wide base ends up at the top of the render and the bitangent --
+        // still pointing at the tip -- ends up pointing at the floor.
+        //
+        // Placing a face along that frame put every head upside down. Negating
+        // the bitangent alone would fix the head and mirror the face, because
+        // it flips the frame's handedness; negating the tangent with it is a
+        // rotation, which is what this actually is.
+        Vector3d t = toYup(m.tangent).times(-1.0);
+        Vector3d b = toYup(m.bitangent).times(-1.0);
         SimMask sm;
         sm.pos[0] = (float)pos.x; sm.pos[1] = (float)pos.y; sm.pos[2] = (float)pos.z;
         sm.normal[0] = (float)n.x; sm.normal[1] = (float)n.y; sm.normal[2] = (float)n.z;

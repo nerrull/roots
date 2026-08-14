@@ -27,7 +27,9 @@ inline mx::array S(float v) { return mx::array(v); }
 // (mx::compile was tried first, as the much smaller change: it manages only
 // 1.33x, because concatenate/split break its fusion groups.)
 //
-// scal layout: [k, decay, core_r2, warp, x_offset, y_offset, z, z_cos]
+// scal layout: [k, decay, core_r2, warp, x_offset, y_offset, z, z_cos,
+//               z_out, z_cos_out, cx, cy, inv_hx, inv_hy, fade_start, region_on,
+//               inv_fade_width, use_field, fw, fh, ax]
 const char* kRippleSrc = R"MSL(
     const uint i = thread_position_in_grid.x;
     if (i >= nrows[0]) return;
@@ -41,8 +43,45 @@ const char* kRippleSrc = R"MSL(
     const float warp    = scal[3];
     const float xoff    = scal[4];
     const float yoff    = scal[5];
-    const float zval    = scal[6];
-    const float zcos    = scal[7];
+
+    // Region weight: 0 at the trained region's edge, 1 past the fade, smoothstep
+    // in between. Computed from the RAW coords, never the offset ones -- the
+    // region is where the subject lands on screen, and with an input shift in
+    // play (the head-stabilised fit mode) those two are deliberately different.
+    float rw = 0.0f;
+    if (scal[15] != 0.0f) {
+        float d;   // distance outside the region, in coord units
+        if (scal[17] != 0.0f) {
+            // Bilinear sample of the distance field. It spans exactly the same
+            // extent as the render grid, so this is a straight remap -- and the
+            // field is smooth by construction, which is why sampling one built
+            // at fit-grid size and drawing it at display size holds up.
+            const int fw = (int)scal[18];
+            const int fh = (int)scal[19];
+            const float gx = clamp((x / scal[20] + 1.0f) * 0.5f * (float)(fw - 1),
+                                   0.0f, (float)(fw - 1));
+            const float gy = clamp((y + 1.0f) * 0.5f * (float)(fh - 1),
+                                   0.0f, (float)(fh - 1));
+            const int x0 = (int)gx, y0 = (int)gy;
+            const int x1 = min(x0 + 1, fw - 1), y1 = min(y0 + 1, fh - 1);
+            const float tx = gx - (float)x0, ty = gy - (float)y0;
+            const float a = field[y0 * fw + x0], b = field[y0 * fw + x1];
+            const float c = field[y1 * fw + x0], e = field[y1 * fw + x1];
+            d = mix(mix(a, b, tx), mix(c, e, tx), ty);
+        } else {
+            const float ux = fabs(x - scal[10]) * scal[12];
+            const float uy = fabs(y - scal[11]) * scal[13];
+            // Back to coord units, so the fade is specified the same way in
+            // both modes: (u - 1) is a fraction of the half-extent it exceeded.
+            d = (max(ux, uy) - 1.0f) / max(scal[12], scal[13]);
+        }
+        const float t = clamp((d - scal[14]) * scal[16], 0.0f, 1.0f);
+        rw = t * t * (3.0f - 2.0f * t);
+    }
+    // Crossfade the two latents. With no region this is exactly scal[6]/scal[7],
+    // so the un-regioned path is unchanged to the bit.
+    const float zval = scal[6] + (scal[8] - scal[6]) * rw;
+    const float zcos = scal[7] + (scal[9] - scal[7]) * rw;
 
     float sin_acc = 0.0f, cos_acc = 0.0f, gx = 0.0f, gy = 0.0f;
 
@@ -90,11 +129,17 @@ const char* kRippleSrc = R"MSL(
     out[8 * i + 5] = (half)cos_acc;
     out[8 * i + 6] = (half)zcos;
     out[8 * i + 7] = (half)0.0f;
+
+    // Slot 7 stays zero on purpose: all eight are MLP inputs, and putting the
+    // region weight there would feed the network a signal that moves with the
+    // subject. It goes out as its own array instead.
+    regw[i] = (half)rw;
 )MSL";
 
 const mx::fast::CustomKernelFunction& ripple_kernel() {
     static mx::fast::CustomKernelFunction fn = mx::fast::metal_kernel(
-        "ripple_features", {"coords", "src", "scal", "nrows"}, {"out"},
+        "ripple_features", {"coords", "src", "scal", "nrows", "field"},
+        {"out", "regw"},
         kRippleSrc, /*header=*/"", /*ensure_row_contiguous=*/true);
     return fn;
 }
@@ -113,11 +158,48 @@ mx::array make_coord_grid(int h, int w, float x0, float x1, float y0, float y1) 
     return mx::astype(coords, mx::float16);
 }
 
-mx::array multi_ripple_features(const mx::array& coords_in,
+float region_weight(const FitRegion& r, const float* field, float x, float y) {
+    if (!r.on) return 0.f;
+    float d;
+    if (r.use_field && field && r.fw > 1 && r.fh > 1) {
+        auto clampf = [](float v, float lo, float hi) {
+            return v < lo ? lo : (v > hi ? hi : v);
+        };
+        const float gx = clampf((x / std::max(r.ax, 1e-6f) + 1.f) * 0.5f * (r.fw - 1),
+                                0.f, float(r.fw - 1));
+        const float gy = clampf((y + 1.f) * 0.5f * (r.fh - 1), 0.f, float(r.fh - 1));
+        const int x0 = int(gx), y0 = int(gy);
+        const int x1 = std::min(x0 + 1, r.fw - 1), y1 = std::min(y0 + 1, r.fh - 1);
+        const float tx = gx - x0, ty = gy - y0;
+        const float a = field[y0 * r.fw + x0], b = field[y0 * r.fw + x1];
+        const float c = field[y1 * r.fw + x0], e = field[y1 * r.fw + x1];
+        d = (a + (b - a) * tx) + ((c + (e - c) * tx) - (a + (b - a) * tx)) * ty;
+    } else {
+        const float ux = std::fabs(x - r.cx) / std::max(r.hx, 1e-6f);
+        const float uy = std::fabs(y - r.cy) / std::max(r.hy, 1e-6f);
+        d = (std::max(ux, uy) - 1.f) * std::min(r.hx, r.hy);
+    }
+    float t = (d - r.fade_start) / std::max(r.fade_width, 1e-4f);
+    t = t < 0.f ? 0.f : (t > 1.f ? 1.f : t);
+    return t * t * (3.f - 2.f * t);
+}
+
+mx::array multi_ripple_features(const mx::array& coords,
                                 const std::vector<RippleSource>& sources,
                                 float ring_freq, float decay, float z, float z_cos,
                                 float warp, float core_radius,
                                 float x_offset, float y_offset) {
+    return multi_ripple_features_region(coords, sources, ring_freq, decay, z, z_cos,
+                                        warp, core_radius, x_offset, y_offset,
+                                        FitRegion{}, z, z_cos, std::nullopt)[0];
+}
+
+std::vector<mx::array> multi_ripple_features_region(
+    const mx::array& coords_in, const std::vector<RippleSource>& sources,
+    float ring_freq, float decay, float z, float z_cos, float warp,
+    float core_radius, float x_offset, float y_offset,
+    const FitRegion& region, float z_out, float z_cos_out,
+    const std::optional<mx::array>& field) {
     const int n = coords_in.shape(0);
     const int nsrc = static_cast<int>(sources.size());
 
@@ -138,27 +220,70 @@ mx::array multi_ripple_features(const mx::array& coords_in,
     auto src = mx::array(src_flat.data(),
                          {nsrc > 0 ? nsrc : 1, 4}, mx::float32);
 
+    // A field is only sampled when one was actually supplied: a region claiming
+    // field mode with nothing bound would read a dummy buffer and fade the
+    // whole frame at once.
+    const bool has_field = region.use_field && field.has_value() &&
+                           region.fw > 1 && region.fh > 1;
+    // The kernel always needs something bound here, so an unused input gets a
+    // one-element dummy -- the same arrangement `src` uses for zero ripples.
+    auto field_arr = has_field ? mx::contiguous(mx::astype(*field, mx::float32))
+                               : mx::zeros({1}, mx::float32);
+
     const float k = ring_freq * static_cast<float>(M_PI);
-    const std::vector<float> sc = {k,        decay,    core_radius * core_radius,
-                                   warp,     x_offset, y_offset,
-                                   z,        z_cos};
-    auto scal = mx::array(sc.data(), {8}, mx::float32);
+    const std::vector<float> sc = {
+        k,        decay,    core_radius * core_radius,
+        warp,     x_offset, y_offset,
+        z,        z_cos,
+        z_out,    z_cos_out,
+        region.cx, region.cy,
+        1.f / std::max(region.hx, 1e-6f), 1.f / std::max(region.hy, 1e-6f),
+        region.fade_start,
+        region.on ? 1.f : 0.f,
+        1.f / std::max(region.fade_width, 1e-4f),
+        has_field ? 1.f : 0.f,
+        float(region.fw), float(region.fh), std::max(region.ax, 1e-6f)};
+    auto scal = mx::array(sc.data(), {21}, mx::float32);
     auto nrows = mx::array({n}, mx::uint32);
 
     const int grid = ((n + kRippleThreads - 1) / kRippleThreads) * kRippleThreads;
-    auto outs = ripple_kernel()(
-        {coords, src, scal, nrows}, {mx::Shape{n, ENRICHED_DIM}}, {mx::float16},
+    return ripple_kernel()(
+        {coords, src, scal, nrows, field_arr},
+        {mx::Shape{n, ENRICHED_DIM}, mx::Shape{n, 1}}, {mx::float16, mx::float16},
         std::make_tuple(grid, 1, 1), std::make_tuple(kRippleThreads, 1, 1),
         std::vector<std::pair<std::string, mx::fast::TemplateArg>>{{"NSRC", nsrc}},
         std::nullopt, /*verbose=*/false, {});
-    return outs[0];
+}
+
+// Box mode only. The field path is checked against a CPU bilinear reference in
+// the test rather than a second MLX formulation: expressing a gather-based
+// bilinear sample in ops would be a third implementation to keep in step, and
+// the CPU one is genuinely independent of both.
+mx::array region_weight_ops(const mx::array& coords_in, const FitRegion& region) {
+    auto coords = mx::astype(coords_in, mx::float32);
+    const int n = coords.shape(0);
+    if (!region.on) return mx::zeros({n, 1}, mx::float32);
+    auto xy = mx::split(coords, 2, /*axis=*/1);
+    auto ux = mx::divide(mx::abs(mx::subtract(xy[0], S(region.cx))),
+                         S(std::max(region.hx, 1e-6f)));
+    auto uy = mx::divide(mx::abs(mx::subtract(xy[1], S(region.cy))),
+                         S(std::max(region.hy, 1e-6f)));
+    auto d = mx::multiply(mx::subtract(mx::maximum(ux, uy), S(1.f)),
+                          S(std::min(region.hx, region.hy)));
+    auto t = mx::clip(mx::divide(mx::subtract(d, S(region.fade_start)),
+                                 S(std::max(region.fade_width, 1e-4f))),
+                      S(0.f), S(1.f));
+    return mx::multiply(mx::multiply(t, t),
+                        mx::subtract(S(3.f), mx::multiply(S(2.f), t)));
 }
 
 mx::array multi_ripple_features_ops(const mx::array& coords_in,
                                     const std::vector<RippleSource>& sources,
                                     float ring_freq, float decay, float z,
                                     float z_cos, float warp, float core_radius,
-                                    float x_offset, float y_offset) {
+                                    float x_offset, float y_offset,
+                                    const FitRegion& region,
+                                    float z_out, float z_cos_out) {
     auto coords = mx::astype(coords_in, mx::float32);
     auto xy = mx::split(coords, 2, /*axis=*/1);  // x, y : (N, 1) each
     auto x = xy[0];
@@ -198,8 +323,9 @@ mx::array multi_ripple_features_ops(const mx::array& coords_in,
         xw = mx::add(xw, mx::multiply(S(warp), gx));
         yw = mx::add(yw, mx::multiply(S(warp), gy));
     }
-    auto zc = mx::full({n, 1}, z, mx::float32);
-    auto zc2 = mx::full({n, 1}, z_cos, mx::float32);
+    auto rw = region_weight_ops(coords_in, region);
+    auto zc = mx::add(S(z), mx::multiply(S(z_out - z), rw));
+    auto zc2 = mx::add(S(z_cos), mx::multiply(S(z_cos_out - z_cos), rw));
     auto bias = mx::ones({n, 1}, mx::float32);
     auto zero = mx::zeros({n, 1}, mx::float32);
     auto feats = mx::concatenate({xw, yw, zc, bias, sin_acc, cos_acc, zc2, zero}, /*axis=*/1);

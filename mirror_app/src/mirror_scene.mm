@@ -46,6 +46,17 @@ float MirrorScene::fitSteps(int steps, float lr) {
 
 id<MTLTexture> MirrorScene::render() {
     auto img = pond_.render(lh_, lw_, t_, params_);   // (lh, lw, 3) fp32 [0,1]
+
+    // Keep a CPU copy before the fp16 cast: the texturing path wants the same
+    // pixels the display shows, at full precision, and evaluating `img` here
+    // costs nothing because the concatenate below forces it anyway.
+    {
+        auto rgbc = mx::contiguous(img);
+        mx::eval(rgbc);
+        const float* src = rgbc.data<float>();
+        cpu_rgb_.assign(src, src + size_t(lh_) * lw_ * 3);
+    }
+
     auto rgb16 = mx::astype(img, mx::float16);
     auto alpha = mx::ones({lh_, lw_, 1}, mx::float16);
     auto rgba = mx::contiguous(mx::concatenate({rgb16, alpha}, 2));

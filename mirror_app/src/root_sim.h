@@ -37,6 +37,13 @@ struct SimParams {
     float maxHopDays   = 60.0f;
     float reachMult    = 1.6f;
     float travelPullReach = 1.2f;
+    // "Along the surface" travel: confine the travelling root to a thin shell
+    // straddling the cone the masks sit on, so it crawls over the cone between
+    // masks instead of cutting through its interior. Travel only -- the dwell
+    // wrapping stays unconstrained, or the nests around each mask would be
+    // flattened onto the surface instead of bulging into 3D.
+    bool  coneSurfaceTravel  = false;
+    float coneShellThickness = 7.0f;   // cm; thicker = looser hug, more wander
     float growthDt     = 0.75f;    // sim days advanced per step()
     float targetLift   = 0.0f;
     float spawnBehind  = 0.0f;

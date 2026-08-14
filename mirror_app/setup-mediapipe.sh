@@ -68,8 +68,16 @@ done
 echo "==> building $target (first build takes a while)"
 (
   cd "$mp"
+  # macos_minimum_os: bazel's default deployment target is old enough that
+  # libc++ marks std::optional::value() unavailable, and flatbuffers (a
+  # MediaPipe dependency) calls it -- ~20 "'value' is unavailable: introduced
+  # in macOS 10.13" errors deep in binary_annotator.cpp, which name the SDK
+  # rather than the flag actually responsible. host_ too: flatc is built for
+  # the host and hits the same wall.
   bazel build --config darwin_arm64 -c opt \
     --define MEDIAPIPE_DISABLE_GPU=1 \
+    --macos_minimum_os=11.0 \
+    --host_macos_minimum_os=11.0 \
     --repo_env=HERMETIC_PYTHON_VERSION=3.12 \
     --repo_env=JAVA_HOME="$JAVA_HOME" \
     "$target"

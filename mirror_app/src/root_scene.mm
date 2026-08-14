@@ -6,6 +6,9 @@
 #include <fstream>
 #include <random>
 #include <sstream>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <map>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -70,9 +73,13 @@ std::vector<int> cropOvalTris(const std::vector<float>& v, const std::vector<int
 struct Mask { F3 pos, normal, tangent, bitangent; float rDepth, rWidth, rHeight; };
 
 // Build interleaved face triangles (12 floats/vert) for a set of masks.
+// `vcol`, when non-empty, is a per-vertex RGB (3 floats/vertex, same indexing as
+// `fv`) that overrides the flat `color` -- this is how a mask wears a sampled
+// face rather than a material tint.
 void appendFaceVertexData(std::vector<float>& out, const Mask& m,
                           const std::vector<float>& fv, const std::vector<int>& ftris,
-                          float faceScale, float lightDist, const float color[3]) {
+                          float faceScale, float lightDist, const float color[3],
+                          const std::vector<float>& vcol = {}) {
     F3 n = m.normal, t = m.tangent, b = m.bitangent;
     F3 p = sub(m.pos, mul(n, m.rDepth * 0.5f));
     float scale = faceScale * std::min(m.rWidth, m.rHeight);
@@ -87,9 +94,16 @@ void appendFaceVertexData(std::vector<float>& out, const Mask& m,
         }
         F3 fn = norm(cross(sub(v3[1], v3[0]), sub(v3[2], v3[0])));
         for (int k = 0; k < 3; k++) {
+            const int vi = ftris[i+k];
+            const bool haveCol = !vcol.empty() && size_t(vi) * 3 + 2 < vcol.size();
             out.push_back(v3[k].x); out.push_back(v3[k].y); out.push_back(v3[k].z);
             out.push_back(fn.x); out.push_back(fn.y); out.push_back(fn.z);
-            out.push_back(color[0]); out.push_back(color[1]); out.push_back(color[2]);
+            if (haveCol) {
+                out.push_back(vcol[vi*3]); out.push_back(vcol[vi*3+1]);
+                out.push_back(vcol[vi*3+2]);
+            } else {
+                out.push_back(color[0]); out.push_back(color[1]); out.push_back(color[2]);
+            }
             out.push_back(lightPos.x); out.push_back(lightPos.y); out.push_back(lightPos.z);
         }
     }
@@ -138,16 +152,18 @@ RootScene::RootScene(const MetalContext& ctx, int w, int h) {
             faceVerts_, faceTris_);
     normalizeMesh(faceVerts_);
     faceTris_ = cropOvalTris(faceVerts_, faceTris_, 0.72f, 0.98f);
+    canonVerts_ = faceVerts_;
+    canonTris_  = faceTris_;
 
     // Try the live CPlantBox growth; fall back to the procedural stand-in if the
     // parameter files aren't present.
     sim_ = std::make_unique<rootsim::RootSim>();
+    simParams_.N = 5;
     regrow();
     if (useSim_) {
-        // Frame the whole cone (grows +Y in render space, height ~Hh).
-        target[0] = 0.f; target[1] = 22.f; target[2] = 0.f;
-        radius = 78.f;
-        rr_->fog.refDist = radius;
+        // Framing is derived from the geometry's own bounds each frame (see
+        // applyFraming); the constants that used to live here were tuned to one
+        // particular R0/Hh and pointed at the wrong part of any other cone.
         rr_->radiusScale = 1.4f;
         rr_->radiusMin = 0.03f;
         rr_->radiusMax = 0.35f;
@@ -161,16 +177,127 @@ RootScene::RootScene(const MetalContext& ctx, int w, int h) {
     }
 }
 
+const std::vector<std::pair<std::string, std::string>>& RootScene::species() {
+    // The reference GUI's list, verbatim -- these are the parameter sets that
+    // are known to grow rather than every file in the directory.
+    static const std::vector<std::pair<std::string, std::string>> kSpecies = {
+        {"Maize (Zea mays)",      "Zea_mays_6_Leitner_2014.xml"},
+        {"Soybean (Glycine max)", "Glycine_max.xml"},
+        {"Pea (Pisum sativum)",   "Pisum_sativum_a_Pag\xc3\xa8s_2014.xml"},
+        {"Sunflower (Heliantus)", "Heliantus_Pages_2013.xml"},
+        {"Kale (Brassica)",       "Brassica_oleracea_Vansteenkiste_2014.xml"},
+        {"Wheat (Triticum)",      "Triticum_aestivum_a_Bingham_2011.xml"},
+        {"Lupin (Lupinus)",       "Lupinus_albus_Leitner_2014.xml"},
+        {"Pimpernel (Anagallis)", "Anagallis_femina_Leitner_2010.xml"},
+    };
+    return kSpecies;
+}
+
+int RootScene::speciesIndex() const {
+    const auto& sp = species();
+    for (size_t i = 0; i < sp.size(); ++i)
+        if (sp[i].second == simParams_.speciesXml) return (int)i;
+    return -1;
+}
+
+void RootScene::setSpeciesIndex(int i) {
+    const auto& sp = species();
+    if (i >= 0 && i < (int)sp.size()) simParams_.speciesXml = sp[size_t(i)].second;
+}
+
+// One list, walked by both the writer and the reader, so a parameter cannot be
+// saved and then not loaded (or the reverse) -- which is the failure a preset
+// system has that nobody notices until a preset comes back subtly different.
+template <class Fn>
+static void visitSimParams(rootsim::SimParams& p, Fn&& f) {
+    f("speciesXml", p.speciesXml);
+    f("N", p.N);
+    f("R0", p.R0);              f("Hh", p.Hh);
+    f("startFrac", p.startFrac); f("endFrac", p.endFrac);
+    f("taperPower", p.taperPower);
+    f("angleStepGoldenMult", p.angleStepGoldenMult);
+    f("distStepFrac", p.distStepFrac);
+    f("dwellDays", p.dwellDays);
+    f("weight", p.weight);      f("mainTravelTrials", p.mainTravelTrials);
+    f("lateralWeight", p.lateralWeight);
+    f("dwellWeight", p.dwellWeight);
+    f("dwellLateralWeight", p.dwellLateralWeight);
+    f("sigma", p.sigma);        f("viewCylLen", p.viewCylLen);
+    f("maxHopDays", p.maxHopDays); f("reachMult", p.reachMult);
+    f("travelPullReach", p.travelPullReach);
+    f("coneSurfaceTravel", p.coneSurfaceTravel);
+    f("coneShellThickness", p.coneShellThickness);
+    f("growthDt", p.growthDt);
+    f("targetLift", p.targetLift); f("spawnBehind", p.spawnBehind);
+    f("seed", p.seed);
+}
+
+std::string RootScene::presetDir() {
+    return std::string(MIRROR_APP_SRC_DIR) + "/../presets";
+}
+
+std::vector<std::string> RootScene::listPresets() {
+    std::vector<std::string> out;
+    DIR* d = opendir(presetDir().c_str());
+    if (!d) return out;
+    while (struct dirent* e = readdir(d)) {
+        const std::string n = e->d_name;
+        if (n.size() > 5 && n.compare(n.size() - 5, 5, ".root") == 0)
+            out.push_back(n.substr(0, n.size() - 5));
+    }
+    closedir(d);
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+bool RootScene::saveConfig(const std::string& path) const {
+    mkdir(presetDir().c_str(), 0755);
+    std::ofstream f(path);
+    if (!f.is_open()) return false;
+    rootsim::SimParams copy = simParams_;
+    visitSimParams(copy, [&](const char* k, auto& v) { f << k << " = " << v << "\n"; });
+    return true;
+}
+
+bool RootScene::loadConfig(const std::string& path) {
+    std::ifstream f(path);
+    if (!f.is_open()) return false;
+    std::map<std::string, std::string> kv;
+    std::string line;
+    while (std::getline(f, line)) {
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string k = line.substr(0, eq), v = line.substr(eq + 1);
+        auto trim = [](std::string& s) {
+            const size_t a = s.find_first_not_of(" \t\r");
+            const size_t b = s.find_last_not_of(" \t\r");
+            s = (a == std::string::npos) ? std::string() : s.substr(a, b - a + 1);
+        };
+        trim(k); trim(v);
+        if (!k.empty()) kv[k] = v;
+    }
+    visitSimParams(simParams_, [&](const char* k, auto& v) {
+        auto it = kv.find(k);
+        if (it == kv.end()) return;              // absent: keep the default
+        std::istringstream ss(it->second);
+        ss >> v;
+    });
+    return true;
+}
+
 void RootScene::regrow() {
     if (!sim_) return;
-    rootsim::SimParams sp;
-    sp.paramDir = ROOTSIM_PARAM_DIR;
-    sp.speciesXml = "Zea_mays_6_Leitner_2014.xml";
-    sp.N = 5;
-    useSim_ = sim_->reset(sp);
+    simParams_.paramDir = ROOTSIM_PARAM_DIR;
+    useSim_ = sim_->reset(simParams_);
+    simAvailable_ = simAvailable_ || useSim_;
 }
 
 bool RootScene::simDone() const { return sim_ && sim_->done(); }
+
+const std::vector<rootsim::SimMask>& RootScene::revealedMasks() const {
+    static const std::vector<rootsim::SimMask> kNone;
+    return sim_ ? sim_->revealedMasks() : kNone;
+}
 
 void RootScene::buildField(int gridN, float spacing) {
     if (!rr_ || !sim_) return;
@@ -212,7 +339,8 @@ void RootScene::uploadFaceFromMasks() {
         m.tangent = {sm.tangent[0], sm.tangent[1], sm.tangent[2]};
         m.bitangent = {sm.bitangent[0], sm.bitangent[1], sm.bitangent[2]};
         m.rDepth = sm.rDepth; m.rWidth = sm.rWidth; m.rHeight = sm.rHeight;
-        appendFaceVertexData(data, m, faceVerts_, faceTris_, faceScale, 3.0f, maskColor);
+        appendFaceVertexData(data, m, faceVerts_, faceTris_, faceScale, 3.0f, maskColor,
+                             faceColors_);
     }
     rr_->uploadFaceMesh(data);
 }
@@ -237,16 +365,118 @@ void RootScene::rebuildFace() {
                      target[1] + h - 6.0f,
                      target[2] + 5.0f * std::cos(ang)};
         Mask m = makeMask(center, dir, 4.5f);
-        appendFaceVertexData(data, m, faceVerts_, faceTris_, faceScale, 3.0f, maskColor);
+        appendFaceVertexData(data, m, faceVerts_, faceTris_, faceScale, 3.0f, maskColor,
+                             faceColors_);
     }
     rr_->uploadFaceMesh(data);
+}
+
+void RootScene::setFittedFace(const std::vector<float>& verts,
+                              const std::vector<int>& tris) {
+    if (verts.size() < 9) return;
+    if (!tris.empty()) faceTris_ = tris;
+    if (faceTris_.empty()) return;
+
+    // Capture the normalisation once. Centre on the mesh centroid and divide by
+    // the largest absolute coordinate, matching what normalizeMesh() does to
+    // the canonical model -- so the placement code, faceScale, and every
+    // material knob downstream keep the ranges they were tuned against.
+    if (!fit_norm_set_) {
+        const size_t n = verts.size() / 3;
+        double cx = 0, cy = 0, cz = 0;
+        for (size_t i = 0; i < n; i++) {
+            cx += verts[i * 3]; cy += verts[i * 3 + 1]; cz += verts[i * 3 + 2];
+        }
+        fit_centre_[0] = float(cx / n);
+        fit_centre_[1] = float(cy / n);
+        fit_centre_[2] = float(cz / n);
+        float m = 1e-9f;
+        for (size_t i = 0; i < n; i++) {
+            m = std::max({m, std::fabs(verts[i * 3]     - fit_centre_[0]),
+                             std::fabs(verts[i * 3 + 1] - fit_centre_[1]),
+                             std::fabs(verts[i * 3 + 2] - fit_centre_[2])});
+        }
+        fit_scale_ = 1.0f / m;
+        fit_norm_set_ = true;
+    }
+
+    faceVerts_.resize(verts.size());
+    for (size_t i = 0; i < verts.size() / 3; i++) {
+        faceVerts_[i * 3]     = (verts[i * 3]     - fit_centre_[0]) * fit_scale_;
+        faceVerts_[i * 3 + 1] = (verts[i * 3 + 1] - fit_centre_[1]) * fit_scale_;
+        faceVerts_[i * 3 + 2] = (verts[i * 3 + 2] - fit_centre_[2]) * fit_scale_;
+    }
+    fitted_face_ = true;
+    rebuildFace();
+}
+
+void RootScene::setFaceColors(const std::vector<float>& rgb) {
+    faceColors_ = rgb;
+    rebuildFace();
+}
+
+void RootScene::clearFittedFace() {
+    if (!fitted_face_) return;
+    faceVerts_ = canonVerts_;
+    faceTris_  = canonTris_;
+    fitted_face_ = false;
+    fit_norm_set_ = false;
+    rebuildFace();
+}
+
+// Scene bounds, for framing. Recomputed whenever the geometry is re-uploaded,
+// which during a grow is every frame -- it is a min/max over the node array
+// that was just built anyway.
+void RootScene::updateBounds(const std::vector<float>& nodes) {
+    if (nodes.size() < 3) return;
+    float lo[3] = {nodes[0], nodes[1], nodes[2]};
+    float hi[3] = {nodes[0], nodes[1], nodes[2]};
+    for (size_t i = 0; i + 2 < nodes.size(); i += 3)
+        for (int c = 0; c < 3; ++c) {
+            lo[c] = std::min(lo[c], nodes[i + c]);
+            hi[c] = std::max(hi[c], nodes[i + c]);
+        }
+    for (int c = 0; c < 3; ++c) idleCentre_[c] = 0.5f * (lo[c] + hi[c]);
+    idleExtent_ = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], 1.f});
+}
+
+void RootScene::applyFraming() {
+    if (!autoFrame) return;
+    const auto& ms = revealedMasks();
+    if (focusMask >= 0 && focusMask < (int)ms.size()) {
+        const auto& m = ms[size_t(focusMask)];
+        target[0] = m.pos[0]; target[1] = m.pos[1]; target[2] = m.pos[2];
+        radius = (std::max(m.rWidth, m.rHeight) * 3.5f + 4.0f) * zoom;
+        // Its own angle, advanced independently: the whole-scene orbit is
+        // centred on the piece, so borrowing it would sweep this mask out of
+        // frame and eventually behind the camera.
+        if (autoOrbit) azimuth = focusAngle_;
+    } else {
+        target[0] = idleCentre_[0];
+        target[1] = idleCentre_[1];
+        target[2] = idleCentre_[2];
+        radius = (idleExtent_ * 0.75f + 12.0f) * zoom;
+    }
+    if (rr_) rr_->fog.refDist = radius;
 }
 
 void RootScene::ensureSize(int w, int h) {
     if (rr_) rr_->resize(std::max(1, w), std::max(1, h));
 }
 
-void RootScene::reseed(uint32_t seed) { buildSyntheticRoots(seed); }
+void RootScene::reseed(uint32_t seed) {
+    // Reseeding used to build the synthetic stand-in unconditionally. With a
+    // grow running, that uploaded a whole different structure which advance()
+    // then overwrote on the next frame -- a flash of something that was never
+    // part of the scene. The stand-in exists for when CPlantBox is not there
+    // at all, and that is the only time it should appear.
+    if (simAvailable_) {
+        simParams_.seed = seed;
+        regrow();
+    } else {
+        buildSyntheticRoots(seed);
+    }
+}
 
 // A recursive branching structure standing in for CPlantBox roots: capsule
 // segments that taper and split, grown both up (a canopy) and down (roots).
@@ -321,6 +551,8 @@ void RootScene::advance(double dt) {
     rr_->pulse.time    += (float)dt;
     rr_->wispTime      += (float)dt;
 
+    focusAngle_ += orbitRate * (float)dt;
+
     // Live growth: advance a few steps, then re-upload geometry + revealed masks.
     if (useSim_ && sim_ && !sim_->done()) {
         for (int i = 0; i < std::max(1, simStepsPerFrame) && !sim_->done(); ++i)
@@ -328,8 +560,10 @@ void RootScene::advance(double dt) {
         std::vector<float> nodes, radii; std::vector<int> segs;
         sim_->geometry(nodes, segs, radii);
         rr_->uploadSegments(nodes, segs, radii);
+        updateBounds(nodes);
         uploadFaceFromMasks();
     }
+    applyFraming();
 }
 
 id<MTLTexture> RootScene::render(id<MTLCommandBuffer> cb) {

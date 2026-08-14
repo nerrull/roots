@@ -43,10 +43,20 @@ add_executable(mirror_app
     src/mirror_scene.mm
     src/metal_root_renderer.mm
     src/root_scene.mm
+    src/transition_scene.mm
+    src/fit_view_scene.mm
+    src/midi_in.mm
+    src/ui_params.cpp
+    src/text_sdf.cpp
+    src/text_overlay.mm
     src/fullscreen_present.mm)
 target_include_directories(mirror_app PRIVATE src)
 target_link_libraries(mirror_app PRIVATE mirror_imgui glfw
     "-framework Metal" "-framework MetalKit" "-framework QuartzCore"
+    "-framework CoreMIDI"
+    # CoreText/CoreGraphics rasterise the text overlay's glyphs. Cocoa pulls
+    # both in transitively, but the overlay uses them directly.
+    "-framework CoreText" "-framework CoreGraphics"
     "-framework Cocoa" "-framework Foundation")
 
 # Neuromirror sibling repo (MSL sources, face_landmarker.task, canonical model).
@@ -79,9 +89,15 @@ add_library(mirror_core STATIC
     src/fit_target.cpp
     src/face_mask.cpp
     src/face_tracker.cpp
+    src/face_basis.cpp
+    src/face_fit.cpp
     src/mirror_render.cpp
     src/pond_state.cpp)
 target_include_directories(mirror_core PUBLIC src ${MLX_INCLUDE_DIRS})
+# external/ is gitignored: face_basis.bin and the MediaPipe dylib are both
+# generated, not committed. PUBLIC so the tests find the basis too.
+target_compile_definitions(mirror_core PUBLIC
+    MIRROR_APP_EXTERNAL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/external")
 target_link_libraries(mirror_core PUBLIC mlx)
 
 # --- MediaPipe face tracking -------------------------------------------------
@@ -195,6 +211,21 @@ target_link_libraries(fit_test PRIVATE mirror_core)
 add_executable(fit_target_test tests/fit_target_test.cpp)
 target_link_libraries(fit_target_test PRIVATE mirror_core)
 
+# The PBD cloth solver, headless. No Metal, no GPU -- which is why the solver was
+# written GL-free in the first place.
+add_executable(cloth_test tests/cloth_test.cpp)
+target_include_directories(cloth_test PRIVATE src)
+
 # Landmark outline -> training mask. Pure geometry; no MediaPipe needed.
 add_executable(face_mask_test tests/face_mask_test.cpp)
 target_link_libraries(face_mask_test PRIVATE mirror_core)
+
+# Morphable-model fit against synthetic landmarks with a known ground-truth
+# identity. Needs external/face_basis.bin; skips cleanly without it.
+add_executable(face_fit_test tests/face_fit_test.cpp)
+target_link_libraries(face_fit_test PRIVATE mirror_core)
+
+# The text overlay's distance transform, against an analytically known shape.
+# Pure geometry: no Metal, no fonts, no MLX.
+add_executable(text_sdf_test tests/text_sdf_test.cpp src/text_sdf.cpp)
+target_include_directories(text_sdf_test PRIVATE src)

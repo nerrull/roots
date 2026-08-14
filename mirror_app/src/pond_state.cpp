@@ -240,6 +240,11 @@ void Pond::beginFit(const std::vector<float>& rgb, int h, int w,
     // screen, rather than discarding the aesthetic state and beginning at noise.
     trainer_.reset(cfg_, weights(p));
     trainer_.setTarget(rgb, h, w, mask);
+    // Freeze the latent here. Everything the network learns from now on is
+    // learned with this z on its input, so it is the only value the fitted
+    // region can be drawn at -- and pinning it at the start is what frees the
+    // rest of the frame to animate.
+    fit_z_ = p.z;
     fit_feats_key_.reset();
     fit_feats_px_ = -1;
     fitting_ = true;
@@ -261,9 +266,20 @@ void Pond::rebuildFitFeatures(const PondParams& p) {
     // Ripples are excluded from the fit deliberately: they are a decorative
     // field the target does not contain, so training against them asks the
     // network to reproduce them and the subject at once.
+    //
+    // The latent is the one captured at beginFit, not the live p.z: with z
+    // animating outside the region, training against the moving value would
+    // teach the face a different input every frame.
+    //
+    // The input offset, by contrast, is live -- that is the whole mechanism of
+    // the head-stabilised mode. Shifting it by the subject's displacement means
+    // a given point on a face lands at the same network input wherever the
+    // person stands, so the weights stop having to re-learn the same face at a
+    // new address every time they move.
     auto feats = multi_ripple_features(c, {}, p.ring_freq, p.decay,
-                                       p.z_amp * std::sin(p.z),
-                                       p.z_amp * std::cos(p.z), 0.f, 0.f);
+                                       p.z_amp * std::sin(fit_z_),
+                                       p.z_amp * std::cos(fit_z_), 0.f, 0.f,
+                                       p.coord_off_x, p.coord_off_y);
     if (trainer_.masked()) {
         // Gather the rows the mask selected, so the forward and backward see
         // only those pixels rather than the whole grid.
@@ -273,13 +289,20 @@ void Pond::rebuildFitFeatures(const PondParams& p) {
     mx::eval(fit_feats_);
     fit_feats_key_ = std::array<int, 2>{h, w};
     fit_feats_px_ = trainer_.trainedPixels();
+    fit_feats_in_ = {p.coord_off_x, p.coord_off_y, fit_z_};
 }
 
 float Pond::fitStep(float lr, const PondParams& p) {
     if (!fitting_ || !trainer_.hasTarget()) return -1.f;
     const std::array<int, 2> key{trainer_.targetH(), trainer_.targetW()};
+    const std::array<float, 3> in{p.coord_off_x, p.coord_off_y, fit_z_};
     if (!fit_feats_key_ || *fit_feats_key_ != key ||
-        fit_feats_px_ != trainer_.trainedPixels()) {
+        fit_feats_px_ != trainer_.trainedPixels() || fit_feats_in_ != in) {
+        // In the head-stabilised mode this rebuild happens on every frame the
+        // subject moves. It is affordable because the fit grid is small (a few
+        // hundred pixels wide, ~14k rows): the same rebuild at display
+        // resolution was the largest avoidable cost in the render loop, which
+        // is why the render grid's features are still cached hard.
         rebuildFitFeatures(p);
     }
     return trainer_.step(fit_feats_, lr);
@@ -291,16 +314,42 @@ mx::array Pond::render(int lh, int lw, double t, const PondParams& p) {
     const float asp = static_cast<float>(lw) / static_cast<float>(lh);
     const auto& coords = coord_grid(lh, lw, asp);
 
-    float offx = 0.f, offy = 0.f;
+    float offx = p.coord_off_x, offy = p.coord_off_y;
     if (p.color_travel) {
-        offx = 0.6f * asp * std::cos(0.5f * (float)t);
-        offy = 0.6f * std::sin(0.5f * (float)t);
+        offx += 0.6f * asp * std::cos(0.5f * (float)t);
+        offy += 0.6f * std::sin(0.5f * (float)t);
     }
-    const float zv = p.z_amp * std::sin(p.z);
-    const float zc = p.z_amp * std::cos(p.z);
-    auto feats = multi_ripple_features(coords, sources(asp, t, p), p.ring_freq, p.decay,
-                                       zv, zc, p.warp, p.core_rolloff ? p.core_radius : 0.f,
-                                       offx, offy);
+
+    // Inside the region the latent is whatever the fit was trained at; outside
+    // it follows the live phase.
+    //
+    // Only when the split is actually asked for, though: otherwise both ends
+    // are p.z and the crossfade is a no-op, which keeps `z` an ordinary global
+    // control on a fitted network. Pinning it unconditionally would be the
+    // safer-looking choice and the wrong one -- it would silently disable a
+    // knob that has always worked, and moving z under a fit on purpose is a
+    // legitimate thing to want.
+    const bool region_live = p.region.on && trainer_.ready();
+    const bool z_split = region_live && p.z_free_outside;
+    const float z_in = z_split ? fit_z_ : p.z;
+    FitRegion reg = p.region;
+    reg.on = region_live && (p.z_free_outside || p.grey_outside > 0.f);
+
+    std::optional<mx::array> field;
+    if (reg.on && reg.use_field &&
+        p.region_field.size() == size_t(reg.fw) * reg.fh && reg.fw > 1) {
+        field = mx::array(p.region_field.data(), {reg.fh, reg.fw}, mx::float32);
+    } else {
+        reg.use_field = false;   // fall back to the box rather than to nothing
+    }
+
+    last_src_ = sources(asp, t, p);
+    auto outs = multi_ripple_features_region(
+        coords, last_src_, p.ring_freq, p.decay,
+        p.z_amp * std::sin(z_in), p.z_amp * std::cos(z_in),
+        p.warp, p.core_rolloff ? p.core_radius : 0.f, offx, offy,
+        reg, p.z_amp * std::sin(p.z), p.z_amp * std::cos(p.z), field);
+    auto feats = outs[0];
 
     // A fitted network is used as-is: its weights were learned, not derived
     // from detail/contrast, so re-scaling them would undo the fit.
@@ -312,12 +361,21 @@ mx::array Pond::render(int lh, int lw, double t, const PondParams& p) {
     img = clip01(mx::astype(img, mx::float32));
 
     // greyscale (single channel) → RGB, flat or amplitude-driven per pixel.
-    const bool doMix = p.amp_drives_color || p.color_mix < 1.0f;
+    const bool grey_falloff = reg.on && p.grey_outside > 0.f;
+    const bool doMix = p.amp_drives_color || p.color_mix < 1.0f || grey_falloff;
     mx::array mixv = S(p.color_mix);
     if (p.amp_drives_color) {
         auto disp = mx::reshape(mx::abs(mx::astype(mx::slice(feats, {0, 4}, {N, 5}), mx::float32)),
                                 {lh, lw, 1});
         mixv = mx::multiply(clip01(mx::multiply(disp, S(p.amp_gain))), S(p.color_mix));
+    }
+    if (grey_falloff) {
+        // The subject keeps its colour, the field around it drains to grey, and
+        // the handover rides the *same* weight the latent used -- so there is
+        // one edge in the picture, not two that nearly agree.
+        auto rw = mx::reshape(mx::astype(outs[1], mx::float32), {lh, lw, 1});
+        mixv = mx::multiply(mixv,
+                            mx::subtract(S(1.f), mx::multiply(S(p.grey_outside), rw)));
     }
     if (doMix) {
         int gc = p.grey_channel;

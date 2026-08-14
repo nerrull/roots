@@ -26,6 +26,16 @@ public:
     // Render the current frame and return the low-res RGBA16F texture.
     id<MTLTexture> render();
 
+    // The frame render() just produced, as CPU-side RGB floats in [0,1]
+    // (lowH*lowW*3, row-major). The face-mask texturing path needs pixels
+    // rather than a texture: the mask is coloured per vertex by projecting the
+    // fitted mesh into this image and sampling it, so the mask ends up wearing
+    // the network's reconstruction of the face rather than the camera's.
+    //
+    // Cheap: MLX arrays live in unified memory, so at this point the data is
+    // already CPU-addressable and this is a copy, not a GPU readback.
+    const std::vector<float>& lastImageRGB() const { return cpu_rgb_; }
+
     void reseed() { pond_.reseed(); }
 
     // --- live fitting -------------------------------------------------------
@@ -53,5 +63,6 @@ private:
     mirror::PondParams params_;
     double t_ = 0.0;
     int lw_, lh_;
+    std::vector<float> cpu_rgb_;
     id<MTLTexture> tex_ = nil;
 };

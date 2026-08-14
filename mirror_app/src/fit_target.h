@@ -46,6 +46,43 @@ void DownsampleRGB8(const unsigned char* src, int src_w, int src_h,
                     int stride_px, int r_off, int b_off,
                     int dst_w, int dst_h, std::vector<float>& dst);
 
+// The same resampling, to 8-bit RGB. MediaPipe wants bytes, and it wants them
+// at a higher resolution than the fit grid -- the fit runs at a couple of
+// hundred pixels wide, where a face is too few pixels to land landmarks well.
+// Sharing the filter with the float path keeps the tracker looking at the same
+// image the network is being fitted to, only larger.
+void DownsampleToRGB8(const unsigned char* src, int src_w, int src_h,
+                      int stride_px, int r_off, int b_off,
+                      int dst_w, int dst_h, std::vector<unsigned char>& dst);
+
+// Flip an RGB8 image horizontally, in place.
+void MirrorRGB8(int w, int h, std::vector<unsigned char>& rgb);
+
+// Translate an h*w*3 float image by (dx, dy) pixels, clamping at the edges.
+//
+// This is how a moving subject is held still for the fit: shift the frame by
+// the head's displacement and the head lands in the same place every time, so
+// the network is always shown the same problem. Whole pixels only -- a
+// subpixel shift would resample the face every frame, and feeding the fit a
+// slightly differently-filtered image each time is exactly the noise the
+// stabilising is meant to remove.
+//
+// Edge clamp rather than black fill: the vacated strip is outside the mask and
+// never trained, but a hard black band there would still show up the moment
+// anyone widened the crop.
+void ShiftRGBF(int w, int h, int dx, int dy, std::vector<float>& rgb);
+
+// Place a region of the frame: resample so that the normalised point
+// (src_cx, src_cy) lands at the centre and everything is scaled about it by
+// `scale`. Bilinear, clamped at the edges.
+//
+// This is the head-centred mode with a size control on it: scale > 1 makes the
+// subject bigger on screen. Unlike ShiftRGBF it must interpolate, so it does
+// refilter the image every frame -- the cost of choosing the size rather than
+// accepting whatever distance the person is standing at.
+void PlaceRGBF(int w, int h, float src_cx, float src_cy, float scale,
+               std::vector<float>& rgb);
+
 // A still image loaded once. `load_rgb` is supplied by the caller because
 // decoding is platform code (main.mm uses NSImage) and this header is not.
 class StaticFitTarget : public FitTarget {

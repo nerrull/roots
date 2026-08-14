@@ -35,6 +35,16 @@ public:
     // keep training on the previous target rather than treating it as an error.
     bool poll(int w, int h, std::vector<float>& rgb) override;
 
+    // The most recently polled frame as RGB8 at (w, h), for the face tracker.
+    //
+    // Deliberately reads the *retained* snapshot rather than pulling a new one:
+    // a second pollColor() here would race the fit path for frames, and the two
+    // would end up looking at different moments -- the mask would then be a
+    // face outline from one frame applied to the pixels of another, which shows
+    // up as the fit smearing whenever anyone moves. Returns false before the
+    // first successful poll().
+    bool lastFrameRGB8(int w, int h, std::vector<unsigned char>& rgb) const;
+
     const char* name() const override { return "kinect"; }
     std::string error() const override;
     uint64_t frames() const override;

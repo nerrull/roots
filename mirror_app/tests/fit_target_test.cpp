@@ -262,14 +262,208 @@ void test_masked_fit() {
     check(finite, "no NaN from a zero-pixel mask");
 }
 
+// Switching the fit grid mid-fit. Routine now that the crop and the whole feed
+// carry their own downscale: every time someone walks in or out of frame, the
+// target changes size under a fit that is already running. The weights are a
+// continuous function and the optimiser state is per-weight, so none of it
+// depends on the pixel count -- but that is a claim about the code, and this is
+// the test of it.
+void test_regrid() {
+    std::printf("\nregridding mid-fit\n");
+    const auto target_a = moving_disc(96, 128, 0.5f, 0.5f);
+    mirror::Pond pond(11);
+    mirror::PondParams p;
+    p.sine_layers = 1;
+    p.sine_w0 = 30.f;
+
+    pond.beginFit(target_a, 96, 128, p);
+    for (int i = 0; i < 300; ++i) pond.fitStep(3e-3f, p);
+    const float settled = mse(render_to_vec(pond, 96, 128, p), target_a);
+    const int steps_before = pond.fitSteps();
+
+    // Same picture, finer grid -- what a crop appearing does.
+    const auto target_b = moving_disc(192, 256, 0.5f, 0.5f);
+    pond.updateFitTarget(target_b, 192, 256);
+    const float after_swap = mse(render_to_vec(pond, 96, 128, p), target_a);
+    std::printf("       settled %.5f -> %.5f immediately after the regrid\n",
+                settled, after_swap);
+    check(std::fabs(after_swap - settled) < 1e-6f,
+          "the regrid alone does not disturb the image");
+    check(pond.fitSteps() == steps_before, "nor does it reset the step count");
+
+    for (int i = 0; i < 60; ++i) pond.fitStep(3e-3f, p);
+    const float after_steps = mse(render_to_vec(pond, 96, 128, p), target_a);
+    std::printf("       after 60 steps on the new grid: %.5f\n", after_steps);
+    check(std::isfinite(after_steps), "training continues on the new grid");
+    check(after_steps < settled * 2.f, "and does not undo the fit");
+
+    // ...and back down again, the way losing a crop goes.
+    pond.updateFitTarget(target_a, 96, 128);
+    for (int i = 0; i < 60; ++i) pond.fitStep(3e-3f, p);
+    const float back = mse(render_to_vec(pond, 96, 128, p), target_a);
+    std::printf("       back on the coarse grid: %.5f\n", back);
+    check(std::isfinite(back) && back < settled * 2.f, "regridding is reversible");
+}
+
+// The fit region: the subject holds still while the field around it moves.
+//
+// This is the one claim of the feature that cannot be read off the code -- z is
+// an MLP input, so "the latent animates outside and not inside" is a statement
+// about what the network draws, and the only way to know it holds is to render
+// twice and compare.
+void test_region() {
+    std::printf("\nfit region\n");
+    const int FH = 96, FW = 128;
+    const float side = 0.30f;
+    const auto target = square_image(FH, FW, side);
+    const auto mask = square_mask(FH, FW, side);
+
+    mirror::Pond pond(11);
+    mirror::PondParams p;
+    p.sine_layers = 1;
+    p.sine_w0 = 30.f;
+    p.z = 0.4f;                       // a deliberately non-zero starting latent
+    pond.beginFit(target, FH, FW, p, mask);
+    for (int i = 0; i < 400; ++i) pond.fitStep(3e-3f, p);
+    check(std::fabs(pond.fitZ() - 0.4f) < 1e-6f,
+          "the fit remembers the latent it was begun at");
+
+    // A region over the trained square. square_mask is square in pixels, which
+    // in coord space (x over (-asp, asp), y over (-1, 1)) is side_frac either
+    // way.
+    p.region.on = true;
+    p.region.cx = 0.f; p.region.cy = 0.f;
+    p.region.hx = side; p.region.hy = side;
+    p.region.fade_start = 0.f;
+    p.region.fade_width = 0.2f;
+
+    // Well outside the feather band, so this is not measuring the crossfade.
+    std::vector<unsigned char> outer(size_t(FH) * FW, 0);
+    for (int y = 0; y < FH; ++y) {
+        const float v = 2.f * (float(y) / float(FH - 1) - 0.5f);
+        for (int x = 0; x < FW; ++x) {
+            const float u = 2.f * (float(x) / float(FW - 1) - 0.5f) * (float(FW) / FH);
+            if (std::max(std::fabs(u), std::fabs(v)) > side * 2.5f)
+                outer[size_t(y) * FW + x] = 1;
+        }
+    }
+
+    p.z_free_outside = true;
+    const auto a = render_to_vec(pond, FH, FW, p);
+    p.z += 2.0f;                       // the latent moves on
+    const auto b = render_to_vec(pond, FH, FW, p);
+
+    const float in_move = masked_mse(a, b, mask, /*inside=*/true);
+    const float out_move = masked_mse(a, b, outer, /*inside=*/true);
+    std::printf("       z moved by 2.0: subject changed %.8f, field %.8f\n",
+                in_move, out_move);
+    check(in_move < 1e-9f, "the fitted subject does not move with the latent");
+    check(out_move > 1e-4f, "the field around it does");
+
+    // Without the split, z is an ordinary global control again -- a fit must
+    // not quietly disable it.
+    p.z_free_outside = false;
+    const auto c = render_to_vec(pond, FH, FW, p);
+    check(masked_mse(a, c, mask, true) > 1e-9f,
+          "with the split off, z moves the subject too");
+
+    // Colour: the subject keeps its own, the field drains. Checked as
+    // saturation, since a greyscale pixel is one with no channel spread.
+    p.z_free_outside = false;
+    p.grey_outside = 1.f;
+    const auto g = render_to_vec(pond, FH, FW, p);
+    auto saturation = [&](const std::vector<float>& img,
+                          const std::vector<unsigned char>& m) {
+        double acc = 0.0; size_t n = 0;
+        for (size_t i = 0; i < m.size(); ++i) {
+            if (!m[i]) continue;
+            const float r = img[i * 3], gg = img[i * 3 + 1], bb = img[i * 3 + 2];
+            acc += std::max({r, gg, bb}) - std::min({r, gg, bb});
+            ++n;
+        }
+        return n ? acc / n : 0.0;
+    };
+    const double sat_in = saturation(g, mask), sat_out = saturation(g, outer);
+    std::printf("       grey outside: subject saturation %.5f, field %.5f\n",
+                sat_in, sat_out);
+    check(sat_out < 1e-5, "the field outside is fully desaturated");
+    check(sat_in > sat_out, "the subject keeps its colour");
+
+    // Half-strength must land between, not snap.
+    p.grey_outside = 0.5f;
+    const auto h = render_to_vec(pond, FH, FW, p);
+    const double sat_half = saturation(h, outer);
+    const double sat_full = saturation(a, outer);
+    std::printf("       half strength: %.5f (off %.5f, full %.5f)\n",
+                sat_half, sat_full, sat_out);
+    check(sat_half > sat_out && sat_half < sat_full, "half drains halfway");
+}
+
+// The frame shift behind the head-centred fit mode. Worth testing on its own:
+// a shift with the sign flipped still produces a stable-looking fit, of a face
+// moved twice as far as it should be, which is not obvious from the output.
+void test_shift() {
+    std::printf("\nframe shift\n");
+    const int W = 8, H = 6;
+    std::vector<float> img(size_t(W) * H * 3, 0.f);
+    auto at = [&](int x, int y) { return &img[(size_t(y) * W + x) * 3]; };
+    at(2, 1)[0] = 1.f;                       // a red mark left of centre, high up
+
+    auto shifted = img;
+    mirror::ShiftRGBF(W, H, 2, 3, shifted);
+    auto px = [&](const std::vector<float>& v, int x, int y) {
+        return v[(size_t(y) * W + x) * 3];
+    };
+    check(px(shifted, 4, 4) > 0.99f, "a +x/+y shift moves the mark down-right");
+    check(px(shifted, 2, 1) < 0.01f, "and vacates where it was");
+
+    // Round trip: the mark returns, even though the edges cannot.
+    mirror::ShiftRGBF(W, H, -2, -3, shifted);
+    check(px(shifted, 2, 1) > 0.99f, "the inverse shift brings it back");
+
+    // Edge clamp, not wrap: shifting right replicates the leftmost column into
+    // the strip it vacates. A wrap would drag the far side of the room into the
+    // crop the moment anyone stood near the frame's edge.
+    std::vector<float> edge(size_t(W) * H * 3, 0.f);
+    for (int y = 0; y < H; ++y) {
+        edge[(size_t(y) * W + 0) * 3 + 1] = 1.f;          // green leading column
+        edge[(size_t(y) * W + (W - 1)) * 3 + 2] = 1.f;    // blue trailing column
+    }
+    mirror::ShiftRGBF(W, H, 3, 0, edge);
+    bool clamped = true, wrapped = false;
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x <= 3; ++x)
+            clamped = clamped && edge[(size_t(y) * W + x) * 3 + 1] > 0.99f;
+        for (int x = 0; x < W; ++x)
+            wrapped = wrapped || edge[(size_t(y) * W + x) * 3 + 2] > 0.5f;
+    }
+    check(clamped, "the vacated strip repeats the leading column");
+    check(!wrapped, "content pushed off the far edge is gone, not wrapped");
+
+    auto same = img;
+    mirror::ShiftRGBF(W, H, 0, 0, same);
+    check(mse(same, img) == 0.f, "a zero shift is exactly a no-op");
+
+    // A shift past the frame must leave something defined everywhere rather
+    // than reading out of bounds.
+    auto far_ = img;
+    mirror::ShiftRGBF(W, H, 99, -99, far_);
+    bool finite = true;
+    for (float v : far_) finite = finite && std::isfinite(v);
+    check(finite, "a shift larger than the frame stays in bounds");
+}
+
 }  // namespace
 
 int main() {
     std::printf("fit_target_test: resampling + live-target fitting\n");
     test_downsample();
     test_static_target();
+    test_shift();
     test_tracking();
     test_masked_fit();
+    test_regrid();
+    test_region();
     std::printf("\n%s\n", g_fail == 0 ? "PASS" : "FAIL");
     return g_fail == 0 ? 0 : 1;
 }

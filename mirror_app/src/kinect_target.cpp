@@ -56,6 +56,21 @@ std::string KinectFitTarget::deviceInfo() const {
            impl_->src.pipelineName();
 }
 
+bool KinectFitTarget::lastFrameRGB8(int w, int h,
+                                    std::vector<unsigned char>& rgb) const {
+    if (!impl_->have_frame || w <= 0 || h <= 0) return false;
+    const FrameSnapshot& f = impl_->frame;
+    if (!f.valid || f.data.empty()) return false;
+
+    const bool rgbx = (f.format == libfreenect2::Frame::RGBX);
+    DownsampleToRGB8(f.data.data(), f.width, f.height, f.bytes_per_pixel,
+                     rgbx ? 0 : 2, rgbx ? 2 : 0, w, h, rgb);
+    // Mirrored to match what poll() produced, so landmark coordinates line up
+    // with the fit target's pixels.
+    if (impl_->mirrored) MirrorRGB8(w, h, rgb);
+    return true;
+}
+
 bool KinectFitTarget::poll(int w, int h, std::vector<float>& rgb) {
     if (!impl_->src.isOpen() || w <= 0 || h <= 0) return false;
 

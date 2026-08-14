@@ -135,6 +135,19 @@ bool FaceTracker::detect(const unsigned char* rgb, int w, int h,
         for (uint32_t i = 0; i < bs.categories_count; ++i) {
             out.blendshapes[i] = bs.categories[i].score;
         }
+        // Names, once. The fitter matches blendshapes to the face basis's
+        // expression modes by ARKit name, so it needs to know which score is
+        // which -- and taking that from the model rather than from a
+        // hardcoded 52-item list means a different .task bundle cannot
+        // silently shift every expression by one slot.
+        if (out.blendshape_names.size() != out.blendshapes.size()) {
+            out.blendshape_names.clear();
+            out.blendshape_names.reserve(bs.categories_count);
+            for (uint32_t i = 0; i < bs.categories_count; ++i) {
+                const char* n = bs.categories[i].category_name;
+                out.blendshape_names.emplace_back(n ? n : "");
+            }
+        }
     }
 
     if (res.facial_transformation_matrixes &&
