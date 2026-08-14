@@ -63,7 +63,8 @@ not try to correct it.
   handling, unit conversion, per-buffer parameter ramps.
 - `SoundEnginePlugin/RacineCombFXParams.{h,cpp}` — parameter block and RTPC handling.
 - `WwisePlugin/` — authoring-side plug-in and the property XML.
-- `tests/comb_response_test.cpp` — standalone validation.
+- `../tests/comb_response_test.cpp` — standalone validation, in the shared
+  `wwise_plugins/tests/` directory alongside the other plug-ins' harnesses.
 
 Parameter order appears in three places that must stay in sync: the IDs in
 `RacineCombFXParams.h`, the reads in `SetParamsBlock`, and the writes in
@@ -72,9 +73,9 @@ Parameter order appears in three places that must stay in sync: the IDs in
 ## Tests
 
 ```sh
-cd tests
-c++ -std=c++17 -O2 -I../SoundEnginePlugin comb_response_test.cpp \
-    ../SoundEnginePlugin/RacineCombDSP.cpp -o comb_response_test
+cd ..    # wwise_plugins/
+c++ -std=c++17 -O2 -I. tests/comb_response_test.cpp \
+    RacineComb/SoundEnginePlugin/RacineCombDSP.cpp -o comb_response_test
 ./comb_response_test
 ```
 

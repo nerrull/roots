@@ -1,13 +1,17 @@
-// Standalone validation for the Racine Comb DSP. No Wwise SDK required.
+// Offline validation for the Racine Comb DSP. No Wwise SDK required: the DSP
+// carries no Wwise headers, so it links straight into this harness.
 //
-//   c++ -std=c++17 -O2 -I../SoundEnginePlugin comb_response_test.cpp \
-//       ../SoundEnginePlugin/RacineCombDSP.cpp -o comb_response_test
+// Unlike the MI harnesses alongside it, this one asserts rather than renders a
+// WAV — the comb's correctness is a claim about where its peaks sit, which is
+// measurable. Checks that the peaks land where the frequency parameter says,
+// that a swept parameter stays click-free and stable, and that the feedback
+// loop cannot run away.
 //
-// Checks that the comb peaks land where the frequency parameter says they do,
-// that a swept parameter stays click-free and stable, and that the loop cannot
-// run away at maximum feedback.
+// Build (from wwise_plugins/):
+//   c++ -std=c++17 -O2 -I. tests/comb_response_test.cpp \
+//       RacineComb/SoundEnginePlugin/RacineCombDSP.cpp -o comb_response_test
 
-#include "RacineCombDSP.h"
+#include "RacineComb/SoundEnginePlugin/RacineCombDSP.h"
 
 #include <cmath>
 #include <cstdio>
