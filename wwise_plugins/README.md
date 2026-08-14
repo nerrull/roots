@@ -6,7 +6,7 @@ Silicon macOS against Wwise 2025.1.9.
 | Plug-in | Type | MI module | Rate | Notes |
 |---|---|---|---|---|
 | Modal Resonator | Effect | Rings | 48 kHz native | Bus audio excites the resonator; onsets strum it |
-| Granular Texture | Effect | Clouds | 32 kHz, resampled | All four playback modes |
+| Granular Texture | Effect | Clouds | 32 kHz, resampled | Granular, looping delay, spectral (see below) |
 | Modal Voice | Effect | Elements | 32 kHz, resampled | Bus audio feeds the exciter inputs |
 | Macro Oscillator | Source | Plaits | 48 kHz native | All 24 synthesis engines |
 | Drum Synth | Source | Peaks | 48 kHz native | Bass drum, snare, hi-hat, FM drum |
@@ -71,6 +71,21 @@ writes a WAV you can listen to. They check for silence, divergence, NaNs and
 (for the resampled plug-ins) FIFO underruns, and the resampler has its own test
 covering rate ratios, round-trip gain and alias rejection.
 
+Note that these measure **sustained RMS over the second half of the render**,
+not peak. Peak alone is not a useful check here: a mode that emits one burst
+and then dies still shows a healthy peak, which is exactly how the Clouds
+stretch problem below went unnoticed at first.
+
+## Demo audio
+
+```sh
+tests/run_demo.sh
+```
+
+Writes four WAVs: a Drum Synth pattern, then that pattern run through each of
+the three effects (Rings through all six resonator models, Clouds through its
+working playback modes, Elements struck/bowed/blown).
+
 ## Things worth knowing
 
 **`TEST` is required, not optional.** It selects stmlib's portable code paths
@@ -99,6 +114,26 @@ scales only the last branch of its ternary. Every use here is parenthesized.
 only from 48 kHz; at other host rates those two plug-ins pass audio through dry
 rather than silently detune. Rings and Plaits run at any rate with a pitch
 correction applied.
+
+## Known issue: Clouds stretch mode is silent
+
+`PLAYBACK_MODE_STRETCH` (the WSOLA time-stretch) produces no sustained output.
+It emits roughly a second of audio and then goes quiet.
+
+This is **not** the wrapper. It fails identically when `GranularProcessor` is
+driven directly at its native 32 kHz with no resampler, no block adapter and no
+FIFO, and it fails at every position and size setting, at all four quality
+settings, and at Prepare-to-Process ratios from 1:1 up to 1024:1. The other
+three modes sustain fine through the same code path. The cause has not been
+found yet; the mode is excluded from the demo and marked as a known failure in
+the test rather than silently skipped.
+
+## Gotcha: Clouds' density control is bipolar
+
+Density has a dead zone at exactly 0.5, where grains fire only from the trigger
+input -- which nothing is patched to here, so the granular mode goes quiet.
+Sustained RMS at density 0.0 or 1.0 is around 0.49; at 0.5 it is zero. Sweep the
+control off centre, and do not use 0.5 as a "neutral" default.
 
 ## Known gap: no authoring plug-in
 
