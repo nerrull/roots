@@ -226,3 +226,35 @@ checkout `MI_EURORACK_DIR` points at:
 None of these change behavior — they're compiler-portability fixes only —
 but they do mean the checkout at `MI_EURORACK_DIR` is no longer byte-identical
 to upstream `pichenettes/eurorack`.
+
+### Installing on your Mac
+
+`wwise_plugins/dist/` has the built `<Plugin>.dll` + `<Plugin>.xml` pairs
+(Release config) for all six plug-ins, checked into the repo. Wwise Authoring
+on macOS is the Windows build running inside a CrossOver bottle bundled with
+`Wwise.app` — see `Wwise.app/Contents/SharedSupport/Wwise/share/{crossover,wine}`
+— so installing is the same as on a native Windows Wwise install, just reached
+through the bottle:
+
+1. In Finder, right-click `Wwise.app` (wherever your `2025.1.9` install lives)
+   → **Show Package Contents**.
+2. Under `Contents/SharedSupport/Wwise/share/crossover` (or `wine`, depending
+   on which is in use), find the bottle's `drive_c`.
+3. Inside that `drive_c`, locate the Wwise install's plug-ins folder — the same
+   relative path `wp.py build` writes to on Windows:
+   `Program Files/Audiokinetic/Wwise <version>/Authoring/x64/Release/bin/Plugins/`.
+4. Copy all twelve files from `wwise_plugins/dist/` (six `.dll` + six `.xml`)
+   into that `Plugins/` folder.
+5. Quit and relaunch Wwise Authoring. Racine Comb, Modal Resonator, Granular
+   Texture, Macro Oscillator, Modal Voice and Drum Synth should now show up in
+   the Effects/Sources insert lists.
+
+**Version caveat:** these DLLs were built against the **2025.1.10** SDK, one
+point release ahead of the **2025.1.9** Authoring app this repo's macOS
+prerequisites section names. `AK::Wwise::Plugin` (the API these plug-ins use)
+has been stable since Wwise 2022.1, so 2025.1.10 plug-ins are likely to load
+fine in a 2025.1.9 Authoring host, but this hasn't been verified against an
+actual 2025.1.9 install. If a plug-in fails to appear or Wwise logs a load
+error, that version gap is the first thing to check — rebuild against the
+2025.1.9 SDK's `Win32_vc170`/`x64_vc170` headers and libs instead (or update
+Wwise Authoring to 2025.1.10) to rule it out.
