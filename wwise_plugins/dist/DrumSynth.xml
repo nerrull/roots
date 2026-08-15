@@ -36,7 +36,7 @@ for the documentation about the plugin xml format
     </PlatformSupport>
     </PluginInfo>
     <Properties>
-      <Property Name="Model" Type="int32" SupportRTPCType="Not Supported" DisplayName="Model">
+      <Property Name="Model" Type="int32" DisplayName="Model">
         <DefaultValue>0</DefaultValue>
         <AudioEnginePropertyID>0</AudioEnginePropertyID>
         <Restrictions>

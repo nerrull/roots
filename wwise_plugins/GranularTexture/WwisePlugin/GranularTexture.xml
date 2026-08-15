@@ -40,7 +40,7 @@ for the documentation about the plugin xml format
     </PlatformSupport>
     </PluginInfo>
     <Properties>
-      <Property Name="PlaybackMode" Type="int32" SupportRTPCType="Not Supported" DisplayName="Playback Mode">
+      <Property Name="PlaybackMode" Type="int32" DisplayName="Playback Mode">
         <DefaultValue>0</DefaultValue>
         <AudioEnginePropertyID>0</AudioEnginePropertyID>
         <Restrictions>
@@ -54,7 +54,7 @@ for the documentation about the plugin xml format
           </ValueRestriction>
         </Restrictions>
       </Property>
-      <Property Name="Quality" Type="int32" SupportRTPCType="Not Supported" DisplayName="Quality">
+      <Property Name="Quality" Type="int32" DisplayName="Quality">
         <DefaultValue>0</DefaultValue>
         <AudioEnginePropertyID>1</AudioEnginePropertyID>
         <Restrictions>
