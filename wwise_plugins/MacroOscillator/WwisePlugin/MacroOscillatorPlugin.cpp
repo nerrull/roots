@@ -37,8 +37,18 @@ MacroOscillatorPlugin::~MacroOscillatorPlugin()
 
 bool MacroOscillatorPlugin::GetBankParameters(const GUID & in_guidPlatform, AK::Wwise::Plugin::DataWriter& in_dataWriter) const
 {
-    // Write bank data here
+    // Write order must match MacroOscillatorSourceParams::SetParamsBlock.
+    in_dataWriter.WriteInt32(m_propertySet.GetInt32(in_guidPlatform, "Engine"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Pitch"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Harmonics"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Timbre"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Morph"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Decay"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "LpgColour"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "AuxMix"));
     in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Duration"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Level"));
+    in_dataWriter.WriteBool(m_propertySet.GetBool(in_guidPlatform, "Triggered"));
 
     return true;
 }

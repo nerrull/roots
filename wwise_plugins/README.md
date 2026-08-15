@@ -115,6 +115,25 @@ four playback modes, Elements struck/bowed/blown).
 
 ## Things worth knowing
 
+**`GetBankParameters()` in the authoring plug-in must actually write every
+property, in the same order `SetParamsBlock()` reads them.** `wp.py new`
+scaffolds it as a single placeholder float write. RacineComb's was filled in
+correctly from the start (see the comment in `RacineCombPlugin.cpp`); the five
+MI-based plug-ins' authoring `GetBankParameters()` were still the unmodified
+placeholder until this was caught, meaning every SoundBank built from them
+carried garbage parameter data. This is invisible to any offline test that
+calls into the DSP core directly (as all the test harnesses in this repo do,
+by design, to run without a Wwise install) -- it only shows up in the actual
+sound engine running against a real bank, whether that's "Play" inside Wwise
+Authoring or a shipped game build, because only that path exercises bank
+(de)serialization at all. If a plug-in sounds fine when you nudge its sliders
+live in the property editor but wrong/silent/glitchy whenever a sound actually
+plays back through it, this mismatch is the first thing to check -- read
+`SetParamsBlock()` in `SoundEnginePlugin/*FXParams.cpp` (or `*SourceParams.cpp`)
+for the true order, and confirm `GetBankParameters()` in `WwisePlugin/*Plugin.cpp`
+writes every one of those properties, by the same names as the XML, in the
+same order, with the matching `Write<Type>`/`Get<Type>` pair for each.
+
 **None of the MI cores guard against denormals, and Wwise doesn't enable
 flush-to-zero for you.** A resonator or filter decaying toward silence over
 several seconds (Rings' tail runs up to 12s at high damping) spends a lot of

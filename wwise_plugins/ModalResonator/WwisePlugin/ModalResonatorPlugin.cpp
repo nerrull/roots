@@ -37,8 +37,19 @@ ModalResonatorPlugin::~ModalResonatorPlugin()
 
 bool ModalResonatorPlugin::GetBankParameters(const GUID & in_guidPlatform, AK::Wwise::Plugin::DataWriter& in_dataWriter) const
 {
-    // Write bank data here
-    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Placeholder"));
+    // Write order must match ModalResonatorFXParams::SetParamsBlock.
+    in_dataWriter.WriteInt32(m_propertySet.GetInt32(in_guidPlatform, "Model"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Structure"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Brightness"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Damping"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Position"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Pitch"));
+    in_dataWriter.WriteInt32(m_propertySet.GetInt32(in_guidPlatform, "Chord"));
+    in_dataWriter.WriteInt32(m_propertySet.GetInt32(in_guidPlatform, "Polyphony"));
+    in_dataWriter.WriteBool(m_propertySet.GetBool(in_guidPlatform, "InternalExciter"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Spread"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "DryWet"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "OutputLevel"));
 
     return true;
 }

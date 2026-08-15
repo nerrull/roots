@@ -37,8 +37,25 @@ ModalVoicePlugin::~ModalVoicePlugin()
 
 bool ModalVoicePlugin::GetBankParameters(const GUID & in_guidPlatform, AK::Wwise::Plugin::DataWriter& in_dataWriter) const
 {
-    // Write bank data here
-    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Placeholder"));
+    // Write order must match ModalVoiceFXParams::SetParamsBlock.
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Pitch"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Geometry"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Brightness"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Damping"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Position"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Space"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "BowLevel"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "BlowLevel"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "BlowMeta"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "StrikeLevel"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "StrikeMeta"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Contour"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Strength"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "DryWet"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Level"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Spread"));
+    in_dataWriter.WriteBool(m_propertySet.GetBool(in_guidPlatform, "Gate"));
+    in_dataWriter.WriteBool(m_propertySet.GetBool(in_guidPlatform, "ExternalExciter"));
 
     return true;
 }

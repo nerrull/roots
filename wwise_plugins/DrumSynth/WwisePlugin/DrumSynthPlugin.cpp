@@ -37,8 +37,14 @@ DrumSynthPlugin::~DrumSynthPlugin()
 
 bool DrumSynthPlugin::GetBankParameters(const GUID & in_guidPlatform, AK::Wwise::Plugin::DataWriter& in_dataWriter) const
 {
-    // Write bank data here
+    // Write order must match DrumSynthSourceParams::SetParamsBlock.
+    in_dataWriter.WriteInt32(m_propertySet.GetInt32(in_guidPlatform, "Model"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Param1"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Param2"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Param3"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Param4"));
     in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Duration"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Level"));
 
     return true;
 }

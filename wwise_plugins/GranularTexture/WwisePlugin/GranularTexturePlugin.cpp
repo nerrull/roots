@@ -37,8 +37,19 @@ GranularTexturePlugin::~GranularTexturePlugin()
 
 bool GranularTexturePlugin::GetBankParameters(const GUID & in_guidPlatform, AK::Wwise::Plugin::DataWriter& in_dataWriter) const
 {
-    // Write bank data here
-    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Placeholder"));
+    // Write order must match GranularTextureFXParams::SetParamsBlock.
+    in_dataWriter.WriteInt32(m_propertySet.GetInt32(in_guidPlatform, "PlaybackMode"));
+    in_dataWriter.WriteInt32(m_propertySet.GetInt32(in_guidPlatform, "Quality"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Position"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Size"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Pitch"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Density"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Texture"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "DryWet"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "StereoSpread"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Feedback"));
+    in_dataWriter.WriteReal32(m_propertySet.GetReal32(in_guidPlatform, "Reverb"));
+    in_dataWriter.WriteBool(m_propertySet.GetBool(in_guidPlatform, "Freeze"));
 
     return true;
 }
