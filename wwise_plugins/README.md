@@ -1,7 +1,10 @@
 # Mutable Instruments Wwise plug-ins
 
-Wwise plug-ins wrapping five Mutable Instruments DSP cores, built for Apple
-Silicon macOS against Wwise 2025.1.9.
+Wwise plug-ins wrapping five Mutable Instruments DSP cores. The sound-engine
+(runtime) side was built for Apple Silicon macOS against Wwise 2025.1.9; the
+authoring side (the Windows DLL that makes each plug-in appear in the Wwise UI)
+was built separately against Wwise 2025.1.10 on Windows — see
+[Authoring plug-in (Windows)](#authoring-plug-in-windows).
 
 | Plug-in | Type | MI module | Rate | Notes |
 |---|---|---|---|---|
@@ -12,10 +15,13 @@ Silicon macOS against Wwise 2025.1.9.
 | Drum Synth | Source | Peaks | 48 kHz native | Bass drum, snare, hi-hat, FM drum |
 
 The MI code is MIT licensed (Copyright Emilie Gillet) and is compiled
-**unmodified** from a checkout of `pichenettes/eurorack`; everything specific to
-Wwise lives in this directory. Note that the MIT grant covers the code, not the
-Mutable Instruments trademark or the module names, which is why the plug-ins are
-named for what they do.
+**unmodified** from a checkout of `pichenettes/eurorack` for the macOS build;
+everything specific to Wwise lives in this directory. The Windows authoring
+build needs a handful of MSVC-portability patches applied to the `eurorack`
+checkout itself — see
+[Patches required in the `eurorack` checkout](#patches-required-in-the-eurorack-checkout).
+Note that the MIT grant covers the code, not the Mutable Instruments trademark
+or the module names, which is why the plug-ins are named for what they do.
 
 ## Layout
 
@@ -151,17 +157,72 @@ input -- which nothing is patched to here, so the granular mode goes quiet.
 Sustained RMS at density 0.0 or 1.0 is around 0.49; at 0.5 it is zero. Sweep the
 control off centre, and do not use 0.5 as a "neutral" default.
 
-## Known gap: no authoring plug-in
+## Authoring plug-in (Windows)
 
-Only the sound-engine (runtime) side is built. Wwise Authoring on macOS is the
-Windows application running under CrossOver/Wine, so the authoring component —
-the one that makes a plug-in appear in the Wwise UI with a property editor — has
-to be a Windows DLL. `wp.py premake Mac` reflects this by passing
-`--authoring=no`.
+Wwise Authoring on macOS is the Windows application running under
+CrossOver/Wine, so the authoring component — the DLL that makes a plug-in
+appear in the Wwise UI with a property page — has to be built on Windows. That
+build now exists for all six plug-ins.
 
-In practice that means these are usable from code today (register the factory
-and drive the parameters via `AK::SoundEngine::SetRTPCValue` / the plug-in
-param API), but they will not show up in the Wwise Authoring effect list until
-the authoring DLL is built with the Windows toolchain. The `WwisePlugin/`
-directory and `.xml` property definitions in each plug-in are already written
-for that build.
+### Prerequisites
+
+- Wwise SDK for Windows, vc170 (VS2022) toolset — e.g.
+  `Wwise_2025.1.10.9233\SDK`. Set `WWISEROOT` / `WWISESDK` accordingly.
+- Visual Studio 2022 (or Build Tools 2022) with the **Desktop development with
+  C++** workload, plus the **C++ MFC for latest v143 build tools** component —
+  the GUI plug-in derives from `PluginMFCWindows<>`, and
+  `AK/Wwise/Plugin/PluginMFCWindows.h` compiles to nothing without MFC on the
+  include path.
+- The `eurorack` checkout for the five MI-based plug-ins (see Prerequisites
+  above), including its `stmlib` submodule: `git submodule update --init stmlib`.
+
+### Building
+
+```
+set WWISEROOT=Q:\Development\Audiokinetic\Wwise_2025.1.10.9233
+set WWISESDK=%WWISEROOT%\SDK
+set MI_EURORACK_DIR=Q:\Development\git\eurorack
+
+for %P in (RacineComb ModalResonator GranularTexture MacroOscillator ModalVoice DrumSynth) do (
+  cd %P
+  python %WWISEROOT%\Scripts\Build\Plugins\wp.py premake Authoring
+  python %WWISEROOT%\Scripts\Build\Plugins\wp.py build Authoring -t vc170 -c Release
+  cd ..
+)
+```
+
+`build Authoring` compiles both the sound-engine static lib and the authoring
+DLL and drops the DLL straight into
+`<Wwise install>\Authoring\x64\<Config>\bin\Plugins\`, where Wwise Authoring
+loads plug-ins from — no separate install step needed for local testing.
+`package.py Authoring` (see the SDK docs) produces a distributable bundle.
+
+### Patches required in the `eurorack` checkout
+
+The MI DSP code was only ever compiled with Clang/GCC on macOS before. Getting
+it through MSVC needs a few small, non-functional patches to the checkout
+itself (not to anything in this repo) — apply these to whatever `eurorack`
+checkout `MI_EURORACK_DIR` points at:
+
+- **`NOMINMAX` / `_USE_MATH_DEFINES`** — already added to each plug-in's
+  `PremakePlugin.lua` defines. Without `NOMINMAX`, `windows.h`'s `min`/`max`
+  macros corrupt every `std::min`/`std::max` call in the MI sources (surfaces
+  as bizarre `error C2589: illegal token on right side of '::'`). Without
+  `_USE_MATH_DEFINES`, MSVC's `<cmath>` does not define `M_PI`.
+- **`stmlib/stmlib.h`** — add `#define __attribute__(x)` under
+  `#if defined(_MSC_VER)`. The GCC/Clang-only `__attribute__((always_inline))`
+  syntax in `stmlib/utils/dsp.h` doesn't compile under MSVC; it's a hint, so
+  dropping it is safe.
+- **`{rings,elements,plaits}/resources.cc`** — three empty-initializer arrays
+  (`const T* table[] = {};`) are a GCC/Clang extension MSVC rejects
+  (`error C2466`). Guard with `#if defined(_MSC_VER)` and give them one
+  `nullptr` element; the arrays are unused by these modules either way.
+- **`plaits/dsp/fm/algorithms.h`** — drop the four explicit-specialization
+  forward declarations for `Algorithms<4>`/`Algorithms<6>`'s `opcodes_` and
+  `renderers_`. MSVC parses incomplete-array static-member specializations
+  differently from GCC/Clang and errors either way (with or without `extern`);
+  the definitions in `algorithms.cc` are sufficient on their own.
+
+None of these change behavior — they're compiler-portability fixes only —
+but they do mean the checkout at `MI_EURORACK_DIR` is no longer byte-identical
+to upstream `pichenettes/eurorack`.

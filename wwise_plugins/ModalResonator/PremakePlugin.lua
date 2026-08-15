@@ -49,7 +49,11 @@ local MI_FILES =
 
 -- TEST selects stmlib's portable code paths: plain C++ instead of Cortex-M
 -- inline assembly, and IN_RAM as a no-op instead of an STM32 linker section.
-local MI_DEFINES = { "TEST" }
+-- NOMINMAX and _USE_MATH_DEFINES: the MI DSP code was only ever compiled with
+-- Clang/GCC before. Without NOMINMAX, windows.h's min/max macros corrupt every
+-- std::min/std::max call in the MI sources; without _USE_MATH_DEFINES, MSVC's
+-- <cmath> does not define M_PI.
+local MI_DEFINES = { "TEST", "NOMINMAX", "_USE_MATH_DEFINES" }
 
 local Plugin = {}
 Plugin.name = "ModalResonator"
