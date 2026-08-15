@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<WwiseDocument Type="WorkUnit" ID="{6AD90058-A5CB-46D0-B340-E454A687BC2F}" SchemaVersion="97">
+<WwiseDocument Type="WorkUnit" ID="{FF55A9B9-7A42-49EA-9350-655851002F6C}" SchemaVersion="133">
 	<Effects>
-		<WorkUnit Name="Factory GranularTexture Effects" ID="{6AD90058-A5CB-46D0-B340-E454A687BC2F}" PersistMode="Standalone">
+		<WorkUnit Name="Factory GranularTexture Effects" ID="{FF55A9B9-7A42-49EA-9350-655851002F6C}" PersistMode="Standalone">
 			<ChildrenList>
-				<Effect Name="Frozen Texture Pad" ID="{8E8DE834-2407-44EF-B2CF-3E0ACFC95B1B}" PluginName="Granular Texture" CompanyID="64" PluginID="11577" PluginType="3">
+				<Effect Name="Frozen Texture Pad" ID="{EEF66F93-74A1-4C7E-B19F-C4ECAAAAFDBC}" PluginName="Granular Texture" CompanyID="64" PluginID="11577" PluginType="3">
 						<PropertyList>
 							<Property Name="PlaybackMode" Type="int32" Value="0"/>
 							<Property Name="Freeze" Type="bool" Value="True"/>
@@ -13,7 +13,7 @@
 							<Property Name="DryWet" Type="Real32" Value="100"/>
 						</PropertyList>
 					</Effect>
-				<Effect Name="Time-Stretch Drone" ID="{663FA017-6249-4E55-820F-166C58F889F5}" PluginName="Granular Texture" CompanyID="64" PluginID="11577" PluginType="3">
+				<Effect Name="Time-Stretch Drone" ID="{F47E7330-EA0B-44AD-8070-3FC5F0ACB3DA}" PluginName="Granular Texture" CompanyID="64" PluginID="11577" PluginType="3">
 						<PropertyList>
 							<Property Name="PlaybackMode" Type="int32" Value="1"/>
 							<Property Name="Size" Type="Real32" Value="0.9"/>
@@ -21,7 +21,7 @@
 							<Property Name="DryWet" Type="Real32" Value="100"/>
 						</PropertyList>
 					</Effect>
-				<Effect Name="Lo-Fi Looping Delay" ID="{0E8C1662-1A8D-4D3A-A636-7F82B87369A3}" PluginName="Granular Texture" CompanyID="64" PluginID="11577" PluginType="3">
+				<Effect Name="Lo-Fi Looping Delay" ID="{C69CA841-B273-44B6-ADD4-2C4C77733849}" PluginName="Granular Texture" CompanyID="64" PluginID="11577" PluginType="3">
 						<PropertyList>
 							<Property Name="PlaybackMode" Type="int32" Value="2"/>
 							<Property Name="Feedback" Type="Real32" Value="0.6"/>
@@ -29,7 +29,7 @@
 							<Property Name="DryWet" Type="Real32" Value="50"/>
 						</PropertyList>
 					</Effect>
-				<Effect Name="Spectral Shimmer" ID="{19D509A1-CDC5-4C41-B8EF-C43A9D9A2838}" PluginName="Granular Texture" CompanyID="64" PluginID="11577" PluginType="3">
+				<Effect Name="Spectral Shimmer" ID="{B1A7B01C-CFA0-47E5-A63B-3D3A06D51012}" PluginName="Granular Texture" CompanyID="64" PluginID="11577" PluginType="3">
 						<PropertyList>
 							<Property Name="PlaybackMode" Type="int32" Value="3"/>
 							<Property Name="Pitch" Type="Real32" Value="12"/>

@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<WwiseDocument Type="WorkUnit" ID="{63C01364-1BD9-4B70-8F3E-C1F57A31664B}" SchemaVersion="97">
+<WwiseDocument Type="WorkUnit" ID="{03998AD7-36C1-46FA-B77A-165EA74DC797}" SchemaVersion="133">
 	<Effects>
-		<WorkUnit Name="Factory ModalResonator Effects" ID="{63C01364-1BD9-4B70-8F3E-C1F57A31664B}" PersistMode="Standalone">
+		<WorkUnit Name="Factory ModalResonator Effects" ID="{03998AD7-36C1-46FA-B77A-165EA74DC797}" PersistMode="Standalone">
 			<ChildrenList>
-				<Effect Name="Struck Bell" ID="{035B5804-75D0-4526-AC73-1257DD8C4DB6}" PluginName="Modal Resonator" CompanyID="64" PluginID="31992" PluginType="3">
+				<Effect Name="Struck Bell" ID="{06D1FF58-D9D3-4926-B760-9A6C85685E2E}" PluginName="Modal Resonator" CompanyID="64" PluginID="31992" PluginType="3">
 						<PropertyList>
 							<Property Name="Model" Type="int32" Value="0"/>
 							<Property Name="Structure" Type="Real32" Value="0.3"/>
@@ -14,7 +14,7 @@
 							<Property Name="DryWet" Type="Real32" Value="70"/>
 						</PropertyList>
 					</Effect>
-				<Effect Name="Sympathetic Chord Pad" ID="{07F01CB7-F5CB-4A5C-BD12-BF7F6E89B51A}" PluginName="Modal Resonator" CompanyID="64" PluginID="31992" PluginType="3">
+				<Effect Name="Sympathetic Chord Pad" ID="{56B4DB3C-9B21-4567-88F9-9823F4911412}" PluginName="Modal Resonator" CompanyID="64" PluginID="31992" PluginType="3">
 						<PropertyList>
 							<Property Name="Model" Type="int32" Value="1"/>
 							<Property Name="Structure" Type="Real32" Value="0.5"/>
@@ -26,7 +26,7 @@
 							<Property Name="DryWet" Type="Real32" Value="60"/>
 						</PropertyList>
 					</Effect>
-				<Effect Name="Plucked String Lead" ID="{6BD5BFE8-EB2F-49C4-AE96-C8B786CDC40F}" PluginName="Modal Resonator" CompanyID="64" PluginID="31992" PluginType="3">
+				<Effect Name="Plucked String Lead" ID="{ED332302-2C40-45EC-9214-379AE1685F91}" PluginName="Modal Resonator" CompanyID="64" PluginID="31992" PluginType="3">
 						<PropertyList>
 							<Property Name="Model" Type="int32" Value="2"/>
 							<Property Name="Structure" Type="Real32" Value="0.4"/>
@@ -37,7 +37,7 @@
 							<Property Name="DryWet" Type="Real32" Value="80"/>
 						</PropertyList>
 					</Effect>
-				<Effect Name="FM Voice Growl" ID="{83EC8487-8FB5-4C56-A012-816C22F370A6}" PluginName="Modal Resonator" CompanyID="64" PluginID="31992" PluginType="3">
+				<Effect Name="FM Voice Growl" ID="{60045AD5-0D65-4836-8C84-5F1CE6A03FB3}" PluginName="Modal Resonator" CompanyID="64" PluginID="31992" PluginType="3">
 						<PropertyList>
 							<Property Name="Model" Type="int32" Value="3"/>
 							<Property Name="Structure" Type="Real32" Value="0.7"/>
