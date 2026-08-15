@@ -6,6 +6,7 @@ Peaks is MIT licensed, Copyright 2013 Emilie Gillet.
 
 #include "DrumSynthSource.h"
 #include "../DrumSynthConfig.h"
+#include "../../mi_common/mi_denormal_guard.h"
 
 #include <AK/AkWwiseSDKVersion.h>
 
@@ -156,6 +157,10 @@ void DrumSynthSource::UpdateParameters()
 
 void DrumSynthSource::Execute(AkAudioBuffer* io_pBuffer)
 {
+    // See mi_common/mi_denormal_guard.h -- Peaks' envelope/decay tails have no
+    // denormal protection of their own.
+    mi::EnableFlushToZero();
+
     m_durationHandler.ProduceBuffer(io_pBuffer);
 
     const AkUInt32 uNumChannels = io_pBuffer->NumChannels();

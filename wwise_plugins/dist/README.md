@@ -44,3 +44,11 @@ Settings" by the fixed IDs Audiokinetic's own SynthOne factory presets use for
 this Wwise version. If it still doesn't import cleanly, the parameter values
 documented in each preset's XML are valid starting points to punch in by hand
 on a Sound's Source Editor instead.
+
+**Update:** the first version of the source-plugin presets also failed with
+`Element 'SourcePlugin': Missing child element(s). Expected is one of
+(ReferenceList, ChildrenList, StateInfo, ObjectLists, Language)` -- the
+`<SourcePlugin>` element needs an (empty is fine) `<ReferenceList/>` after its
+`<PropertyList>`, which the first version omitted. Fixed. Still worth backing
+up your project before importing, since this has only been schema-checked
+against real examples, not confirmed by a clean import.

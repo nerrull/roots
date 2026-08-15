@@ -7,6 +7,7 @@ unmodified out of the eurorack repository; this file is the Wwise adaptation.
 
 #include "GranularTextureFX.h"
 #include "../GranularTextureConfig.h"
+#include "../../mi_common/mi_denormal_guard.h"
 
 #include <AK/AkWwiseSDKVersion.h>
 
@@ -170,6 +171,10 @@ void GranularTextureFX::UpdateParameters()
 
 void GranularTextureFX::Execute(AkAudioBuffer* io_pBuffer)
 {
+    // See mi_common/mi_denormal_guard.h -- Clouds' feedback/reverb paths decay
+    // toward zero and MI's own code has no denormal protection.
+    mi::EnableFlushToZero();
+
     const AkUInt32 uNumChannels = io_pBuffer->NumChannels();
     const AkUInt16 uValidFrames = io_pBuffer->uValidFrames;
     if (uNumChannels == 0 || !m_bRateSupported)

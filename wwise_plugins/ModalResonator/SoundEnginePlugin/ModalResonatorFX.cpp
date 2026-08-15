@@ -7,6 +7,7 @@ unmodified out of the eurorack repository; this file is the Wwise adaptation.
 
 #include "ModalResonatorFX.h"
 #include "../ModalResonatorConfig.h"
+#include "../../mi_common/mi_denormal_guard.h"
 
 #include <AK/AkWwiseSDKVersion.h>
 #include <AK/DSP/AkApplyGain.h>
@@ -149,6 +150,11 @@ void ModalResonatorFX::UpdatePatch()
 
 void ModalResonatorFX::Execute(AkAudioBuffer* io_pBuffer)
 {
+    // Rings' resonator bank decays toward zero for up to kMaxTailSeconds; MI's
+    // filter code has no denormal protection of its own, and Wwise does not
+    // enable FTZ/DAZ for plug-in DSP threads (see mi_denormal_guard.h).
+    mi::EnableFlushToZero();
+
     const AkUInt32 uNumChannels = io_pBuffer->NumChannels();
     const AkUInt16 uValidFrames = io_pBuffer->uValidFrames;
     if (uNumChannels == 0)

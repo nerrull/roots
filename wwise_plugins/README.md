@@ -115,6 +115,37 @@ four playback modes, Elements struck/bowed/blown).
 
 ## Things worth knowing
 
+**None of the MI cores guard against denormals, and Wwise doesn't enable
+flush-to-zero for you.** A resonator or filter decaying toward silence over
+several seconds (Rings' tail runs up to 12s at high damping) spends a lot of
+that time with sample values in denormal range, where floating-point ops are
+commonly 10-100x slower without FTZ/DAZ enabled -- this reads as real-time-only
+audio glitching/dropouts that never shows up in an offline render, since only
+the live sound engine has a hard deadline to miss. `RacineCombDSP.cpp` already
+guarded its own feedback loop with an additive constant; the five MI-based
+plug-ins now call `mi::EnableFlushToZero()` (see `mi_common/mi_denormal_guard.h`)
+once per `Execute()`/`Process()` instead, since none of MI's own filter code
+carries any denormal protection.
+
+**Clouds' granular mode needs its buffer to fill before it sounds "full."**
+`GranularProcessor` records incoming audio into a rolling buffer (roughly a
+second's worth, at these buffer sizes) and reads grains from a `Position`
+within that recorded history. Right after the effect starts, most of that
+history is still silence, so granular texture builds up over about a second
+rather than being immediate -- this is inherent to the algorithm, not
+wrapper latency (the resampler + block adapter's actual structural latency is
+under 2 ms). `Position` near 0 (most recent audio) shortens the perceived
+delay; `Position` near the default 0.5 (mid-buffer) waits longer for real
+content to reach that point in the loop.
+
+**Peaks doesn't have separate Snare and Hi-Hat models.** Despite `DrumSynth`'s
+`Model` property listing them as distinct choices, `peaks::Processors::Configure()`
+(`peaks/processors.h`) shares one algorithm between them and silently forces
+Snare unless Tone (`Param2`) **and** Snappy (`Param3`) are both `>= ~99.2%`
+(`65000/65535`) -- below that band it reverts to Snare regardless of what
+`set_function()` was called with, no matter what `Model` says. Hi-Hat presets
+need `Param2`/`Param3` pinned near 1.0.
+
 **`TEST` is required, not optional.** It selects stmlib's portable code paths
 instead of Cortex-M inline assembly, and makes `IN_RAM` a no-op rather than an
 STM32-only `.ramtext` section attribute that will not link on macOS.

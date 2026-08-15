@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<WwiseDocument Type="WorkUnit" ID="{CC4AD875-4DB6-4DA1-BEE8-AAEC56A38A02}" SchemaVersion="133">
+<WwiseDocument Type="WorkUnit" ID="{13FDD612-5BDD-4BAF-8344-AEDC434235EA}" SchemaVersion="133">
 	<Containers>
-		<WorkUnit Name="Factory DrumSynth Sounds" ID="{CC4AD875-4DB6-4DA1-BEE8-AAEC56A38A02}" PersistMode="Standalone">
+		<WorkUnit Name="Factory DrumSynth Sounds" ID="{13FDD612-5BDD-4BAF-8344-AEDC434235EA}" PersistMode="Standalone">
 			<ChildrenList>
-				<Folder Name="DrumSynth" ID="{77624C31-592B-44B7-91AB-CE551D6B36F4}" ShortID="1102385395">
+				<Folder Name="DrumSynth" ID="{790F4A02-61EB-4C8B-AE44-F17854A211EB}" ShortID="705969593">
 					<ChildrenList>
-						<Sound Name="Deep Sub Kick" ID="{E95D1A3B-638B-47F9-943F-FB843F2633D9}" ShortID="1745501390">
+						<Sound Name="Deep Sub Kick" ID="{F2F2643D-6133-48DD-AD02-6C35B501B96A}" ShortID="1139943377">
 						<ReferenceList>
 							<Reference Name="Conversion" CompanyID="4095" PluginID="65535" PluginType="15">
 								<ObjectRef Name="Default Conversion Settings" ID="{6D1B890C-9826-4384-BF07-C15223E9FB56}" WorkUnitID="{BB3A0F0F-2450-440E-933E-B9BF945DF4D1}"/>
@@ -15,7 +15,7 @@
 							</Reference>
 						</ReferenceList>
 						<ChildrenList>
-							<SourcePlugin Name="Deep Sub Kick" ID="{7DD6CA88-E02A-4530-A35B-64992D97CCFA}" ShortID="144956193" PluginName="Drum Synth" CompanyID="64" PluginID="22143">
+							<SourcePlugin Name="Deep Sub Kick" ID="{B7DFF463-BD99-497A-A7DE-39C8C258C799}" ShortID="1442105613" PluginName="Drum Synth" CompanyID="64" PluginID="22143">
 								<PropertyList>
 									<Property Name="Model" Type="int32" Value="0"/>
 									<Property Name="Param1" Type="Real32" Value="0.15"/>
@@ -23,10 +23,11 @@
 									<Property Name="Param3" Type="Real32" Value="0.3"/>
 									<Property Name="Param4" Type="Real32" Value="0.4"/>
 								</PropertyList>
+								<ReferenceList/>
 							</SourcePlugin>
 						</ChildrenList>
 					</Sound>
-					<Sound Name="Tight Snare" ID="{9DF330EB-716B-44BB-902D-59BF385FF226}" ShortID="316315657">
+					<Sound Name="Tight Snare" ID="{FADE2351-1DA6-441C-BDBC-E20030246C9B}" ShortID="202883995">
 						<ReferenceList>
 							<Reference Name="Conversion" CompanyID="4095" PluginID="65535" PluginType="15">
 								<ObjectRef Name="Default Conversion Settings" ID="{6D1B890C-9826-4384-BF07-C15223E9FB56}" WorkUnitID="{BB3A0F0F-2450-440E-933E-B9BF945DF4D1}"/>
@@ -36,7 +37,7 @@
 							</Reference>
 						</ReferenceList>
 						<ChildrenList>
-							<SourcePlugin Name="Tight Snare" ID="{A9042F99-3817-4570-9735-C4ED7CEBE9CB}" ShortID="184121049" PluginName="Drum Synth" CompanyID="64" PluginID="22143">
+							<SourcePlugin Name="Tight Snare" ID="{FC2E6C03-0FD5-463C-948C-EDE45461F460}" ShortID="1155345859" PluginName="Drum Synth" CompanyID="64" PluginID="22143">
 								<PropertyList>
 									<Property Name="Model" Type="int32" Value="1"/>
 									<Property Name="Param1" Type="Real32" Value="0.4"/>
@@ -44,10 +45,11 @@
 									<Property Name="Param3" Type="Real32" Value="0.7"/>
 									<Property Name="Param4" Type="Real32" Value="0.3"/>
 								</PropertyList>
+								<ReferenceList/>
 							</SourcePlugin>
 						</ChildrenList>
 					</Sound>
-					<Sound Name="Closed Hi-Hat" ID="{E6E3C0CB-40EB-4E3D-84B9-ED6AE9B24E5C}" ShortID="1055073715">
+					<Sound Name="Closed Hi-Hat" ID="{640C5BBE-E1F7-42A0-AC6F-87A4B25F46F3}" ShortID="1982265586">
 						<ReferenceList>
 							<Reference Name="Conversion" CompanyID="4095" PluginID="65535" PluginType="15">
 								<ObjectRef Name="Default Conversion Settings" ID="{6D1B890C-9826-4384-BF07-C15223E9FB56}" WorkUnitID="{BB3A0F0F-2450-440E-933E-B9BF945DF4D1}"/>
@@ -57,18 +59,19 @@
 							</Reference>
 						</ReferenceList>
 						<ChildrenList>
-							<SourcePlugin Name="Closed Hi-Hat" ID="{8FB80F9C-3284-425E-9A96-0C381885C875}" ShortID="116670795" PluginName="Drum Synth" CompanyID="64" PluginID="22143">
+							<SourcePlugin Name="Closed Hi-Hat" ID="{8ADA4C93-2B55-40A9-B7A8-A43F64E37599}" ShortID="580453789" PluginName="Drum Synth" CompanyID="64" PluginID="22143">
 								<PropertyList>
 									<Property Name="Model" Type="int32" Value="2"/>
 									<Property Name="Param1" Type="Real32" Value="0.7"/>
-									<Property Name="Param2" Type="Real32" Value="0.5"/>
-									<Property Name="Param3" Type="Real32" Value="0.6"/>
+									<Property Name="Param2" Type="Real32" Value="1.0"/>
+									<Property Name="Param3" Type="Real32" Value="1.0"/>
 									<Property Name="Param4" Type="Real32" Value="0.15"/>
 								</PropertyList>
+								<ReferenceList/>
 							</SourcePlugin>
 						</ChildrenList>
 					</Sound>
-					<Sound Name="FM Metallic Hit" ID="{AB631BC1-FB8D-4B9D-9346-B93AD811CBEE}" ShortID="433802408">
+					<Sound Name="FM Metallic Hit" ID="{A8C3D443-E1A1-4A4D-9251-EFFB2C4EAE43}" ShortID="818385983">
 						<ReferenceList>
 							<Reference Name="Conversion" CompanyID="4095" PluginID="65535" PluginType="15">
 								<ObjectRef Name="Default Conversion Settings" ID="{6D1B890C-9826-4384-BF07-C15223E9FB56}" WorkUnitID="{BB3A0F0F-2450-440E-933E-B9BF945DF4D1}"/>
@@ -78,7 +81,7 @@
 							</Reference>
 						</ReferenceList>
 						<ChildrenList>
-							<SourcePlugin Name="FM Metallic Hit" ID="{77B839D7-BFFA-4717-9644-1610764660AE}" ShortID="867333630" PluginName="Drum Synth" CompanyID="64" PluginID="22143">
+							<SourcePlugin Name="FM Metallic Hit" ID="{544D77F2-5883-436A-B0CB-973801C7753B}" ShortID="206991947" PluginName="Drum Synth" CompanyID="64" PluginID="22143">
 								<PropertyList>
 									<Property Name="Model" Type="int32" Value="3"/>
 									<Property Name="Param1" Type="Real32" Value="0.5"/>
@@ -86,6 +89,7 @@
 									<Property Name="Param3" Type="Real32" Value="0.8"/>
 									<Property Name="Param4" Type="Real32" Value="0.5"/>
 								</PropertyList>
+								<ReferenceList/>
 							</SourcePlugin>
 						</ChildrenList>
 					</Sound>

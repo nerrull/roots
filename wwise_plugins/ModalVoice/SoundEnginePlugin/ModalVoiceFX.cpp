@@ -7,6 +7,7 @@ unmodified out of the eurorack repository; this file is the Wwise adaptation.
 
 #include "ModalVoiceFX.h"
 #include "../ModalVoiceConfig.h"
+#include "../../mi_common/mi_denormal_guard.h"
 
 #include <AK/AkWwiseSDKVersion.h>
 
@@ -172,6 +173,10 @@ void ModalVoiceFX::UpdatePatch()
 
 void ModalVoiceFX::Execute(AkAudioBuffer* io_pBuffer)
 {
+    // See mi_common/mi_denormal_guard.h -- Elements' resonator and reverb
+    // decay toward zero and MI's own code has no denormal protection.
+    mi::EnableFlushToZero();
+
     const AkUInt32 uNumChannels = io_pBuffer->NumChannels();
     const AkUInt16 uValidFrames = io_pBuffer->uValidFrames;
     if (uNumChannels == 0 || !m_bRateSupported)

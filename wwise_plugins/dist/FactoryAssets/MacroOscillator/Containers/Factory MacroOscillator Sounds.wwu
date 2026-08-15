@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<WwiseDocument Type="WorkUnit" ID="{C19C34F0-2CCA-4D97-8559-CE82C3524513}" SchemaVersion="133">
+<WwiseDocument Type="WorkUnit" ID="{96950C25-0299-4F73-950E-1133AB4485F1}" SchemaVersion="133">
 	<Containers>
-		<WorkUnit Name="Factory MacroOscillator Sounds" ID="{C19C34F0-2CCA-4D97-8559-CE82C3524513}" PersistMode="Standalone">
+		<WorkUnit Name="Factory MacroOscillator Sounds" ID="{96950C25-0299-4F73-950E-1133AB4485F1}" PersistMode="Standalone">
 			<ChildrenList>
-				<Folder Name="MacroOscillator" ID="{A6FB897B-533C-4480-8E32-B7EFF86EC673}" ShortID="54280169">
+				<Folder Name="MacroOscillator" ID="{1B09F5A5-A12D-41CD-A4D2-E4D9063505C8}" ShortID="1205097367">
 					<ChildrenList>
-						<Sound Name="Classic Analog Bass" ID="{3E20A480-52FB-4757-A972-AE492CA869B4}" ShortID="322544403">
+						<Sound Name="Classic Analog Bass" ID="{4444400C-AB78-4D34-B426-CCED979ACA3E}" ShortID="1261545705">
 						<ReferenceList>
 							<Reference Name="Conversion" CompanyID="4095" PluginID="65535" PluginType="15">
 								<ObjectRef Name="Default Conversion Settings" ID="{6D1B890C-9826-4384-BF07-C15223E9FB56}" WorkUnitID="{BB3A0F0F-2450-440E-933E-B9BF945DF4D1}"/>
@@ -15,7 +15,7 @@
 							</Reference>
 						</ReferenceList>
 						<ChildrenList>
-							<SourcePlugin Name="Classic Analog Bass" ID="{22AE56B3-11AF-49C3-8313-7F660FD65DE1}" ShortID="1878147332" PluginName="Macro Oscillator" CompanyID="64" PluginID="31225">
+							<SourcePlugin Name="Classic Analog Bass" ID="{AE4D92E3-5198-4643-8390-143E1C6D1539}" ShortID="813713888" PluginName="Macro Oscillator" CompanyID="64" PluginID="31225">
 								<PropertyList>
 									<Property Name="Engine" Type="int32" Value="8"/>
 									<Property Name="Pitch" Type="Real32" Value="36"/>
@@ -26,10 +26,11 @@
 									<Property Name="LpgColour" Type="Real32" Value="0.3"/>
 									<Property Name="Triggered" Type="bool" Value="True"/>
 								</PropertyList>
+								<ReferenceList/>
 							</SourcePlugin>
 						</ChildrenList>
 					</Sound>
-					<Sound Name="FM Bell" ID="{E8B0A3A9-461B-488D-AFC7-CD2E1B706FDB}" ShortID="1889864861">
+					<Sound Name="FM Bell" ID="{E18C4A44-8D92-46D1-8714-CDA91D235AB9}" ShortID="322318516">
 						<ReferenceList>
 							<Reference Name="Conversion" CompanyID="4095" PluginID="65535" PluginType="15">
 								<ObjectRef Name="Default Conversion Settings" ID="{6D1B890C-9826-4384-BF07-C15223E9FB56}" WorkUnitID="{BB3A0F0F-2450-440E-933E-B9BF945DF4D1}"/>
@@ -39,7 +40,7 @@
 							</Reference>
 						</ReferenceList>
 						<ChildrenList>
-							<SourcePlugin Name="FM Bell" ID="{C25A309E-E69A-4B7B-B534-3DFCE6BC62DF}" ShortID="612809576" PluginName="Macro Oscillator" CompanyID="64" PluginID="31225">
+							<SourcePlugin Name="FM Bell" ID="{7F7694DC-E85F-4E58-9E84-19E6251A0A56}" ShortID="144503563" PluginName="Macro Oscillator" CompanyID="64" PluginID="31225">
 								<PropertyList>
 									<Property Name="Engine" Type="int32" Value="10"/>
 									<Property Name="Pitch" Type="Real32" Value="72"/>
@@ -50,10 +51,11 @@
 									<Property Name="LpgColour" Type="Real32" Value="0.8"/>
 									<Property Name="Triggered" Type="bool" Value="True"/>
 								</PropertyList>
+								<ReferenceList/>
 							</SourcePlugin>
 						</ChildrenList>
 					</Sound>
-					<Sound Name="Wavetable Pad" ID="{DFFB0458-ADD5-41FD-B49A-B7B3E24A3962}" ShortID="1474055118">
+					<Sound Name="Wavetable Pad" ID="{3F431FB9-4240-4007-BCBE-31ACFFB6D36C}" ShortID="905066504">
 						<ReferenceList>
 							<Reference Name="Conversion" CompanyID="4095" PluginID="65535" PluginType="15">
 								<ObjectRef Name="Default Conversion Settings" ID="{6D1B890C-9826-4384-BF07-C15223E9FB56}" WorkUnitID="{BB3A0F0F-2450-440E-933E-B9BF945DF4D1}"/>
@@ -63,7 +65,7 @@
 							</Reference>
 						</ReferenceList>
 						<ChildrenList>
-							<SourcePlugin Name="Wavetable Pad" ID="{9D7CB8A3-8D83-4A5E-93C5-A02E5AE00829}" ShortID="1042207914" PluginName="Macro Oscillator" CompanyID="64" PluginID="31225">
+							<SourcePlugin Name="Wavetable Pad" ID="{FCA9C41F-CA9A-42BE-92A1-DDB2C8681D5F}" ShortID="126127881" PluginName="Macro Oscillator" CompanyID="64" PluginID="31225">
 								<PropertyList>
 									<Property Name="Engine" Type="int32" Value="13"/>
 									<Property Name="Pitch" Type="Real32" Value="48"/>
@@ -74,10 +76,11 @@
 									<Property Name="Duration" Type="Real32" Value="4.0"/>
 									<Property Name="Triggered" Type="bool" Value="False"/>
 								</PropertyList>
+								<ReferenceList/>
 							</SourcePlugin>
 						</ChildrenList>
 					</Sound>
-					<Sound Name="Modal Pluck" ID="{E8BCE6DF-BB4C-4BA7-8D4D-9C0664726BE1}" ShortID="1003214757">
+					<Sound Name="Modal Pluck" ID="{EA0E74E6-EC11-4AB3-AA68-C0F622E0DEFA}" ShortID="626901587">
 						<ReferenceList>
 							<Reference Name="Conversion" CompanyID="4095" PluginID="65535" PluginType="15">
 								<ObjectRef Name="Default Conversion Settings" ID="{6D1B890C-9826-4384-BF07-C15223E9FB56}" WorkUnitID="{BB3A0F0F-2450-440E-933E-B9BF945DF4D1}"/>
@@ -87,7 +90,7 @@
 							</Reference>
 						</ReferenceList>
 						<ChildrenList>
-							<SourcePlugin Name="Modal Pluck" ID="{F12BF9A1-963B-4BB9-BA83-389F9AD9CE6C}" ShortID="645215834" PluginName="Macro Oscillator" CompanyID="64" PluginID="31225">
+							<SourcePlugin Name="Modal Pluck" ID="{EE7FE7F9-6B52-416B-BB13-35EA3473F455}" ShortID="49022997" PluginName="Macro Oscillator" CompanyID="64" PluginID="31225">
 								<PropertyList>
 									<Property Name="Engine" Type="int32" Value="20"/>
 									<Property Name="Pitch" Type="Real32" Value="60"/>
@@ -98,10 +101,11 @@
 									<Property Name="LpgColour" Type="Real32" Value="0.2"/>
 									<Property Name="Triggered" Type="bool" Value="True"/>
 								</PropertyList>
+								<ReferenceList/>
 							</SourcePlugin>
 						</ChildrenList>
 					</Sound>
-					<Sound Name="Six-Op FM Keys" ID="{754BF743-5368-4D38-A206-770D7B59BAE7}" ShortID="429933091">
+					<Sound Name="Six-Op FM Keys" ID="{2B4A68AD-F15F-4A22-8E49-E757D8568946}" ShortID="1568507446">
 						<ReferenceList>
 							<Reference Name="Conversion" CompanyID="4095" PluginID="65535" PluginType="15">
 								<ObjectRef Name="Default Conversion Settings" ID="{6D1B890C-9826-4384-BF07-C15223E9FB56}" WorkUnitID="{BB3A0F0F-2450-440E-933E-B9BF945DF4D1}"/>
@@ -111,7 +115,7 @@
 							</Reference>
 						</ReferenceList>
 						<ChildrenList>
-							<SourcePlugin Name="Six-Op FM Keys" ID="{5CF0BB13-7537-49CE-946F-378444B15A06}" ShortID="1662601739" PluginName="Macro Oscillator" CompanyID="64" PluginID="31225">
+							<SourcePlugin Name="Six-Op FM Keys" ID="{62FACEFC-3D2E-445A-A4A2-DC9EE2A0C98C}" ShortID="1427663060" PluginName="Macro Oscillator" CompanyID="64" PluginID="31225">
 								<PropertyList>
 									<Property Name="Engine" Type="int32" Value="2"/>
 									<Property Name="Pitch" Type="Real32" Value="60"/>
@@ -121,6 +125,7 @@
 									<Property Name="Decay" Type="Real32" Value="0.6"/>
 									<Property Name="Triggered" Type="bool" Value="True"/>
 								</PropertyList>
+								<ReferenceList/>
 							</SourcePlugin>
 						</ChildrenList>
 					</Sound>

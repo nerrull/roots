@@ -7,6 +7,7 @@ unmodified out of the eurorack repository; this file is the Wwise adaptation.
 
 #include "MacroOscillatorSource.h"
 #include "../MacroOscillatorConfig.h"
+#include "../../mi_common/mi_denormal_guard.h"
 
 #include <AK/AkWwiseSDKVersion.h>
 
@@ -157,6 +158,11 @@ void MacroOscillatorSource::UpdatePatch()
 
 void MacroOscillatorSource::Execute(AkAudioBuffer* io_pBuffer)
 {
+    // See mi_common/mi_denormal_guard.h. The LPG/decay engines and several
+    // Plaits engines' internal filters decay toward zero with no denormal
+    // protection of their own.
+    mi::EnableFlushToZero();
+
     m_durationHandler.ProduceBuffer(io_pBuffer);
 
     const AkUInt32 uNumChannels = io_pBuffer->NumChannels();
