@@ -230,22 +230,17 @@ to upstream `pichenettes/eurorack`.
 ### Installing on your Mac
 
 `wwise_plugins/dist/` has the built `<Plugin>.dll` + `<Plugin>.xml` pairs
-(Release config) for all six plug-ins, checked into the repo. Wwise Authoring
-on macOS is the Windows build running inside a CrossOver bottle bundled with
-`Wwise.app` — see `Wwise.app/Contents/SharedSupport/Wwise/share/{crossover,wine}`
-— so installing is the same as on a native Windows Wwise install, just reached
-through the bottle:
+(Release config) for all six plug-ins, checked into the repo. Install them
+into:
 
-1. In Finder, right-click `Wwise.app` (wherever your `2025.1.9` install lives)
-   → **Show Package Contents**.
-2. Under `Contents/SharedSupport/Wwise/share/crossover` (or `wine`, depending
-   on which is in use), find the bottle's `drive_c`.
-3. Inside that `drive_c`, locate the Wwise install's plug-ins folder — the same
-   relative path `wp.py build` writes to on Windows:
-   `Program Files/Audiokinetic/Wwise <version>/Authoring/x64/Release/bin/Plugins/`.
-4. Copy all twelve files from `wwise_plugins/dist/` (six `.dll` + six `.xml`)
-   into that `Plugins/` folder.
-5. Quit and relaunch Wwise Authoring. Racine Comb, Modal Resonator, Granular
+```
+/Library/Application Support/Audiokinetic/Wwise <Version>/Authoring/x64/Release/bin/Plugins
+```
+
+1. Copy all twelve files from `wwise_plugins/dist/` (six `.dll` + six `.xml`)
+   into that `Plugins/` folder, substituting your installed `<Version>` (e.g.
+   `2025.1.9`).
+2. Quit and relaunch Wwise Authoring. Racine Comb, Modal Resonator, Granular
    Texture, Macro Oscillator, Modal Voice and Drum Synth should now show up in
    the Effects/Sources insert lists.
 
