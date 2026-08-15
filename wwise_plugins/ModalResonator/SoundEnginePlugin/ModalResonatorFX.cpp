@@ -100,6 +100,7 @@ AKRESULT ModalResonatorFX::Term(AK::IAkPluginMemAlloc* in_pAllocator)
 AKRESULT ModalResonatorFX::Reset()
 {
     m_adapter.Reset();
+    m_exciterAGC.Reset();
     if (m_pReverbBuffer)
     {
         memset(m_pReverbBuffer, 0, kReverbBufferWords * sizeof(uint16_t));
@@ -191,8 +192,16 @@ void ModalResonatorFX::Execute(AkAudioBuffer* io_pBuffer)
         }
         fIn *= fInScale;
 
+        // Rings' onset detector and resonator excitation expect a
+        // consistently "hot" Eurorack-level signal; real bus audio is
+        // usually much quieter and varies in level. Normalize the exciter
+        // feed toward that operating level so strums trigger reliably
+        // regardless of source loudness. The dry signal mixed back in below
+        // still uses the unmodified pBuf sample.
+        const AkReal32 fExciter = m_exciterAGC.Process(fIn);
+
         AkReal32 wet[2];
-        m_adapter.Tick(fIn, wet, render);
+        m_adapter.Tick(fExciter, wet, render);
 
         // 'out' and 'aux' are Rings' two outputs. At spread 0 they are summed
         // to a mono image, at spread 1 they land on separate channels.

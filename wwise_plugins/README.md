@@ -85,11 +85,13 @@ stretch problem below went unnoticed at first.
 
 ### Ad hoc diagnostic harnesses (Windows/MSVC)
 
-`tests/resampler_transparency_test.cpp`, `tests/resampler_freq_response_test.cpp`
-and `tests/modalvoice_trigger_test.cpp` are standalone, MSVC-buildable
-harnesses used to investigate specific bug reports (whether the resampler or
-block adapter introduce audible artifacts; whether Modal Voice responds to
-external audio). They don't need Wwise headers, only this directory and an
+`tests/resampler_transparency_test.cpp`, `tests/resampler_freq_response_test.cpp`,
+`tests/modalvoice_trigger_test.cpp` and `tests/rings_agc_test.cpp` are
+standalone, MSVC-buildable harnesses used to investigate specific bug reports
+(whether the resampler or block adapter introduce audible artifacts; whether
+Modal Voice/Modal Resonator respond usefully to quiet real-world program
+material rather than the hot signal levels used elsewhere in testing). They
+don't need Wwise headers, only this directory and an
 `eurorack` checkout on the include path:
 
 ```
@@ -133,6 +135,31 @@ plays back through it, this mismatch is the first thing to check -- read
 for the true order, and confirm `GetBankParameters()` in `WwisePlugin/*Plugin.cpp`
 writes every one of those properties, by the same names as the XML, in the
 same order, with the matching `Write<Type>`/`Get<Type>` pair for each.
+
+**Rings and Elements were tuned for Eurorack line level, not typical game
+audio level, and their exciter inputs have no gain stage of their own.**
+Rings' onset detector (`rings/dsp/onset_detector.h`) requires the energy
+derivative to clear a fixed *absolute* floor (0.01) in addition to its
+z-score test, and Elements' external exciter (`blow_in`/`strike_in` in
+`elements/dsp/part.cc`) is fed straight into the resonator with no
+normalization. Both assume a consistently "hot" signal, which is what a
+Eurorack module actually receives but is not what a typical game audio bus
+looks like -- an ambience bed or dialogue track commonly sits tens of dB
+quieter and varies constantly. Measured on a 45s quiet rain-ambience file
+(input RMS ~0.005) with `tests/rings_agc_test.cpp` and
+`tests/modalvoice_trigger_test.cpp <wav>`: Modal Resonator's output RMS was
+8x too quiet and Modal Voice's was 18x too quiet before the fix, which reads
+as intermittent/weak resonance ("glitchy/scratchy") or an effectively silent
+wet signal, even though the exact same effect sounds fine on a hot test
+signal near 0 dBFS. Both plug-ins now run the exciter feed through
+`mi::ExciterAGC` (`mi_common/mi_exciter_agc.h`), a fast-attack/slow-release
+peak follower that brings quiet input up to the level these cores expect,
+with a hard output clamp since the follower can't fully catch a sharp
+transient (a rain droplet, a click) before it reaches the resonator's own
+gain. If a build ever needs to second-guess whether this is still doing its
+job, re-run those two harnesses against real program material, not a
+synthetic full-scale test tone -- that's exactly the gap that hid this bug
+originally.
 
 **None of the MI cores guard against denormals, and Wwise doesn't enable
 flush-to-zero for you.** A resonator or filter decaying toward silence over

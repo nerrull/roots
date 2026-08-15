@@ -10,6 +10,7 @@ Modal Voice -- Wwise effect plug-in wrapping Mutable Instruments Elements.
 #include <AK/Plugin/PluginServices/AkFXTailHandler.h>
 
 #include "../../mi_common/mi_resampler.h"
+#include "../../mi_common/mi_exciter_agc.h"
 
 #include "elements/dsp/part.h"
 #include "elements/dsp/patch.h"
@@ -63,6 +64,11 @@ private:
 
     mi::HostToModule48to32 m_down;
     mi::ModuleToHost32to48 m_up[2];
+
+    /// Brings the external exciter feed up to the level Elements' bow/blow/
+    /// strike inputs were tuned for, regardless of source bus loudness. See
+    /// mi_common/mi_exciter_agc.h.
+    mi::ExciterAGC m_exciterAGC;
 
     static const size_t kOutputFifo = 256;
     float m_outFifo[2][kOutputFifo];

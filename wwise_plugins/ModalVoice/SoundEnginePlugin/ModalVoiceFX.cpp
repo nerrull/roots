@@ -115,6 +115,7 @@ AKRESULT ModalVoiceFX::Reset()
     m_down.Reset();
     m_up[0].Reset();
     m_up[1].Reset();
+    m_exciterAGC.Reset();
 
     // One block of output arrives at a time, so prime the FIFO to cover it.
     m_uFifoRead = 0;
@@ -208,7 +209,14 @@ void ModalVoiceFX::Execute(AkAudioBuffer* io_pBuffer)
         }
         fIn *= fInScale;
 
-        m_down.Push(fIn);
+        // Elements' exciter inputs are fed straight into the resonator with
+        // no gain stage of their own, tuned for Eurorack line level. Real bus
+        // audio is usually much quieter, which otherwise shows up as a wet
+        // signal too faint to hear. Only worth computing when it will
+        // actually be used.
+        const AkReal32 fExciter = bExternal ? m_exciterAGC.Process(fIn) : fIn;
+
+        m_down.Push(fExciter);
 
         float x;
         while (m_down.Pop(&x))

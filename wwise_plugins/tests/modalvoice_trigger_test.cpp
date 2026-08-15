@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "mi_common/mi_resampler.h"
+#include "mi_common/mi_exciter_agc.h"
 
 #include "elements/dsp/part.h"
 #include "elements/dsp/patch.h"
@@ -84,7 +85,10 @@ void WriteWav(const char* path, const std::vector<float>& s, uint32_t rate) {
 }
 }  // namespace
 
-int main(int argc, char** argv) {
+// Runs the exact ModalVoiceFX.cpp pipeline (optionally with the exciter AGC,
+// as the fixed plug-in now applies) and reports trigger/output stats.
+void Run(const std::vector<float>& input, bool useAGC, const char* label,
+          const char* outMainPath, const char* outAuxPath) {
   static elements::Part part;
   memset((void*)&part, 0, sizeof(part));
   static uint16_t reverb[32768];
@@ -123,28 +127,11 @@ int main(int argc, char** argv) {
   state.strength = 0.7f;              // fStrength
   state.gate = false;                 // NonRTPC.bGate default
 
-  std::vector<float> input;
-  if (argc > 1) {
-    uint32_t fileRate = 0;
-    if (!ReadWavPcm16Mono(argv[1], &input, &fileRate)) {
-      printf("failed to read %s\n", argv[1]);
-      return 1;
-    }
-    if (fileRate != kRate) {
-      printf("warning: file is %u Hz, expected %u Hz (no rate conversion applied)\n", fileRate, kRate);
-    }
-    printf("loaded %s: %zu frames (%.2f s)\n", argv[1], input.size(), (double)input.size() / kRate);
-  } else {
-    // Default: 0.5s of silence, then a single-sample unit-amplitude click,
-    // then 2s of silence -- simulating a one-shot sound event hitting the bus.
-    size_t totalIn = kRate * 3;
-    input.assign(totalIn, 0.0f);
-    input[kRate / 2] = 1.0f;
-  }
   size_t totalIn = input.size();
 
   mi::HostToModule48to32 down;
   mi::ModuleToHost32to48 up[2];
+  mi::ExciterAGC agc;
 
   float blowIn[kBlockSize], strikeIn[kBlockSize];
   float mainOut[kBlockSize], auxOut[kBlockSize];
@@ -160,7 +147,8 @@ int main(int argc, char** argv) {
   size_t peakOutIdx = 0;
 
   for (size_t i = 0; i < totalIn; ++i) {
-    down.Push(input[i]);
+    const float fExciter = useAGC ? agc.Process(input[i]) : input[i];
+    down.Push(fExciter);
     float x32;
     while (down.Pop(&x32)) {
       // External Exciter on: same signal to both, per ModalVoiceFX.cpp.
@@ -190,13 +178,47 @@ int main(int argc, char** argv) {
   rmsOut = sqrt(rmsOut / outMain.size());
   rmsIn = sqrt(rmsIn / input.size());
 
-  printf("output frames: %zu\n", outMain.size());
-  printf("peak output magnitude: %.6f at sample %zu (%.1f ms)\n",
-         peakOut, peakOutIdx, 1000.0 * peakOutIdx / kRate);
-  printf("input RMS: %.6f, output RMS: %.6f\n", rmsIn, rmsOut);
+  printf("[%s] output frames: %zu\n", label, outMain.size());
+  printf("[%s] peak output magnitude: %.6f at sample %zu (%.1f ms)\n",
+         label, peakOut, peakOutIdx, 1000.0 * peakOutIdx / kRate);
+  printf("[%s] input RMS: %.6f, output RMS: %.6f\n", label, rmsIn, rmsOut);
 
-  WriteWav("Q:/Development/git/roots/wwise_plugins/.analysis_out/modalvoice_click_main.wav", outMain, kRate);
-  WriteWav("Q:/Development/git/roots/wwise_plugins/.analysis_out/modalvoice_click_aux.wav", outAux, kRate);
+  WriteWav(outMainPath, outMain, kRate);
+  WriteWav(outAuxPath, outAux, kRate);
+}
+
+int main(int argc, char** argv) {
+  std::vector<float> input;
+  if (argc > 1) {
+    uint32_t fileRate = 0;
+    if (!ReadWavPcm16Mono(argv[1], &input, &fileRate)) {
+      printf("failed to read %s\n", argv[1]);
+      return 1;
+    }
+    if (fileRate != kRate) {
+      printf("warning: file is %u Hz, expected %u Hz (no rate conversion applied)\n", fileRate, kRate);
+    }
+    printf("loaded %s: %zu frames (%.2f s)\n", argv[1], input.size(), (double)input.size() / kRate);
+  } else {
+    // Default: 0.5s of silence, then a single-sample unit-amplitude click,
+    // then 2s of silence -- simulating a one-shot sound event hitting the bus.
+    size_t totalIn = kRate * 3;
+    input.assign(totalIn, 0.0f);
+    input[kRate / 2] = 1.0f;
+  }
+
+  double rmsIn = 0.0;
+  for (float v : input) rmsIn += v * v;
+  rmsIn = sqrt(rmsIn / input.size());
+  printf("input RMS (raw file level): %.6f\n\n", rmsIn);
+
+  Run(input, false, "no AGC (old behavior)",
+      "Q:/Development/git/roots/wwise_plugins/.analysis_out/modalvoice_click_main.wav",
+      "Q:/Development/git/roots/wwise_plugins/.analysis_out/modalvoice_click_aux.wav");
+  printf("\n");
+  Run(input, true, "with AGC (fixed)",
+      "Q:/Development/git/roots/wwise_plugins/.analysis_out/modalvoice_click_main_agc.wav",
+      "Q:/Development/git/roots/wwise_plugins/.analysis_out/modalvoice_click_aux_agc.wav");
 
   return 0;
 }

@@ -10,6 +10,7 @@ Modal Resonator -- Wwise effect plug-in wrapping Mutable Instruments Rings.
 #include <AK/Plugin/PluginServices/AkFXTailHandler.h>
 
 #include "../../mi_common/mi_block_adapter.h"
+#include "../../mi_common/mi_exciter_agc.h"
 
 #include "rings/dsp/part.h"
 #include "rings/dsp/patch.h"
@@ -58,6 +59,11 @@ private:
     /// Rings renders in blocks of at most kMaxBlockSize (24) frames.
     static const size_t kBlockSize = rings::kMaxBlockSize;
     mi::BlockAdapter<kBlockSize, 2> m_adapter;
+
+    /// Brings the exciter signal up to the level Rings' onset detector and
+    /// resonator excitation were tuned for, regardless of how quiet the bus
+    /// feeding this effect actually is. See mi_common/mi_exciter_agc.h.
+    mi::ExciterAGC m_exciterAGC;
 
     rings::Part m_part;
     rings::Strummer m_strummer;
