@@ -19,7 +19,7 @@ fi
 
 mkdir -p "$OUT"
 
-clang++ -std=c++17 -O2 -DTEST -I"$ROOT" -I"$MI" -o "$OUT/mi_demo" "$HERE/mi_demo.cpp" \
+clang++ -std=c++17 -O2 -DTEST -I"$ROOT" -I"$ROOT/mi_common/patched" -I"$MI" -o "$OUT/mi_demo" "$HERE/mi_demo.cpp" \
     $MI/peaks/processors.cc $MI/peaks/drums/*.cc $MI/peaks/modulations/*.cc \
     $MI/peaks/number_station/*.cc $MI/peaks/pulse_processor/*.cc $MI/peaks/resources.cc \
     $MI/rings/dsp/part.cc $MI/rings/dsp/fm_voice.cc $MI/rings/dsp/resonator.cc \

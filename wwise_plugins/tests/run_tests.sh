@@ -22,7 +22,7 @@ fi
 mkdir -p "$OUT"
 
 # TEST selects stmlib's portable code paths (no Cortex-M asm, IN_RAM a no-op).
-CXXFLAGS="-std=c++17 -O2 -DTEST -I$ROOT -I$MI"
+CXXFLAGS="-std=c++17 -O2 -DTEST -I$ROOT -I$ROOT/mi_common/patched -I$MI"
 
 STMLIB="$MI/stmlib/dsp/atan.cc $MI/stmlib/dsp/units.cc $MI/stmlib/utils/random.cc"
 

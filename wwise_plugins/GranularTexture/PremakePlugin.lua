@@ -49,6 +49,11 @@ local MI_FILES =
 -- TEST selects stmlib's portable code paths.
 local MI_DEFINES = { "TEST" }
 
+-- Shadows one upstream header (clouds/dsp/window.h) with a one-line fix that
+-- makes PLAYBACK_MODE_STRETCH work. Must come before MI_DIR on the include
+-- path. See mi_common/patched/clouds/dsp/window.h for the rationale.
+local MI_PATCH_DIR = path.getabsolute(_OPTIONS["plugindir"] .. "/../mi_common/patched")
+
 local Plugin = {}
 Plugin.name = "GranularTexture"
 Plugin.factoryheader = "../SoundEnginePlugin/GranularTextureFXFactory.h"
@@ -62,6 +67,7 @@ Plugin.authoring = {}
 -- SDK STATIC PLUGIN SECTION
 Plugin.sdk.static.includedirs = -- https://github.com/premake/premake-core/wiki/includedirs
 {
+    MI_PATCH_DIR,
     MI_DIR,
 }
 Plugin.sdk.static.files = -- https://github.com/premake/premake-core/wiki/files
@@ -113,6 +119,7 @@ Plugin.sdk.shared.defines =
 -- AUTHORING PLUGIN SECTION
 Plugin.authoring.includedirs =
 {
+    MI_PATCH_DIR,
     MI_DIR,
 }
 Plugin.authoring.files =

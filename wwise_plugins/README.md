@@ -6,7 +6,7 @@ Silicon macOS against Wwise 2025.1.9.
 | Plug-in | Type | MI module | Rate | Notes |
 |---|---|---|---|---|
 | Modal Resonator | Effect | Rings | 48 kHz native | Bus audio excites the resonator; onsets strum it |
-| Granular Texture | Effect | Clouds | 32 kHz, resampled | Granular, looping delay, spectral (see below) |
+| Granular Texture | Effect | Clouds | 32 kHz, resampled | All four playback modes (needs one upstream fix, below) |
 | Modal Voice | Effect | Elements | 32 kHz, resampled | Bus audio feeds the exciter inputs |
 | Macro Oscillator | Source | Plaits | 48 kHz native | All 24 synthesis engines |
 | Drum Synth | Source | Peaks | 48 kHz native | Bass drum, snare, hi-hat, FM drum |
@@ -24,6 +24,7 @@ mi_common/          shared adaptation layer
   mi_block_adapter.h  Wwise's variable buffers -> MI's fixed block sizes
   mi_resampler.h      polyphase 48k <-> 32k rational resampler
   mi_arena.h          IAkPluginMemAlloc-backed arena for stmlib::BufferAllocator
+  patched/            headers that shadow the checkout (one file, one line)
 <PluginName>/       one directory per plug-in, from wp.py's scaffolding
 tests/              offline DSP harnesses (no Wwise required)
 ```
@@ -83,8 +84,8 @@ tests/run_demo.sh
 ```
 
 Writes four WAVs: a Drum Synth pattern, then that pattern run through each of
-the three effects (Rings through all six resonator models, Clouds through its
-working playback modes, Elements struck/bowed/blown).
+the three effects (Rings through all six resonator models, Clouds through all
+four playback modes, Elements struck/bowed/blown).
 
 ## Things worth knowing
 
@@ -115,18 +116,33 @@ only from 48 kHz; at other host rates those two plug-ins pass audio through dry
 rather than silently detune. Rings and Plaits run at any rate with a pitch
 correction applied.
 
-## Known issue: Clouds stretch mode is silent
+## Upstream fix: Clouds stretch mode
 
-`PLAYBACK_MODE_STRETCH` (the WSOLA time-stretch) produces no sustained output.
-It emits roughly a second of audio and then goes quiet.
+`PLAYBACK_MODE_STRETCH` (the WSOLA time-stretch) does not work with the sources
+as published. It emits about a second of audio and then goes permanently
+silent. This is not a porting artifact -- it fails identically when
+`GranularProcessor` is driven directly at 32 kHz with no resampler, block
+adapter or FIFO.
 
-This is **not** the wrapper. It fails identically when `GranularProcessor` is
-driven directly at its native 32 kHz with no resampler, no block adapter and no
-FIFO, and it fails at every position and size setting, at all four quality
-settings, and at Prepare-to-Process ratios from 1:1 up to 1024:1. The other
-three modes sustain fine through the same code path. The cause has not been
-found yet; the mode is excluded from the demo and marked as a known failure in
-the test rather than silently skipped.
+The cause is in `clouds/dsp/window.h`. `Window::done_` is assigned in exactly
+two places: `Init()` sets it true, and `OverlapAdd()` derives it from the
+envelope phase. But `OverlapAdd()` early-returns while `done_` is true, so it
+can never clear it, and `Start()` -- which is what "begin a new window" means --
+does not touch it at all. So it is a one-way latch: `WSOLASamplePlayer::Init()`
+calls `Init()` on both windows, and from then on `OverlapAdd()` returns
+immediately forever.
+
+Adding `done_ = false;` to `Start()` fixes it. Sustained RMS goes from 0.00000
+to ~0.096 with no other change, and `correlator_loaded_` begins latching as it
+should.
+
+Rather than edit the eurorack checkout, `mi_common/patched/clouds/dsp/window.h`
+is a copy carrying that single line, and the patched directory is placed ahead
+of the checkout on the include path so it shadows the original. The checkout
+stays pristine and can be updated freely. If upstream ever fixes this, delete
+the patched copy and the extra include directory.
+
+This is worth reporting upstream.
 
 ## Gotcha: Clouds' density control is bipolar
 

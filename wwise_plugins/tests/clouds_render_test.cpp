@@ -174,24 +174,16 @@ int main(int argc, char** argv) {
     const double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
     const bool ok = r.finite && r.sustained_rms > 1e-4 && r.peak <= 4.0f && r.underruns == 0;
 
-    // PLAYBACK_MODE_STRETCH (WSOLA) produces no sustained output in this port.
-    // It fails identically when the core is driven directly at 32 kHz with no
-    // wrapper, at every position/size/quality setting and at Prepare-to-Process
-    // ratios from 1:1 to 1024:1, so it is not the block adapter, the resampler
-    // or the FIFO. Tracked as a known failure rather than silently skipped.
-    const bool known_bad = (m == clouds::PLAYBACK_MODE_STRETCH);
-
     printf("mode %d %-14s peak=%.4f rms=%.5f underruns=%u  (%.2fs cpu) %s\n",
            m, kModeNames[m], r.peak, r.sustained_rms, r.underruns, secs,
-           ok ? "ok" : (known_bad ? "KNOWN FAILURE (stretch)" : "FAIL"));
-    if (!ok && !known_bad) ++failures;
+           ok ? "ok" : "FAIL");
+    if (!ok) ++failures;
   }
 
   if (failures) {
     printf("FAIL: %d mode(s) bad\n", failures);
     return 1;
   }
-  printf("PASS: granular, looping delay and spectral sustain with no underruns\n");
-  printf("      (stretch is a known failure -- see the README)\n");
+  printf("PASS: all playback modes sustain with no underruns\n");
   return 0;
 }

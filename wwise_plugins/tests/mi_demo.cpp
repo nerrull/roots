@@ -295,19 +295,18 @@ std::vector<float> RenderClouds(const std::vector<float>& in) {
   static uint8_t large[118784];
   static uint8_t small[65536 - 128];
 
-  // Stretch (WSOLA) is omitted: it produces no sustained output in this port.
-  // See the README.
-  const int modes[3] = { clouds::PLAYBACK_MODE_GRANULAR,
+  const int modes[4] = { clouds::PLAYBACK_MODE_GRANULAR,
+                         clouds::PLAYBACK_MODE_STRETCH,
                          clouds::PLAYBACK_MODE_LOOPING_DELAY,
                          clouds::PLAYBACK_MODE_SPECTRAL };
-  const char* names[3] = { "granular", "looping delay", "spectral" };
+  const char* names[4] = { "granular", "stretch", "looping delay", "spectral" };
   const uint32_t secsPerMode = 10;
   const uint32_t framesPerMode = kRate * secsPerMode;
 
   std::vector<float> out;
-  out.reserve(framesPerMode * 3 * 2);
+  out.reserve(framesPerMode * 4 * 2);
 
-  for (int mi_ = 0; mi_ < 3; ++mi_) {
+  for (int mi_ = 0; mi_ < 4; ++mi_) {
     const int mode = modes[mi_];
     printf("    mode %d: %s\n", mode, names[mi_]);
 
@@ -554,7 +553,7 @@ int main(int argc, char** argv) {
     WriteWav(dir + "/demo_2_modal_resonator.wav", x, 2);
   }
 
-  printf("Granular Texture (Clouds): granular, looping delay, spectral\n");
+  printf("Granular Texture (Clouds): all four playback modes\n");
   {
     std::vector<float> x = RenderClouds(drums);
     Normalize(x, 0.89f);
