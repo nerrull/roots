@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WwiseDocument Type="WorkUnit" ID="{D4BC4E6D-A01C-4D31-A22D-5793E88D5406}" SchemaVersion="97">
+	<Effects>
+		<WorkUnit Name="Factory RacineComb Effects" ID="{D4BC4E6D-A01C-4D31-A22D-5793E88D5406}" PersistMode="Standalone">
+			<ChildrenList>
+				<Effect Name="Metallic Ring" ID="{92617C13-56FD-4FA4-BE20-0F37E9D09C32}" PluginName="Racine Comb" CompanyID="64" PluginID="23741" PluginType="3">
+						<PropertyList>
+							<Property Name="Frequency" Type="Real32" Value="880"/>
+							<Property Name="Feedback" Type="Real32" Value="92"/>
+							<Property Name="Damping" Type="Real32" Value="8"/>
+							<Property Name="Glide" Type="Real32" Value="5"/>
+							<Property Name="WetDryMix" Type="Real32" Value="100"/>
+						</PropertyList>
+					</Effect>
+				<Effect Name="Slow Flange Sweep" ID="{72DC6281-7CD5-40AA-BD5E-89151084D96D}" PluginName="Racine Comb" CompanyID="64" PluginID="23741" PluginType="3">
+						<PropertyList>
+							<Property Name="Frequency" Type="Real32" Value="220"/>
+							<Property Name="Glide" Type="Real32" Value="1500"/>
+							<Property Name="Feedback" Type="Real32" Value="65"/>
+							<Property Name="Damping" Type="Real32" Value="40"/>
+							<Property Name="WetDryMix" Type="Real32" Value="50"/>
+						</PropertyList>
+					</Effect>
+				<Effect Name="Hollow Odd Harmonics" ID="{D146D131-D820-41D9-9424-0DCAC532A923}" PluginName="Racine Comb" CompanyID="64" PluginID="23741" PluginType="3">
+						<PropertyList>
+							<Property Name="Frequency" Type="Real32" Value="110"/>
+							<Property Name="Feedback" Type="Real32" Value="-88"/>
+							<Property Name="Damping" Type="Real32" Value="25"/>
+							<Property Name="Glide" Type="Real32" Value="10"/>
+							<Property Name="WetDryMix" Type="Real32" Value="80"/>
+						</PropertyList>
+					</Effect>
+				<Effect Name="Subtle Body Resonance" ID="{B75D7F81-7995-41F6-B5C3-AD700697E054}" PluginName="Racine Comb" CompanyID="64" PluginID="23741" PluginType="3">
+						<PropertyList>
+							<Property Name="Frequency" Type="Real32" Value="180"/>
+							<Property Name="Feedback" Type="Real32" Value="40"/>
+							<Property Name="Damping" Type="Real32" Value="60"/>
+							<Property Name="Glide" Type="Real32" Value="50"/>
+							<Property Name="WetDryMix" Type="Real32" Value="30"/>
+						</PropertyList>
+					</Effect>
+			</ChildrenList>
+		</WorkUnit>
+	</Effects>
+</WwiseDocument>

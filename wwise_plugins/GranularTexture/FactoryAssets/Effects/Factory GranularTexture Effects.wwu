@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WwiseDocument Type="WorkUnit" ID="{6AD90058-A5CB-46D0-B340-E454A687BC2F}" SchemaVersion="97">
+	<Effects>
+		<WorkUnit Name="Factory GranularTexture Effects" ID="{6AD90058-A5CB-46D0-B340-E454A687BC2F}" PersistMode="Standalone">
+			<ChildrenList>
+				<Effect Name="Frozen Texture Pad" ID="{8E8DE834-2407-44EF-B2CF-3E0ACFC95B1B}" PluginName="Granular Texture" CompanyID="64" PluginID="11577" PluginType="3">
+						<PropertyList>
+							<Property Name="PlaybackMode" Type="int32" Value="0"/>
+							<Property Name="Freeze" Type="bool" Value="True"/>
+							<Property Name="Density" Type="Real32" Value="0.7"/>
+							<Property Name="Texture" Type="Real32" Value="0.3"/>
+							<Property Name="Size" Type="Real32" Value="0.8"/>
+							<Property Name="DryWet" Type="Real32" Value="100"/>
+						</PropertyList>
+					</Effect>
+				<Effect Name="Time-Stretch Drone" ID="{663FA017-6249-4E55-820F-166C58F889F5}" PluginName="Granular Texture" CompanyID="64" PluginID="11577" PluginType="3">
+						<PropertyList>
+							<Property Name="PlaybackMode" Type="int32" Value="1"/>
+							<Property Name="Size" Type="Real32" Value="0.9"/>
+							<Property Name="Pitch" Type="Real32" Value="-12"/>
+							<Property Name="DryWet" Type="Real32" Value="100"/>
+						</PropertyList>
+					</Effect>
+				<Effect Name="Lo-Fi Looping Delay" ID="{0E8C1662-1A8D-4D3A-A636-7F82B87369A3}" PluginName="Granular Texture" CompanyID="64" PluginID="11577" PluginType="3">
+						<PropertyList>
+							<Property Name="PlaybackMode" Type="int32" Value="2"/>
+							<Property Name="Feedback" Type="Real32" Value="0.6"/>
+							<Property Name="Texture" Type="Real32" Value="0.2"/>
+							<Property Name="DryWet" Type="Real32" Value="50"/>
+						</PropertyList>
+					</Effect>
+				<Effect Name="Spectral Shimmer" ID="{19D509A1-CDC5-4C41-B8EF-C43A9D9A2838}" PluginName="Granular Texture" CompanyID="64" PluginID="11577" PluginType="3">
+						<PropertyList>
+							<Property Name="PlaybackMode" Type="int32" Value="3"/>
+							<Property Name="Pitch" Type="Real32" Value="12"/>
+							<Property Name="Reverb" Type="Real32" Value="0.5"/>
+							<Property Name="DryWet" Type="Real32" Value="70"/>
+						</PropertyList>
+					</Effect>
+			</ChildrenList>
+		</WorkUnit>
+	</Effects>
+</WwiseDocument>

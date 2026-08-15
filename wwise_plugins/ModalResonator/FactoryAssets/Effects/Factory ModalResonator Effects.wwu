@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WwiseDocument Type="WorkUnit" ID="{63C01364-1BD9-4B70-8F3E-C1F57A31664B}" SchemaVersion="97">
+	<Effects>
+		<WorkUnit Name="Factory ModalResonator Effects" ID="{63C01364-1BD9-4B70-8F3E-C1F57A31664B}" PersistMode="Standalone">
+			<ChildrenList>
+				<Effect Name="Struck Bell" ID="{035B5804-75D0-4526-AC73-1257DD8C4DB6}" PluginName="Modal Resonator" CompanyID="64" PluginID="31992" PluginType="3">
+						<PropertyList>
+							<Property Name="Model" Type="int32" Value="0"/>
+							<Property Name="Structure" Type="Real32" Value="0.3"/>
+							<Property Name="Brightness" Type="Real32" Value="0.7"/>
+							<Property Name="Damping" Type="Real32" Value="0.3"/>
+							<Property Name="Position" Type="Real32" Value="0.2"/>
+							<Property Name="InternalExciter" Type="bool" Value="False"/>
+							<Property Name="DryWet" Type="Real32" Value="70"/>
+						</PropertyList>
+					</Effect>
+				<Effect Name="Sympathetic Chord Pad" ID="{07F01CB7-F5CB-4A5C-BD12-BF7F6E89B51A}" PluginName="Modal Resonator" CompanyID="64" PluginID="31992" PluginType="3">
+						<PropertyList>
+							<Property Name="Model" Type="int32" Value="1"/>
+							<Property Name="Structure" Type="Real32" Value="0.5"/>
+							<Property Name="Damping" Type="Real32" Value="0.85"/>
+							<Property Name="Chord" Type="int32" Value="3"/>
+							<Property Name="Polyphony" Type="int32" Value="4"/>
+							<Property Name="Spread" Type="Real32" Value="1.0"/>
+							<Property Name="InternalExciter" Type="bool" Value="False"/>
+							<Property Name="DryWet" Type="Real32" Value="60"/>
+						</PropertyList>
+					</Effect>
+				<Effect Name="Plucked String Lead" ID="{6BD5BFE8-EB2F-49C4-AE96-C8B786CDC40F}" PluginName="Modal Resonator" CompanyID="64" PluginID="31992" PluginType="3">
+						<PropertyList>
+							<Property Name="Model" Type="int32" Value="2"/>
+							<Property Name="Structure" Type="Real32" Value="0.4"/>
+							<Property Name="Brightness" Type="Real32" Value="0.6"/>
+							<Property Name="Damping" Type="Real32" Value="0.5"/>
+							<Property Name="Pitch" Type="Real32" Value="64"/>
+							<Property Name="InternalExciter" Type="bool" Value="True"/>
+							<Property Name="DryWet" Type="Real32" Value="80"/>
+						</PropertyList>
+					</Effect>
+				<Effect Name="FM Voice Growl" ID="{83EC8487-8FB5-4C56-A012-816C22F370A6}" PluginName="Modal Resonator" CompanyID="64" PluginID="31992" PluginType="3">
+						<PropertyList>
+							<Property Name="Model" Type="int32" Value="3"/>
+							<Property Name="Structure" Type="Real32" Value="0.7"/>
+							<Property Name="Brightness" Type="Real32" Value="0.4"/>
+							<Property Name="Damping" Type="Real32" Value="0.4"/>
+							<Property Name="InternalExciter" Type="bool" Value="False"/>
+							<Property Name="DryWet" Type="Real32" Value="90"/>
+						</PropertyList>
+					</Effect>
+			</ChildrenList>
+		</WorkUnit>
+	</Effects>
+</WwiseDocument>

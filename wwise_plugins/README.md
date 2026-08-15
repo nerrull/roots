@@ -83,6 +83,26 @@ not peak. Peak alone is not a useful check here: a mode that emits one burst
 and then dies still shows a healthy peak, which is exactly how the Clouds
 stretch problem below went unnoticed at first.
 
+### Ad hoc diagnostic harnesses (Windows/MSVC)
+
+`tests/resampler_transparency_test.cpp`, `tests/resampler_freq_response_test.cpp`
+and `tests/modalvoice_trigger_test.cpp` are standalone, MSVC-buildable
+harnesses used to investigate specific bug reports (whether the resampler or
+block adapter introduce audible artifacts; whether Modal Voice responds to
+external audio). They don't need Wwise headers, only this directory and an
+`eurorack` checkout on the include path:
+
+```
+cl.exe /std:c++17 /O2 /EHsc /D_USE_MATH_DEFINES /DTEST ^
+  /I"<wwise_plugins>" /I"<eurorack>" ^
+  tests\resampler_freq_response_test.cpp
+```
+
+`resampler_freq_response_test` needs only `mi_resampler.h`; the other two link
+against the relevant MI `.cc` files directly (see the comments at the top of
+each for exactly which ones). Findings from these are recorded in commit
+messages and PR discussion rather than kept as a permanent regression suite.
+
 ## Demo audio
 
 ```sh
