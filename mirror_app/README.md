@@ -19,6 +19,32 @@ cmake --build build --target mirror_app -j$(sysctl -n hw.logicalcpu)
 
 VS Code: **Build: mirror_app** / **Run: mirror_app**.
 
+### The control panel
+
+The panel is an ImGui window with multi-viewport enabled, so it can leave the
+composition:
+
+- **own window** (checkbox, top of the panel) gives it its own OS window, to put
+  on a second monitor — or, on a single monitor, anywhere off the frame. Untick
+  it to bring the panel back inside the main window. The choice is remembered in
+  `mirror_panel.ini` next to `imgui.ini`, so the next launch comes up the same
+  way; `--panel-window` and `--reset-panel` set it from the command line, and
+  `--reset-panel` also puts the panel back at a known position and size — the
+  way out of a panel parked on a monitor that is not plugged in any more.
+- **F1** or **`** hides and reveals the whole UI — panel, cam-mask handles and
+  source PiP — and there is a **hide** button next to the checkbox. Two keys
+  because macOS eats F1 for screen brightness unless F-keys are set to behave as
+  function keys. `--no-panel` starts hidden. Hidden still means *submitted*:
+  MIDI and preset values reach a control as it draws (see `ui_params.h`), so the
+  knobs keep working with nothing on screen.
+
+While attached, the panel is pinned inside the main window and capped to its
+height (ImGui only merges a window that the main one contains whole, and this
+panel is taller than a 720p window). While detached, neither applies.
+
+Requires the imgui submodule on the **`docking`** branch (`git -C imgui checkout
+docking`) — that is where viewports live.
+
 ## Status
 
 - [x] Metal window shell (GLFW + CAMetalLayer + ImGui-metal + MetalContext)

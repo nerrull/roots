@@ -4,3 +4,5 @@ documentation/*.mov
 mmpose/
 greenlab/
 freenect_test/models/
+imgui.ini
+mirror_panel.ini

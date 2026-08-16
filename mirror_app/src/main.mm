@@ -35,6 +35,7 @@
 #include "text_overlay.h"
 #include "screen_layout.h"
 #include "show_timeline.h"
+#include "LeafMesh.h"
 
 #include <algorithm>
 #include <chrono>
@@ -236,6 +237,304 @@ static int growshot(const char* path, int steps, float az, float el, float rad,
     return 0;
 }
 
+// Post-tranche overrides, so a single knob can be isolated without a rebuild:
+//   ABSHOT_POST="bloom=0,exposure=1.4"
+// Shared by --abshot and --rootbench, which is the point: the setting that was
+// measured and the setting that was photographed have to be spelled the same
+// way or the cost table and the images stop describing the same thing.
+static void applyPostOverride(RootScene& roots, const char* spec) {
+    if (!spec) return;
+    auto& P = roots.renderer().post;
+    auto& A = roots.renderer().ao;
+    auto& F = roots.renderer().face;
+    auto& E = roots.renderer().env;
+    auto& D = roots.renderer().detail;
+    auto& M = roots.renderer().mat;
+    auto& B = roots.renderer().pbr;
+    const std::string s(spec);
+    size_t pos = 0;
+    while (pos < s.size()) {
+        const size_t comma = std::min(s.find(',', pos), s.size());
+        const std::string kv = s.substr(pos, comma - pos);
+        pos = comma + 1;
+        const size_t eq = kv.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string k = kv.substr(0, eq);
+        const float v = (float)atof(kv.c_str() + eq + 1);
+        if      (k == "bloom")      P.bloom = v != 0.f;
+        else if (k == "bloomThr")   P.bloomThreshold = v;
+        else if (k == "bloomInt")   P.bloomIntensity = v;
+        else if (k == "dof")        P.dof = v != 0.f;
+        else if (k == "dofStr")     P.dofStrength = v;
+        else if (k == "dofRange")   P.dofRange = v;
+        else if (k == "grain")      P.grain = v;
+        else if (k == "vignette")   P.vignette = v;
+        else if (k == "exposure")   P.exposure = v;
+        else if (k == "ssaa")       P.ssaa = (int)v;
+        else if (k == "ao")         A.enabled = v != 0.f;
+        else if (k == "aoInt")      A.intensity = v;
+        else if (k == "aoRad")      A.radius = v;
+        else if (k == "aoSamples")  A.samples = (int)v;
+        else if (k == "relief")     F.reliefStrength = v;
+        else if (k == "faceRough")  F.roughness = v;
+        else if (k == "faceLight")  F.lightIntensity = v;
+        else if (k == "smooth")     F.smoothNormals = v != 0.f;
+        else if (k == "hemi")       E.hemiStrength = v;
+        else if (k == "envSpec")    E.envSpec = v;
+        else if (k == "sssWrap")    E.sssWrap = v;
+        else if (k == "sssTrans")   E.sssTrans = v;
+        else if (k == "detStr")     D.strength = v;
+        else if (k == "detScale")   D.scale = v;
+        else if (k == "detStretch") D.stretch = v;
+        else if (k == "detRough")   D.rough = v;
+        else if (k == "detTint")    D.tint = v;
+        else if (k == "mode")       roots.renderer().shaderMode =
+                                        (MetalRootRenderer::ShaderMode)(int)v;
+        else if (k == "rough")      B.roughness = v;
+        else if (k == "metallic")   B.metallic = v;
+        else if (k == "shininess")  M.shininess = v;
+        else if (k == "diffuse")    M.diffuse = v;
+        else if (k == "spec")       { M.specColor[0] *= v; M.specColor[1] *= v;
+                                      M.specColor[2] *= v; }
+        else if (k == "pulse")      roots.renderer().pulse.enabled = v != 0.f;
+        else if (k == "vis")        roots.renderer().fog.visibility = v;
+        else if (k == "fogH")       roots.renderer().fog.heightScale = v;
+        else if (k == "fogStart")   { roots.renderer().fog.startAuto = false;
+                                      roots.renderer().fog.startDist = v; }
+        else if (k == "fogFrac")    roots.renderer().fog.startFrac = v;
+        else if (k == "fogNoise")   roots.renderer().fog.noiseStrength = v;
+        else if (k == "fogCon")     roots.renderer().fog.noiseContrast = v;
+        else if (k == "fogScale")   roots.renderer().fog.noiseScale = v;
+        else if (k == "fogSteps")   roots.renderer().fog.steps = (int)v;
+        else if (k == "fogScat")    roots.renderer().fog.scatter = v;
+        else if (k == "fogAniso")   roots.renderer().fog.anisotropy = v;
+        else if (k == "fogDs")      roots.renderer().fog.downscale = (int)v;
+        else if (k == "fogOn")      roots.renderer().fog.enabled = v != 0.f;
+        else if (k == "ca")         P.caStrength = v;
+        else if (k == "streak")     P.streak = v;
+        else if (k == "streakLen")  P.streakLength = v;
+        else if (k == "halation")   P.halation = v;
+        else if (k == "haloMip")    P.halationMip = (int)v;
+        else if (k == "contrast")   P.contrast = v;
+        else if (k == "satur")      P.saturation = v;
+        else if (k == "splitBal")   P.toneBalance = v;
+        else if (k == "grainSize")  P.grainSize = v;
+        else if (k == "grainChroma") P.grainChroma = v;
+        else if (k == "splitStr")   P.splitStrength = v;
+        else if (k == "k1")         P.distortK1 = v;
+        else if (k == "k2")         P.distortK2 = v;
+        else if (k == "dzoom")      P.distortZoom = v;
+        else if (k == "focal")      { roots.useFocal = true; roots.focalMM = v; }
+        else if (k == "wide")       roots.setWideAngle(v != 0.f);
+        else if (k == "key")        E.keyIntensity = v;
+        else if (k == "spotOuter")  F.spotOuterDeg = v;
+        else if (k == "spotInner")  F.spotInnerDeg = v;
+        else fprintf(stderr, "post override: unknown key '%s'\n", k.c_str());
+    }
+}
+
+// Headless capture of the MESHED leaves alone (plus a stalk to hang them on),
+// so the leaf geometry can be judged without growing a whole scene first.
+//   --leafshot <out.ppm> [W] [H] [az] [el] [radius]
+//
+// Leaves are meshed rather than drawn as blade SDFs: a blade built from a union
+// of capsules keeps a rounded, constant-thickness margin all the way round and
+// reads as a moulded plastic part, while a mesh takes the margin to an edge and
+// thickens only over the veins. See sdf_viewer/LeafMesh.h.
+static int leafshot(const char* path, int W, int H, float az, float el, float radius) {
+    MetalContext ctx;
+    if (!ctx.device()) { fprintf(stderr, "leafshot: no Metal device\n"); return 1; }
+    const std::string shaderDir    = std::string(MIRROR_APP_SHADER_DIR);
+    const std::string sharedHeader = std::string(MIRROR_APP_SRC_DIR) + "/root_shared.h";
+    MetalRootRenderer R(ctx, shaderDir, sharedHeader, W, H);
+
+    // A stalk, as capsules on the normal segment path -- a swept tube is what
+    // that path is good at, so only the blades move to the mesh path.
+    std::vector<float> nodes;
+    std::vector<int>   segs;
+    std::vector<float> radii;
+    const float stemH = 34.0f, stemR = 0.62f;
+    const int   stemSub = 160;
+    for (int i = 0; i <= stemSub; ++i) {
+        float t = (float) i / stemSub;
+        nodes.push_back(std::sin(t * 1.6f) * 0.9f * t);
+        nodes.push_back(t * stemH);
+        nodes.push_back(0.f);
+        if (i > 0) {
+            segs.push_back(i - 1); segs.push_back(i);
+            radii.push_back(stemR * (1.0f - 0.30f * t));
+        }
+    }
+
+    // Leaves up the stalk, alternating around it at the golden angle.
+    std::vector<float> leafVerts;
+    const float golden = 3.14159265f * (3.0f - 2.2360679f);
+    const int   nLeaves = 5;
+    for (int i = 0; i < nLeaves; ++i) {
+        float f = nLeaves > 1 ? (float) i / (nLeaves - 1) : 0.f;
+        float t = 0.16f + 0.62f * f;
+        float ang = i * golden;
+        float y = t * stemH;
+        float sx = std::sin(t * 1.6f) * 0.9f * t;
+
+        leafmesh::LeafParams LP;
+        LP.length    = 13.0f - 4.0f * f;
+        LP.halfWidth = LP.length * 0.36f;
+        LP.thickness = 0.070f;
+        LP.curl      = 0.26f + 0.10f * f;
+
+        // Out from the stem, tilted a little up, and rolled about its own midrib
+        // so a leaf held near horizontal still turns a face to the camera.
+        leafmesh::V3 out(std::cos(ang), 0.20f, std::sin(ang));
+        leafmesh::V3 axis = leafmesh::normalize(out);
+        float roll = (i & 1) ? 0.42f : -0.42f;
+        leafmesh::V3 up(std::sin(roll) * std::sin(ang), std::cos(roll), -std::sin(roll) * std::cos(ang));
+        leafmesh::Frame F;
+        F.origin = leafmesh::V3(sx, y, 0.f) + axis * (stemR * 1.6f);
+        F.axis   = axis;
+        F.up     = leafmesh::normalize(up);
+        leafmesh::emitLeaf(leafVerts, LP, F);
+
+        // Petiole: a short tube from inside the stalk out to the blade base.
+        int n0 = (int)(nodes.size() / 3);
+        leafmesh::V3 a = leafmesh::V3(sx, y, 0.f) - axis * (stemR * 0.6f);
+        const int psub = 10;
+        for (int k = 0; k <= psub; ++k) {
+            float u = (float) k / psub;
+            leafmesh::V3 p = a + (F.origin - a) * u;
+            nodes.push_back(p.x); nodes.push_back(p.y); nodes.push_back(p.z);
+            if (k > 0) {
+                segs.push_back(n0 + k - 1); segs.push_back(n0 + k);
+                radii.push_back(stemR * (0.42f - 0.12f * u));
+            }
+        }
+    }
+
+    // Green stalk: without a palette the segments fall back to the root
+    // material, which is bark, and the shot stops being about the leaves.
+    R.palette[0][0] = 0.16f; R.palette[0][1] = 0.30f; R.palette[0][2] = 0.13f;
+    R.paletteTip[0][0] = 0.20f; R.paletteTip[0][1] = 0.36f; R.paletteTip[0][2] = 0.15f;
+    R.paletteCount = 1; R.paletteTipCount = 1;
+
+    R.uploadSegments(nodes, segs, radii);
+    R.uploadLeafMesh(leafVerts);
+    R.pulse.enabled = false;
+
+    float target[3] = {0.f, stemH * 0.45f, 0.f};
+    float lightDir[3] = {0.42f, 0.66f, 0.52f};
+    if (radius <= 0.f) radius = stemH * 1.15f;
+
+    id<MTLTexture> tex = nil;
+    for (int i = 0; i < 2; ++i) {
+        @autoreleasepool {
+            id<MTLCommandBuffer> cb = [ctx.queue() commandBuffer];
+            tex = R.render(cb, az, el, radius, target, 0.5236f, lightDir);
+            [cb commit]; [cb waitUntilCompleted];
+        }
+    }
+    if (!tex) { fprintf(stderr, "leafshot: no texture\n"); return 1; }
+
+    std::vector<uint16_t> px((size_t) W * H * 4);
+    [tex getBytes:px.data() bytesPerRow:W * 4 * sizeof(uint16_t)
+       fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
+    auto h2f = [](uint16_t h) {
+        uint32_t s = (h >> 15) & 1, e = (h >> 10) & 0x1f, m = h & 0x3ff, bits;
+        if (e == 0) bits = (s << 31) | 0; else bits = (s << 31) | ((e + 112) << 23) | (m << 13);
+        float fv; __builtin_memcpy(&fv, &bits, 4); return fv;
+    };
+    const bool encoded = R.outputIsEncoded();
+    FILE* fp = fopen(path, "wb");
+    if (!fp) { fprintf(stderr, "leafshot: cannot open %s\n", path); return 1; }
+    fprintf(fp, "P6\n%d %d\n255\n", W, H);
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) {
+            const uint16_t* p = &px[((size_t) y * W + x) * 4];
+            for (int c = 0; c < 3; ++c) {
+                float v = h2f(p[c]);
+                v = v <= 0.f ? 0.f : (v >= 1.f ? 1.f : v);
+                if (!encoded) v = powf(v, 1.0f / 2.2f);
+                fputc((unsigned char)(v * 255.0f + 0.5f), fp);
+            }
+        }
+    fclose(fp);
+    printf("leafshot: wrote %s (%dx%d, %d leaf verts, %zu stem segs)\n",
+           path, W, H, (int)(leafVerts.size() / 12), radii.size());
+    return 0;
+}
+
+// Headless A/B capture: the same grown scene, the same camera, rendered at one
+// of the renderer's quality tranches. Usage:
+//   --abshot <out.ppm> [tranche] [W] [H] [focusMask] [zoom] [az] [el] [steps]
+//
+// Separate from --growshot because a comparison is only worth anything if the
+// only thing that changed is the setting under test: this fixes the resolution,
+// the framing and the growth length, and takes the tranche as an argument, so
+// two runs differ in exactly one variable. Framing goes through focusMask/zoom
+// rather than through a raw radius, since applyFraming() derives the camera from
+// the scene's own bounds each frame and would overwrite a radius set here.
+static int abshot(const char* path, int tranche, int W, int H,
+                  int focusMask, float zoom, float az, float el, int steps) {
+    MetalContext ctx;
+    if (!ctx.device()) { fprintf(stderr, "abshot: no Metal device\n"); return 1; }
+    RootScene roots(ctx, W, H);
+    if (!roots.valid()) { fprintf(stderr, "abshot: root scene invalid\n"); return 1; }
+    roots.renderer().setTranche(tranche);
+    // Pulses off for captures. They travel along the roots on their own clock,
+    // so two shots taken at the same growth step still differ wherever a pulse
+    // happens to be -- which is exactly the kind of difference that makes an A/B
+    // pair unreadable, since a bright band moving between two frames is far more
+    // salient than the shading change being compared. Re-enable with
+    // ABSHOT_POST="pulse=1" when the pulses themselves are the subject.
+    roots.renderer().pulse.enabled = false;
+    applyPostOverride(roots, getenv("ABSHOT_POST"));
+    roots.autoOrbit = false;
+    roots.azimuth = az; roots.elevation = el;
+    roots.focusMask = focusMask;
+    roots.zoom = zoom;
+
+    for (int i = 0; i < steps; ++i) roots.advance(1.0 / 60.0);
+
+    id<MTLTexture> tex = nil;
+    for (int i = 0; i < 2; ++i) {
+        @autoreleasepool {
+            id<MTLCommandBuffer> cb = [ctx.queue() commandBuffer];
+            tex = roots.render(cb);
+            [cb commit]; [cb waitUntilCompleted];
+        }
+    }
+    if (!tex) { fprintf(stderr, "abshot: no texture\n"); return 1; }
+    std::vector<uint16_t> px((size_t)W * H * 4);
+    [tex getBytes:px.data() bytesPerRow:W * 4 * sizeof(uint16_t)
+       fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
+    auto h2f = [](uint16_t h) {
+        uint32_t s = (h >> 15) & 1, e = (h >> 10) & 0x1f, m = h & 0x3ff, bits;
+        if (e == 0) bits = (s << 31) | 0; else bits = (s << 31) | ((e + 112) << 23) | (m << 13);
+        float f; __builtin_memcpy(&f, &bits, 4); return f;
+    };
+    // Once the composite pass is in the chain the texture is already
+    // display-referred; applying the usual 1/2.2 on top would wash it out and
+    // make every comparison against a tranche-0 shot meaningless.
+    const bool encoded = roots.renderer().outputIsEncoded();
+    FILE* fp = fopen(path, "wb");
+    if (!fp) { fprintf(stderr, "abshot: cannot open %s\n", path); return 1; }
+    fprintf(fp, "P6\n%d %d\n255\n", W, H);
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) {
+            const uint16_t* p = &px[((size_t)y * W + x) * 4];
+            for (int c = 0; c < 3; ++c) {
+                float v = h2f(p[c]);
+                v = v <= 0.f ? 0.f : (v >= 1.f ? 1.f : v);
+                if (!encoded) v = powf(v, 1.0f / 2.2f);
+                fputc((unsigned char)(v * 255.0f + 0.5f), fp);
+            }
+        }
+    fclose(fp);
+    printf("abshot: wrote %s (%dx%d, tranche %d, ssaa %d, encoded %d, masks %d)\n",
+           path, W, H, tranche, roots.renderer().post.ssaa, encoded ? 1 : 0,
+           roots.maskCount());
+    return 0;
+}
+
 // Headless GPU benchmark of the root render: grow the sim to completion, then
 // time `frames` full render()s (geometry + face + fog). Usage:
 //   --rootbench [downscale] [frames]
@@ -246,6 +545,8 @@ static int rootbench(int downscale, int frames, int baseW, int baseH) {
     RootScene roots(ctx, W, H);
     if (!roots.valid()) { fprintf(stderr, "rootbench: invalid\n"); return 1; }
     roots.autoOrbit = false;
+    if (const char* t = getenv("ROOTBENCH_TRANCHE")) roots.renderer().setTranche(atoi(t));
+    applyPostOverride(roots, getenv("ROOTBENCH_POST"));
     if (const char* m = getenv("ROOTBENCH_MODE"))
         roots.renderer().shaderMode = (MetalRootRenderer::ShaderMode)atoi(m);
     if (const char* r = getenv("ROOTBENCH_RADIUS")) roots.radius = atof(r);
@@ -275,8 +576,10 @@ static int rootbench(int downscale, int frames, int baseW, int baseH) {
         }
     }
     double dt = (now() - t0) / frames;
-    printf("rootbench: %dx%d (ds=%d, sim done=%d): %.3f ms/frame (%.0f fps)\n",
-           W, H, downscale, roots.simDone() ? 1 : 0, dt * 1e3, 1.0 / dt);
+    printf("rootbench: %dx%d (ds=%d, tranche=%d, ssaa=%d, sim done=%d): "
+           "%.3f ms/frame (%.0f fps)\n",
+           W, H, downscale, roots.renderer().tranche(), roots.renderer().post.ssaa,
+           roots.simDone() ? 1 : 0, dt * 1e3, 1.0 / dt);
     return 0;
 }
 
@@ -316,7 +619,7 @@ static int fieldshot(const char* path, int grid, float az, float el) {
     roots.buildField(grid, spacing);
     roots.autoOrbit = false;
     roots.azimuth = az; roots.elevation = el;
-    roots.target[0] = 0; roots.target[1] = 10; roots.target[2] = 0;
+    roots.target[0] = 0; roots.target[1] = -10; roots.target[2] = 0;
     roots.radius = grid * spacing * 0.85f;
     id<MTLTexture> tex = nil;
     for (int i = 0; i < 2; ++i) {
@@ -485,6 +788,44 @@ int   g_source_pip_w  = 320;    // overlay width in points
 int   g_source_corner = 1;      // 0 TL, 1 TR, 2 BL, 3 BR
 bool  g_pip_landmarks = true;   // draw the tracker's landmarks over it
 
+// --- the control panel's own window ------------------------------------------
+//
+// The panel belongs to whoever is operating the piece, not to the frame the
+// audience sees, so it has to be able to leave. Two separate things:
+//
+//   visible    F1 takes the whole UI away and brings it back, which is what
+//              the projection wants during a run whichever window it is in.
+//   detached   the panel becomes its own OS window (an ImGui "viewport"),
+//              draggable to a second monitor -- or, on one monitor, simply
+//              moved off the composition and hidden behind it.
+//
+// Detach is per-window rather than io.ConfigViewportsNoAutoMerge, which would
+// also tear the cam-mask and source overlays off the frame they are drawn on.
+bool  g_ui_visible  = true;
+bool  g_ui_detached = false;
+
+// --reset-panel: put the panel back over the main window at a known size, for
+// when imgui.ini has it parked on a monitor that is not here any more.
+bool  g_panel_reset = false;
+bool  g_panel_cli   = false;   // the flags above were given, so do not restore
+
+// Whether the panel is its own window is a property of the machine it is being
+// operated from, not of the show, so it is remembered next to imgui.ini rather
+// than in a preset. One line, because that is all it is.
+static const char* kPanelStatePath = "mirror_panel.ini";
+static void PanelStateSave(bool detached) {
+    if (FILE* f = fopen(kPanelStatePath, "w")) {
+        fprintf(f, "detached=%d\n", detached ? 1 : 0);
+        fclose(f);
+    }
+}
+static void PanelStateLoad(bool* detached) {
+    FILE* f = fopen(kPanelStatePath, "r");
+    if (!f) return;
+    int v = 0;
+    if (fscanf(f, "detached=%d", &v) == 1) *detached = (v != 0);
+    fclose(f);
+}
 static bool LoadImageRGB(const char* path, int w, int h,
                          std::vector<float>& out, std::string& err);
 
@@ -921,7 +1262,7 @@ static int fieldbench(int grid, int frames) {
     // Immersive viewpoint: camera low and near the field edge looking across it,
     // so a good share of systems fall off-screen (culling) and the rest recede
     // into the distance (LOD) — the target end-goal viewing condition.
-    roots.target[0] = grid * spacing * 0.15f; roots.target[1] = 8; roots.target[2] = 0;
+    roots.target[0] = grid * spacing * 0.15f; roots.target[1] = -8; roots.target[2] = 0;
     roots.radius = spacing * 1.6f;
     roots.elevation = 0.12f; roots.azimuth = 0.9f;
     MetalRootRenderer& R = roots.renderer();
@@ -1652,6 +1993,13 @@ static int textshot(const char* path, const char* str, float warp,
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
+        // Where the panel starts. The installation runs with the display
+        // fullscreen and the operator on a laptop, so that setup wants the
+        // panel out of the frame from the first frame rather than after a
+        // click; both are also toggles in the panel and on F1.
+        if (a == "--reset-panel")  { g_panel_reset = true; g_panel_cli = true; continue; }
+        if (a == "--panel-window") { g_ui_detached = true; g_panel_cli = true; continue; }
+        if (a == "--no-panel")     { g_ui_visible = false; continue; }
         if (a == "--selftest") return selftest();
         if (a == "--roottest") return roottest();
         if (a == "--transhot") {
@@ -1810,6 +2158,27 @@ int main(int argc, char** argv) {
             float fs  = (i + 6 < argc) ? atof(argv[i + 6]) : -1.f;
             float ty  = (i + 7 < argc) ? atof(argv[i + 7]) : -1e9f;
             return growshot(path, steps, az, el, rad, fs, ty);
+        }
+        if (a == "--leafshot") {
+            const char* path = (i + 1 < argc) ? argv[i + 1] : "leaf.ppm";
+            int   W  = (i + 2 < argc) ? atoi(argv[i + 2]) : 1000;
+            int   H  = (i + 3 < argc) ? atoi(argv[i + 3]) : 1000;
+            float az = (i + 4 < argc) ? atof(argv[i + 4]) : 0.6f;
+            float el = (i + 5 < argc) ? atof(argv[i + 5]) : 0.18f;
+            float rd = (i + 6 < argc) ? atof(argv[i + 6]) : -1.f;
+            return leafshot(path, W, H, az, el, rd);
+        }
+        if (a == "--abshot") {
+            const char* path = (i + 1 < argc) ? argv[i + 1] : "ab.ppm";
+            int   tr = (i + 2 < argc) ? atoi(argv[i + 2]) : 3;
+            int   W  = (i + 3 < argc) ? atoi(argv[i + 3]) : 1920;
+            int   H  = (i + 4 < argc) ? atoi(argv[i + 4]) : 1080;
+            int   fm = (i + 5 < argc) ? atoi(argv[i + 5]) : -1;
+            float zm = (i + 6 < argc) ? atof(argv[i + 6]) : 1.0f;
+            float az = (i + 7 < argc) ? atof(argv[i + 7]) : 0.6f;
+            float el = (i + 8 < argc) ? atof(argv[i + 8]) : 0.2f;
+            int   st = (i + 9 < argc) ? atoi(argv[i + 9]) : 1200;
+            return abshot(path, tr, W, H, fm, zm, az, el, st);
         }
         if (a == "--uitest") {
             // The parameter registry, headless. ImGui runs without a backend
@@ -2051,6 +2420,11 @@ int main(int argc, char** argv) {
         }
     }
 
+    // A flag on the command line is also a decision: it is remembered, so the
+    // next launch without flags comes up the way this one was asked for.
+    if (g_panel_cli) PanelStateSave(g_ui_detached);
+    else             PanelStateLoad(&g_ui_detached);
+
     if (!glfwInit()) { fprintf(stderr, "glfw init failed\n"); return 1; }
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);   // Metal owns the surface
     int W = 1280, H = 720;
@@ -2075,10 +2449,54 @@ int main(int argc, char** argv) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
+    // Multi-viewport: an ImGui window dragged off the main one becomes a real
+    // OS window, so the panel can live on the operator's screen while the
+    // composition has the installation's display to itself. Docking is on for
+    // the same reason -- it is how a detached panel is put back.
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+        // Platform windows are opaque and square: a rounded, translucent panel
+        // over the desktop shows the corners of its own OS window.
+        ImGuiStyle& st = ImGui::GetStyle();
+        st.WindowRounding = 0.f;
+        st.Colors[ImGuiCol_WindowBg].w = 1.f;
+    }
     ImGui_ImplGlfw_InitForOther(win, true);
     ImGui_ImplMetal_Init(device);
 
+    // Retina fix for detached panels, over imgui_impl_metal.
+    //
+    // The backend sizes a platform window's drawable with viewport->DpiScale,
+    // which the GLFW backend always reports as 1.0 on macOS (density lives in
+    // FramebufferScale here, not DpiScale). Its render path corrects that from
+    // the window's backingScaleFactor, but only on the frame the layer's
+    // contentsScale changes -- so the first resize after the correction sets a
+    // half-resolution drawable that ImGui then draws into at 2x: every glyph
+    // twice the size it should be, and most of the panel off the edge.
+    //
+    // Sizing from backingScaleFactor -- the same number the backend's own
+    // render path trusts -- is the whole fix. The layer is the content view's,
+    // put there by ImGui_ImplMetal_CreateWindow.
+    if (getenv("MIRROR_NO_DPI_FIX") == nullptr) ImGui::GetPlatformIO().Renderer_SetWindowSize =
+        [](ImGuiViewport* vp, ImVec2 size) {
+            void* handle = vp->PlatformHandleRaw ? vp->PlatformHandleRaw
+                                                 : vp->PlatformHandle;
+            if (!handle) return;
+            NSWindow* w = (__bridge NSWindow*)handle;
+            CAMetalLayer* l = (CAMetalLayer*)w.contentView.layer;
+            if (![l isKindOfClass:[CAMetalLayer class]]) return;
+            const CGFloat s = w.backingScaleFactor;
+            l.contentsScale = s;
+            l.drawableSize = CGSizeMake(std::max(CGFloat(1), size.x * s),
+                                        std::max(CGFloat(1), size.y * s));
+        };
+
     printf("mirror_app — Metal shell up (device: %s)\n", device.name.UTF8String);
+    printf("panel: F1 or ` hides/reveals the UI; "
+           "\"own window\" puts it in its own OS window "
+           "(--panel-window, --reset-panel)\n");
 
     // Scenes / presenter.
     MirrorScene mirror(ctx);
@@ -2604,10 +3022,156 @@ int main(int argc, char** argv) {
                     g_show.go();
             }
 
-            ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_FirstUseEver);
-            ImGui::Begin("neuromirror — controls");
+            // F1 takes the UI away and brings it back. Not guarded on the show
+            // being on -- it is wanted most when someone is looking at the
+            // piece -- but text input keeps the key, so a caption being typed
+            // cannot be interrupted by a stray function key.
+            // Two keys, because on macOS F1 is the display's brightness unless
+            // "use F-keys as standard function keys" is set, and an operator
+            // who cannot get the panel back has lost the show.
+            if (!ImGui::GetIO().WantTextInput &&
+                (ImGui::IsKeyPressed(ImGuiKey_F1, false) ||
+                 ImGui::IsKeyPressed(ImGuiKey_GraveAccent, false)))
+                g_ui_visible = !g_ui_visible;
+
+            // --- the panel, drawn (or not) --------------------------------
+            //
+            // Hidden means invisible and click-through, *not* unsubmitted: a
+            // control takes its pending MIDI or preset value at the moment it
+            // is declared, and it is declared as it is drawn (see ui_params.h).
+            // A panel that stopped drawing would quietly stop the knobs
+            // working, which is the opposite of what hiding it is for.
+            //
+            // While hidden it is also pulled back into the main window, so a
+            // detached panel does not leave an empty transparent OS window
+            // behind; its position is remembered and restored on the way back
+            // out, since the trip through the main viewport can clamp it.
+            static ImVec2 panel_pos(20, 20);
+            static bool panel_was_hidden = false;
+            static bool panel_was_detached = g_ui_detached;
+            static int  panel_frames = 0;
+            const ImGuiViewport* mainvp = ImGui::GetMainViewport();
+            const bool panel_hidden = !g_ui_visible;
+            ImVec2 want_pos, want_size;
+            bool want_pos_set = false, want_size_set = false;
+            if (panel_hidden) {
+                ImGui::SetNextWindowViewport(mainvp->ID);
+                ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.f);
+            } else {
+                // One SetNextWindowPos call, decided here. ImGui keeps a single
+                // pending position per frame, so a later default with
+                // ImGuiCond_FirstUseEver does not "fall through" -- it replaces
+                // whatever was asked for above it, which is a silent way to
+                // make every reposition below do nothing at all.
+                if (panel_was_hidden) { want_pos = panel_pos; want_pos_set = true; }
+                // Coming back in -- the box unticked, or --reset-panel for a
+                // panel that imgui.ini has parked on a monitor that is not
+                // plugged in any more. Over the main window is the only place a
+                // panel that is not its own window can be.
+                const bool attaching = (panel_was_detached && !g_ui_detached);
+                if (attaching || g_panel_reset) {
+                    want_pos = ImVec2(mainvp->WorkPos.x + 20,
+                                      mainvp->WorkPos.y + 20);
+                    want_pos_set = true;
+                    if (g_panel_reset) {
+                        want_size = ImVec2(340, 0);
+                        want_size_set = true;
+                        ImGui::SetNextWindowCollapsed(false, ImGuiCond_Always);
+                        g_panel_reset = false;
+                    }
+                }
+                if (!g_ui_detached) {
+                    // Attached is pinned, every frame, not just on the edge:
+                    // ImGui re-picks a window's viewport each frame, and a
+                    // window that has owned one takes it straight back the
+                    // frame after it is handed to the main viewport. Pinning is
+                    // what makes the checkbox mean something in both
+                    // directions -- and while it is ticked off, the panel
+                    // behaves the way it did before viewports existed: inside
+                    // the window, clipped by it.
+                    ImGui::SetNextWindowViewport(mainvp->ID);
+                    // Pinned, a window still keeps whatever desktop position it
+                    // had -- including one from when it was its own OS window
+                    // on another monitor, which draws the panel off the corner
+                    // of the frame with most of it clipped away. So attached
+                    // also means inside: anything outside is pulled back in.
+                    const ImVec2 lo = mainvp->WorkPos;
+                    const ImVec2 hi(mainvp->WorkPos.x + mainvp->WorkSize.x - 120.f,
+                                    mainvp->WorkPos.y + mainvp->WorkSize.y - 80.f);
+                    if (panel_pos.x < lo.x || panel_pos.y < lo.y ||
+                        panel_pos.x > hi.x || panel_pos.y > hi.y) {
+                        want_pos = ImVec2(std::min(std::max(panel_pos.x, lo.x + 20.f),
+                                                   std::max(lo.x + 20.f, hi.x)),
+                                          std::min(std::max(panel_pos.y, lo.y + 20.f),
+                                                   std::max(lo.y + 20.f, hi.y)));
+                        want_pos_set = true;
+                    }
+                    // And it has to *fit*: ImGui only merges a window into the
+                    // main one when the main one contains it whole, and this
+                    // panel is taller than a 720p window with two sections
+                    // open. Without the cap, unticking the box pops the panel
+                    // straight back out and the checkbox looks broken.
+                    // Detached, the height is the operator's business.
+                    ImGui::SetNextWindowSizeConstraints(
+                        ImVec2(0, 0),
+                        ImVec2(FLT_MAX, std::max(200.f, mainvp->WorkSize.y - 40.f)));
+                } else if (panel_frames > 0) {
+                    // The one window allowed to leave the frame on its own.
+                    // Done per-window rather than with ConfigViewportsNoAutoMerge
+                    // so the cam-mask and source overlays stay welded to the
+                    // composition they annotate.
+                    //
+                    // Never on the panel's first frame: the window has no size
+                    // until it has been drawn once, and a zero-size viewport
+                    // gets no platform window -- which the GLFW backend then
+                    // dereferences as it polls focus, and the app is gone
+                    // before it has drawn anything.
+                    ImGuiWindowClass wc;
+                    wc.ViewportFlagsOverrideSet = ImGuiViewportFlags_NoAutoMerge;
+                    ImGui::SetNextWindowClass(&wc);
+                }
+            }
+            panel_was_hidden = panel_hidden;
+
+            if (want_pos_set) ImGui::SetNextWindowPos(want_pos, ImGuiCond_Always);
+            else ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
+            if (want_size_set) ImGui::SetNextWindowSize(want_size, ImGuiCond_Always);
+            else ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_FirstUseEver);
+            ImGui::Begin("neuromirror — controls", nullptr,
+                         panel_hidden ? (ImGuiWindowFlags_NoInputs |
+                                         ImGuiWindowFlags_NoNav |
+                                         ImGuiWindowFlags_NoFocusOnAppearing |
+                                         ImGuiWindowFlags_NoSavedSettings)
+                                      : 0);
+            ++panel_frames;
+            if (!panel_hidden) {
+                panel_pos = ImGui::GetWindowPos();
+                // Where the panel lives is remembered by this app rather than
+                // read back out of imgui.ini: the .ini says where a window is,
+                // not why, and a panel that came up in its own viewport merely
+                // because its saved position missed the main window would
+                // otherwise be recorded as a choice the operator made.
+                if (g_ui_detached != panel_was_detached || panel_frames == 2) {
+                    if (panel_frames != 2) PanelStateSave(g_ui_detached);
+                    printf("panel: %s\n", g_ui_detached ? "in its own window"
+                                                        : "in the main window");
+                    fflush(stdout);
+                }
+                panel_was_detached = g_ui_detached;
+            }
             ImGui::Text("%.0f fps   t=%5.1fs", fpsShown, mirror.clock());
+            ImGui::SameLine();
+            ImGui::Checkbox("own window", &g_ui_detached);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Give the panel its own OS window, to move to a second\n"
+                    "monitor (or off the composition on a single one).\n"
+                    "Untick to bring it back over the main window.");
+            ImGui::SameLine();
+            if (ImGui::Button("hide")) g_ui_visible = false;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Hide the whole UI. F1 or ` brings it back\n"
+                                  "(on macOS F1 may need fn).");
             ImGui::TextUnformatted("scene:"); ImGui::SameLine();
             ImGui::RadioButton("mirror", &scene, (int)Scene::Mirror); ImGui::SameLine();
             ImGui::RadioButton("roots",  &scene, (int)Scene::Roots); ImGui::SameLine();
@@ -3929,11 +4493,36 @@ int main(int argc, char** argv) {
                 // fog
                 ui::PushSection("fog & atmosphere");
                 if (ImGui::CollapsingHeader("fog & atmosphere")) {
+                    ui::Checkbox("fog on", &R.fog.enabled);
                     ui::ColorEdit3("fog color", R.fog.color);
-                    ui::SliderFloat("fog density", &R.fog.density, 0.0f, 0.06f);
-                    ui::SliderFloat("fog falloff", &R.fog.falloff, 0.0f, 0.3f);
+                    // Visibility rather than density, on a logarithmic slider:
+                    // the quantity lives in an exponent, so a linear control over
+                    // it spends nearly all its travel on "opaque".
+                    ImGui::SliderFloat("visibility (world u)", &R.fog.visibility,
+                                       8.0f, 600.0f, "%.0f",
+                                       ImGuiSliderFlags_Logarithmic);
+                    ui::SliderFloat("height scale", &R.fog.heightScale, 2.0f, 120.0f);
+                    ui::Checkbox("height ref follows target", &R.fog.heightRefAuto);
+                    if (!R.fog.heightRefAuto)
+                        ui::SliderFloat("height ref (Y)", &R.fog.heightRef, -20.0f, 60.0f);
+                    ImGui::Separator();
+                    ui::Checkbox("clear radius follows camera", &R.fog.startAuto);
+                    if (R.fog.startAuto)
+                        ui::SliderFloat("clear radius x orbit", &R.fog.startFrac, 0.0f, 1.5f);
+                    else
+                        ui::SliderFloat("clear radius", &R.fog.startDist, 0.0f, 200.0f);
+                    ImGui::TextDisabled("marching from %.1f u", R.fog.startDist);
+                    ImGui::Separator();
                     ui::SliderFloat("fog noise", &R.fog.noiseStrength, 0.0f, 1.0f);
-                    ui::SliderFloat("fog refDist", &R.fog.refDist, 0.0f, 120.0f);
+                    ui::SliderFloat("noise contrast", &R.fog.noiseContrast, 0.0f, 3.0f);
+                    ui::SliderFloat("noise scale", &R.fog.noiseScale, 0.02f, 2.5f);
+                    ImGui::TextDisabled("feature size ~%.1f world u",
+                                        8.0f / std::max(R.fog.noiseScale, 1e-3f));
+                    ui::SliderFloat("drift speed", &R.fog.driftSpeed, 0.0f, 6.0f);
+                    ui::SliderInt("march steps", &R.fog.steps, 4, 32);
+                    ImGui::Separator();
+                    ui::SliderFloat("scatter (medium albedo)", &R.fog.scatter, 0.0f, 1.5f);
+                    ui::SliderFloat("anisotropy (fwd <-> back)", &R.fog.anisotropy, -0.9f, 0.9f);
                     ui::SliderFloat("wisp glow", &R.wispGlowStrength, 0.0f, 3.0f);
                     ui::SliderInt("wisps", &R.wispCount, 0, 8);
                 }
@@ -3949,17 +4538,155 @@ int main(int argc, char** argv) {
                     ui::ColorEdit3("pulse color", R.pulse.color);
                 }
                 ui::PopSection();
+                ui::PushSection("environment & material");
+                if (ImGui::CollapsingHeader("environment & material")) {
+                    // The tranche buttons are a coarse quality dial and the A/B
+                    // control: each one is a whole group of the settings below,
+                    // so a look can be compared against the previous stage
+                    // without hunting for which sliders belonged to it.
+                    ImGui::TextUnformatted("quality tranche");
+                    for (int t = 0; t <= 3; ++t) {
+                        if (t) ImGui::SameLine();
+                        char lbl[8]; snprintf(lbl, sizeof lbl, "%d", t);
+                        if (ImGui::RadioButton(lbl, R.tranche() == t)) {
+                            R.setTranche(t);
+                            roots.rebuildFace();   // smoothNormals is baked into the mesh
+                        }
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(0 baseline, 3 full)");
+                    ImGui::TextUnformatted("key light");
+                    ui::ColorEdit3("key color", R.env.keyColor);
+                    ui::SliderFloat("key intensity", &R.env.keyIntensity, 0.0f, 4.0f);
+                    ui::SliderFloat("key direction X", &roots.lightDir[0], -1.0f, 1.0f);
+                    ui::SliderFloat("key direction Y", &roots.lightDir[1], -1.0f, 1.0f);
+                    ui::SliderFloat("key direction Z", &roots.lightDir[2], -1.0f, 1.0f);
+                    ImGui::Separator();
+                    ImGui::TextUnformatted("ambient (hemisphere)");
+                    ui::ColorEdit3("sky color", R.env.skyColor);
+                    ui::ColorEdit3("ground color", R.env.groundColor);
+                    ui::SliderFloat("hemisphere", &R.env.hemiStrength, 0.0f, 3.0f);
+                    ui::SliderFloat("env specular", &R.env.envSpec, 0.0f, 2.0f);
+                    ui::SliderFloat("rim", &R.env.rimStrength, 0.0f, 1.0f);
+                    ImGui::Separator();
+                    ui::SliderFloat("sss wrap", &R.env.sssWrap, 0.0f, 1.5f);
+                    ui::SliderFloat("sss transmit", &R.env.sssTrans, 0.0f, 2.0f);
+                    ui::SliderFloat("sss power", &R.env.sssPower, 1.0f, 16.0f);
+                    ui::ColorEdit3("sss tint", R.env.sssTint);
+                    ImGui::Separator();
+                    ImGui::Separator();
+                    ImGui::TextUnformatted("root surface (fibre detail)");
+                    ui::SliderFloat("fibre strength", &R.detail.strength, 0.0f, 1.5f);
+                    ui::SliderFloat("fibre scale", &R.detail.scale, 2.0f, 40.0f);
+                    ui::SliderFloat("fibre stretch", &R.detail.stretch, 1.0f, 20.0f);
+                    ui::SliderFloat("fibre break-up", &R.detail.rough, 0.0f, 1.0f);
+                    ui::SliderFloat("per-root tint", &R.detail.tint, 0.0f, 0.5f);
+                    ImGui::Separator();
+                    ui::Checkbox("ambient occlusion", &R.ao.enabled);
+                    ui::SliderFloat("AO radius", &R.ao.radius, 0.2f, 6.0f);
+                    ui::SliderFloat("AO intensity", &R.ao.intensity, 0.0f, 4.0f);
+                    ui::SliderInt("AO samples", &R.ao.samples, 4, 24);
+                    ui::SliderInt("AO downscale", &R.ao.downscale, 1, 4);
+                }
+                ui::PopSection();
+                ui::PushSection("post");
+                if (ImGui::CollapsingHeader("post")) {
+                    ui::Checkbox("post chain", &R.post.enabled);
+                    ui::SliderInt("supersample", &R.post.ssaa, 1, 3);
+                    ImGui::TextDisabled("scene renders at %dx%d", R.width() * R.post.ssaa,
+                                        R.height() * R.post.ssaa);
+                    ui::Checkbox("filmic tonemap", &R.post.tonemap);
+                    ui::SliderFloat("exposure", &R.post.exposure, 0.1f, 4.0f);
+                    ImGui::Separator();
+                    ui::Checkbox("bloom", &R.post.bloom);
+                    ui::SliderFloat("bloom threshold", &R.post.bloomThreshold, 0.2f, 4.0f);
+                    ui::SliderFloat("bloom intensity", &R.post.bloomIntensity, 0.0f, 1.0f);
+                    ui::SliderFloat("bloom radius", &R.post.bloomRadius, 0.5f, 3.0f);
+                    ImGui::Separator();
+                    ui::Checkbox("depth of field", &R.post.dof);
+                    ui::SliderFloat("DoF focus (0=auto)", &R.post.dofFocus, 0.0f, 120.0f);
+                    ui::SliderFloat("DoF range", &R.post.dofRange, 5.0f, 150.0f);
+                    ui::SliderFloat("DoF strength", &R.post.dofStrength, 0.0f, 1.0f);
+                    ImGui::Separator();
+                    ui::SliderFloat("vignette", &R.post.vignette, 0.0f, 1.0f);
+                    ui::SliderFloat("fog dither", &R.post.fogDither, 0.0f, 1.0f);
+                    ui::Checkbox("output dither", &R.post.dither);
+                }
+                ui::PopSection();
+                ui::PushSection("lens & film");
+                if (ImGui::CollapsingHeader("lens & film")) {
+                    ImGui::TextUnformatted("lens");
+                    if (ImGui::Button("wide angle")) roots.setWideAngle(true);
+                    ImGui::SameLine();
+                    if (ImGui::Button("normal")) roots.setWideAngle(false);
+                    ui::Checkbox("set FOV by focal length", &roots.useFocal);
+                    if (roots.useFocal) {
+                        ui::SliderFloat("focal length (mm)", &roots.focalMM, 8.0f, 135.0f);
+                        ImGui::TextDisabled("35mm equiv · %.0f deg vertical FOV",
+                                            roots.effectiveFov() * 2.0f * 57.2957795f);
+                    } else {
+                        ui::SliderFloat("fov (rad, half-angle)", &roots.fov, 0.15f, 1.2f);
+                    }
+                    ui::SliderFloat("barrel <-> pincushion", &R.post.distortK1, -0.4f, 0.4f);
+                    ui::SliderFloat("distortion (corners)", &R.post.distortK2, -0.2f, 0.2f);
+                    ui::SliderFloat("distortion re-crop", &R.post.distortZoom, 0.6f, 1.2f);
+                    ImGui::Separator();
+                    ui::SliderFloat("chromatic aberration", &R.post.caStrength, 0.0f, 8.0f);
+                    ImGui::TextDisabled("px of channel separation at the corner");
+                    ui::SliderFloat("anamorphic streak", &R.post.streak, 0.0f, 1.0f);
+                    ui::SliderFloat("streak length", &R.post.streakLength, 2.0f, 60.0f);
+                    ui::ColorEdit3("streak tint", R.post.streakTint);
+                    ImGui::Separator();
+                    ImGui::TextUnformatted("film");
+                    ui::SliderFloat("halation", &R.post.halation, 0.0f, 1.0f);
+                    ui::ColorEdit3("halation tint", R.post.halationTint);
+                    ui::SliderInt("halation spread (mip)", &R.post.halationMip, 0, 4);
+                    ImGui::Separator();
+                    ui::SliderFloat("grain", &R.post.grain, 0.0f, 0.12f);
+                    ui::SliderFloat("grain size (px)", &R.post.grainSize, 1.0f, 6.0f);
+                    ui::SliderFloat("grain chroma", &R.post.grainChroma, 0.0f, 1.0f);
+                    ImGui::Separator();
+                    ImGui::TextUnformatted("print grade");
+                    ui::SliderFloat("contrast", &R.post.contrast, 0.5f, 2.0f);
+                    ui::SliderFloat("saturation", &R.post.saturation, 0.0f, 2.0f);
+                    ui::SliderFloat("split strength", &R.post.splitStrength, 0.0f, 1.0f);
+                    ui::SliderFloat("split balance (-1 off)", &R.post.toneBalance, -1.0f, 1.0f);
+                    ui::ColorEdit3("shadow tint", R.post.shadowTint);
+                    ui::ColorEdit3("highlight tint", R.post.highlightTint);
+                    ui::ColorEdit3("lift", R.post.lift);
+                    ui::ColorEdit3("gamma", R.post.gammaC);
+                    ui::ColorEdit3("gain", R.post.gain);
+                    if (ImGui::Button("reset grade")) {
+                        R.post.contrast = 1.f; R.post.saturation = 1.f;
+                        for (int i = 0; i < 3; ++i) {
+                            R.post.lift[i] = 0.f; R.post.gammaC[i] = 1.f; R.post.gain[i] = 1.f;
+                        }
+                    }
+                }
+                ui::PopSection();
                 ui::PushSection("face masks");
                 if (ImGui::CollapsingHeader("face masks")) {
                     if (ui::Checkbox("show faces", &roots.showFace)) roots.rebuildFace();
                     if (ui::SliderFloat("face scale", &roots.faceScale, 0.3f, 1.5f))
                         roots.rebuildFace();
+                    if (ui::SliderFloat("face recess", &roots.faceRecess, -2.0f, 1.5f))
+                        roots.rebuildFace();
+                    ImGui::TextDisabled("cavity half-depths back along the normal;\n"
+                                        "negative stands the face proud of the nest");
                     ui::SliderFloat("face light", &R.face.lightIntensity, 0.0f, 8.0f);
                     ui::SliderFloat("face falloff", &R.face.lightFalloff, 0.001f, 0.1f);
+                    ui::SliderFloat("spot outer angle", &R.face.spotOuterDeg, 5.0f, 90.0f);
+                    ui::SliderFloat("spot inner angle", &R.face.spotInnerDeg, 1.0f, 89.0f);
+                    ImGui::TextDisabled("90 outer = no cone (bare point light)");
                     ui::SliderFloat("face spec", &R.face.specStrength, 0.0f, 3.0f);
                     ui::ColorEdit3("vein color", R.face.veinColor);
                     ui::SliderFloat("vein scale", &R.face.veinScale, 0.1f, 2.0f);
                     ui::SliderFloat("vein strength", &R.face.veinStrength, 0.0f, 1.0f);
+                    ui::SliderFloat("mask roughness", &R.face.roughness, 0.04f, 1.0f);
+                    ui::SliderFloat("mask relief", &R.face.reliefStrength, 0.0f, 1.5f);
+                    ui::SliderFloat("relief scale", &R.face.reliefScale, 1.0f, 30.0f);
+                    if (ui::Checkbox("smooth normals", &R.face.smoothNormals))
+                        roots.rebuildFace();
                 }
                 ui::PopSection();
                 ui::PushSection("cached field: LOD & culling");
@@ -4116,6 +4843,7 @@ int main(int argc, char** argv) {
                 }
             }
             ImGui::End();
+            if (panel_hidden) ImGui::PopStyleVar();
 
             // --- camera mask: the rectangle, on the frame ------------------
             //
@@ -4123,7 +4851,7 @@ int main(int argc, char** argv) {
             // is a piece of set dressing aimed at a real room, and placing it
             // by numbers in a list means looking away from the thing being
             // aimed at.
-            if (scene == (int)Scene::CamMask) {
+            if (g_ui_visible && scene == (int)Scene::CamMask) {
                 const ImGuiViewport* vp = ImGui::GetMainViewport();
                 ImGui::SetNextWindowPos(vp->WorkPos);
                 ImGui::SetNextWindowSize(vp->WorkSize);
@@ -4189,7 +4917,7 @@ int main(int argc, char** argv) {
             //
             // Answers one question the mirror's own output cannot: is anything
             // actually arriving, and is it what the fit is being pointed at.
-            if (g_show_source && srcTex && srcTexW > 0) {
+            if (g_ui_visible && g_show_source && srcTex && srcTexW > 0) {
                 const ImGuiViewport* vp = ImGui::GetMainViewport();
                 const float pad = 16.f;
                 const bool right = (g_source_corner == 1 || g_source_corner == 3);
@@ -4319,6 +5047,18 @@ int main(int argc, char** argv) {
 
             [cb presentDrawable:drawable];
             [cb commit];
+
+            // Windows that live outside the main one: their platform windows
+            // are created, moved and drawn here, each on its own command
+            // buffer (see imgui_impl_metal's Renderer_RenderWindow). This is
+            // not optional -- the GLFW backend polls every viewport's window
+            // at the top of the next frame, and a viewport that never got one
+            // is a null dereference. After commit, so the composition is never
+            // waiting on a panel.
+            if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
+                ImGui::UpdatePlatformWindows();
+                ImGui::RenderPlatformWindowsDefault();
+            }
         }
 
         double now = glfwGetTime();
