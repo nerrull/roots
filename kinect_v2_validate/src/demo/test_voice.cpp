@@ -271,6 +271,110 @@ void TestBackendReporting() {
               built ? "yes" : "no", avail ? "yes" : "no");
 }
 
+// The locale list is the whole surface of the bilingual feature that can be
+// tested without a microphone: both backends key off it, one to race several
+// recognisers and one to decide which single locale it degrades to.
+void TestSplitLocales() {
+  std::printf("locale lists\n");
+  using transcribe::SplitLocales;
+
+  const std::vector<std::string> one = SplitLocales("en-US");
+  Check(one.size() == 1 && one[0] == "en-US",
+        "a single locale is a one-element list, not a special case");
+
+  const std::vector<std::string> two = SplitLocales("en-US,fr-CA");
+  Check(two.size() == 2 && two[0] == "en-US" && two[1] == "fr-CA",
+        "a comma splits locales");
+
+  const std::vector<std::string> spaced = SplitLocales(" en-US , fr-CA ");
+  Check(spaced.size() == 2 && spaced[0] == "en-US" && spaced[1] == "fr-CA",
+        "surrounding whitespace is trimmed");
+
+  // A stray trailing comma is the likeliest typo in a launch script, and it
+  // must not produce an empty locale that fails deep inside a backend.
+  const std::vector<std::string> trailing = SplitLocales("en-US,");
+  Check(trailing.size() == 1 && trailing[0] == "en-US",
+        "a trailing comma does not yield an empty locale");
+  const std::vector<std::string> doubled = SplitLocales("en-US,,fr-CA");
+  Check(doubled.size() == 2, "empty entries are dropped");
+
+  Check(SplitLocales("").empty(), "an empty list is empty");
+  Check(SplitLocales("  ,  ").empty(), "a list of nothing but separators is empty");
+
+  // Ordering is load-bearing: SFSpeechRecognizer takes the first, so the list
+  // is a preference order and not a set.
+  const std::vector<std::string> ordered = SplitLocales("fr-CA,en-US");
+  Check(ordered[0] == "fr-CA", "order is preserved");
+}
+
+// A Result now carries the locale that produced it. TranscriptLog deliberately
+// ignores it -- it folds text only -- but the field must survive the fold so a
+// caller reading results directly can still see which language won.
+void TestResultLocale() {
+  std::printf("result locale\n");
+  transcribe::TranscriptLog log;
+  log.add(transcribe::Result{"bonjour", true, "fr-CA"});
+  log.add(transcribe::Result{"hello", true, "en-US"});
+  Check(log.finals().size() == 2, "finals accumulate regardless of locale");
+  Check(log.full() == "bonjour hello",
+        "the transcript is text only; the locale is metadata beside it");
+
+  transcribe::Result r{"partiel", false, "fr-CA"};
+  Check(r.locale == "fr-CA" && !r.is_final,
+        "a volatile result carries its locale too");
+}
+
+// The rolling capture that lets a cloning reference be lifted out of what was
+// just transcribed. Its whole job is keeping audio and words aligned while the
+// window slides underneath them, which is exactly the part that is invisible
+// until a clone comes out conditioned on the wrong sentence.
+void TestSpeechCapture() {
+  std::printf("speech capture\n");
+  transcribe::SpeechCapture cap;
+  cap.reset(1000, 2.0);  // 1 kHz, 2 s window = 2000 samples
+
+  const std::vector<float> block(500, 0.5f);  // 0.5 s each
+  cap.append(block.data(), int(block.size()));
+  cap.markFinal("one");
+  cap.append(block.data(), int(block.size()));
+  cap.markFinal("two");
+  Check(std::fabs(cap.keptSeconds() - 1.0) < 1e-6,
+        "kept audio tracks what was appended");
+
+  std::vector<float> clip;
+  std::string text;
+  cap.takeLast(1.0, clip, text);
+  Check(clip.size() == 1000, "a one-second slice is one second of samples");
+  Check(text == "one two", "finals inside the slice are joined in order");
+
+  // Asking for more than is held yields everything held, rather than reading
+  // off the front of the buffer.
+  cap.takeLast(60.0, clip, text);
+  Check(clip.size() == 1000, "an over-long request is clamped to what exists");
+
+  // A short slice must not drag in words from before it. "one" was marked at
+  // 500 and "two" at 1000, so the last 0.25 s (from 750) keeps only "two".
+  cap.takeLast(0.25, clip, text);
+  Check(clip.size() == 250, "a short slice is short");
+  Check(text == "two", "words from before the slice are left out");
+
+  // Slide the window past the older audio: its marks must go with it, or the
+  // reference transcript would describe sound that no longer exists.
+  for (int i = 0; i < 6; ++i) cap.append(block.data(), int(block.size()));
+  Check(std::fabs(cap.keptSeconds() - 2.0) < 1e-6,
+        "the window stops growing at its cap");
+  cap.takeLast(2.0, clip, text);
+  Check(text.empty(),
+        "marks whose audio has rolled out of the window are dropped with it");
+
+  // reset() is what start_asr() calls: one session's words must never be
+  // paired with another session's sound.
+  cap.markFinal("stale");
+  cap.reset(1000, 2.0);
+  cap.takeLast(2.0, clip, text);
+  Check(clip.empty() && text.empty(), "reset clears audio and marks together");
+}
+
 }  // namespace
 
 int main() {
@@ -278,6 +382,9 @@ int main() {
   TestWavRoundTrip();
   TestReferenceRecorder();
   TestBackendReporting();
+  TestSplitLocales();
+  TestResultLocale();
+  TestSpeechCapture();
 
   std::printf("\n%s\n", g_failures == 0 ? "all voice tests passed"
                                         : "VOICE TESTS FAILED");

@@ -136,7 +136,7 @@ RGB left, Turbo-colourmapped depth right, four mic-array scopes underneath.
 | `--no-usb-reset` | Skip the sensor USB reset on open (it is on by default) |
 | `--transcribe` | Start live transcription immediately (otherwise toggle it in the SPEECH panel) |
 | `--asr-backend <b>` | `auto` (default), `analyzer`, or `sfspeech` — see [Speech-to-text](#speech-to-text) |
-| `--asr-locale <id>` | BCP-47 locale for transcription, default `en-US` |
+| `--asr-locale <ids>` | BCP-47 locale for transcription, default `en-US`. A comma-separated list (`en-US,fr-CA`) runs one recogniser per language — see [Bilingual recognition](#bilingual-recognition) |
 | `--voice-url <url>` | Voice-cloning server, default `http://127.0.0.1:8765` |
 
 **Poll rate.** `video poll Hz` and `depth poll Hz` (1–30, independent, each with a
@@ -255,37 +255,130 @@ Two backends sit behind one interface (`src/demo/transcriber.h`):
 | `SpeechAnalyzer` | `SpeechAnalyzer` + `SpeechTranscriber` (WWDC25) | **macOS 26** to build *and* run |
 | `SFSpeechRecognizer` | the previous API | macOS 10.15+ |
 
-> ### ⚠️ SpeechAnalyzer is not built on macOS 15 and earlier
+> ### ⚠️ SpeechAnalyzer needs the macOS 26 SDK to build
 >
-> It is Swift-only and needs the **macOS 26 SDK**. CMake detects this and says
-> which you got at configure time:
+> It is Swift-only. CMake detects the SDK and says which backends you got at
+> configure time:
 >
 > ```
+> -- transcription: SpeechAnalyzer + SFSpeechRecognizer (SDK 26.5)
 > -- transcription: SFSpeechRecognizer only (SDK 14.5 < 26.0, so SpeechAnalyzer
 >    is unavailable; build against the macOS 26 SDK to enable it)
 > ```
 >
 > On an older SDK, `src/demo/transcriber_analyzer.swift` is excluded from the
 > build entirely and `--asr-backend analyzer` fails with an explanation rather
-> than a link error. **That Swift backend has therefore never been compiled or
-> run** — it was written against the documented API and the WWDC sample flow,
-> but it is unverified until someone builds it on macOS 26.
+> than a link error. The SFSpeechRecognizer path is a complete implementation,
+> not a stub. Rebuild (`cmake -S . -B build`) after upgrading and the analyzer
+> backend appears; the UI shows which one is live, and greys out an explanatory
+> note when it is not compiled in.
 >
-> The SFSpeechRecognizer path is a complete implementation, not a stub. Rebuild
-> (`cmake -S . -B build`) after upgrading and the analyzer backend appears; the
-> UI shows which one is live, and greys out an explanatory note when it is not
-> compiled in.
+> **Swift is compiled by invoking `swiftc` directly**, not via
+> `enable_language(Swift)` — CMake implements Swift only for the Ninja and Xcode
+> generators, and hard-errors under the Makefiles generator this project
+> otherwise uses. The backend is one file exporting a handful of `@_cdecl`
+> symbols, so it compiles to a plain object that the ordinary clang link picks
+> up; `swiftc` stamps `LC_LINKER_OPTION` commands for the Swift runtime into it,
+> so no swiftc-driven link step is needed.
 
 **Recognition is on-device or nothing.** `requiresOnDeviceRecognition` is set and
 `supportsOnDeviceRecognition` is checked before starting; if the locale has no
 local model, startup fails with instructions rather than quietly shipping mic
 audio of whoever walked past the sensor to Apple's servers.
 
+> ### ⚠️ SFSpeechRecognizer appears to be dead on macOS 26
+>
+> On macOS 26.5 the legacy backend produces **nothing** — no results, no error.
+> Verified outside this project entirely: a bare `SFSpeechURLRecognitionRequest`
+> against a WAV, with authorisation granted and the recogniser reporting
+> `isAvailable=1` and `supportsOnDeviceRecognition=1`, returns zero result
+> callbacks and never errors. Not a regression here, and not something this
+> code can fix.
+>
+> It does not affect the demo on macOS 26, where `auto` picks SpeechAnalyzer
+> anyway. It does mean the fallback is not a real fallback on this OS: a
+> recogniser that silently returns nothing is indistinguishable from a quiet
+> room. The backend below is still correct for the macOS versions where the API
+> works.
+
 **The old API is per-utterance, so the task is recycled.** `SFSpeechRecognizer`
 accumulates one growing recognition and hits an undocumented duration limit.
 The backend closes the task after ~1.2 s of silence (or 50 s regardless),
 promoting any un-finalised partial to a final first so recycling never eats
 words. `SpeechAnalyzer` needs none of this — it is built for streaming.
+
+**A session is restartable, and clears itself when it restarts.** The
+`transcribe` toggle stops and starts the same backend, and each analyzer
+timestamps its results from zero — so state left over from the previous session
+is not merely stale but actively wrong. An `emittedThrough` watermark left at
+the old session's end silently swallows *every* result of the new one, which
+presents as transcription working exactly once per launch.
+
+**Stopping the analyzer finalises rather than cancels.** `SpeechTranscriber`
+streams volatile results continuously but only settles an utterance at its
+endpoint, so when you untick `transcribe` there is always one utterance in
+flight — the one just spoken. `stop()` calls `finalizeAndFinishThroughEndOfInput()`
+to flush it; `cancelAndFinishNow()` would drop it. Results queued by that flush
+still arrive, because `poll()` drains the queue after the session is gone.
+
+**Locales are matched with `supportedLocale(equivalentTo:)`.** Doing it by hand
+is a trap: `supportedLocales`/`installedLocales` return ICU-style identifiers
+(`en_US`) while `Locale(identifier: "en-US")` keeps its hyphen, and `Locale`
+equality is identifier equality — so a plain `contains` reports every locale as
+unsupported, *including installed ones*.
+
+**A locale's model is a download.** The first start in a new language installs
+it: `fr-CA` took ~40 s here, and pulled in `fr-FR`, `fr-BE` and `fr-CH` with it.
+`kv2_sa_start` allows 180 s per locale for this. On an installation machine, run
+it once in each language before opening the doors.
+
+### Bilingual recognition
+
+`--asr-locale en-US,fr-CA` runs one `SpeechTranscriber` per language over the
+same beam audio and keeps, per utterance, whichever is more confident. The
+SPEECH panel has the locale field, an `en+fr` preset, and shows which language
+won the last utterance. Editing it restarts a running session — a locale is
+fixed when a transcriber is constructed, so there is no switching one in place.
+
+This exists because **a recogniser given the wrong language does not fail** — it
+returns fluent, confident-looking nonsense. On French speech the `en-US` model
+produced *"je m'appelle la Millie, le jardinis plan de fleur"*. Confidence
+(`attributeOptions: [.transcriptionConfidence]`, weighted by run length)
+separates them:
+
+| audio | `en-US` | `fr-CA` |
+| --- | --- | --- |
+| French | 0.29 | **0.95** ✓ |
+| English | **0.94** ✓ | 0.79 |
+
+It is not symmetric — the French model handles English far better than the
+reverse — which is why the winner is chosen by *comparing* the streams rather
+than against a fixed threshold.
+
+**Cost is small.** Measured on 62 s of speech: one locale 0.25 s CPU / 28 MB,
+two locales 0.85 s CPU / 35 MB. At realtime pace the second language adds ~40%
+CPU and under a megabyte. The streams genuinely run in parallel — two finish in
+about the wall time of one — and `AssetInventory.maximumReservedLocales` is 5,
+so the ceiling is well above two.
+
+> #### ⚠️ Language switching lags, and code-switching defeats it
+>
+> The two streams **do not segment audio the same way**. On a clip alternating
+> French and English sentences, `fr-CA` ran three of `en-US`'s utterances
+> together and finalised them seconds later. Since waiting for the slowest
+> stream means unbounded transcript latency, a straggler that would re-cover
+> already-emitted audio is dropped rather than merged — so on that clip
+> `en-US` won everything and the French sentences came out mangled.
+>
+> This is a limit of the API, not a tuning problem: **volatile results carry no
+> confidence** (verified — 0 of 39 volatile results had the attribute), so
+> finals are the only evidence available, and a final only exists once the
+> utterance has already ended.
+>
+> What it is good for is the case an installation actually sees: a visitor
+> speaks *a* language for a while. Monolingual French and monolingual English
+> both come out correct, every utterance, with either locale order. What it
+> cannot do is follow a speaker switching language sentence by sentence.
 
 **Permission.** These are plain CLI binaries with no bundle, so macOS attributes
 the request to the *parent* terminal: grant it under System Settings → Privacy &
@@ -369,6 +462,19 @@ definition after the recording ended), and any keystroke in the field stops the
 auto-fill rather than fighting you for the cursor. With transcription off, type
 it yourself or leave it blank.
 
+**Or take the reference from what was just said.** `use what was just said`
+(next to `record reference`, enabled while transcription runs) lifts the last
+`ref sec` seconds straight out of the audio transcription has been listening to,
+and fills `ref_text` from the words recognised in that same stretch. No staging,
+no asking a visitor to perform a clip on cue, and the transcript matches the
+audio exactly instead of being reconstructed over a grace period afterwards.
+
+The window is the last 20 s (`SpeechCapture`, beside `TranscriptLog` for the
+same reason — pure bookkeeping, testable without a microphone). Recognition lags
+its audio, so a final is marked slightly *after* the words it names; the slice
+errs towards including a mark, since a reference transcript missing its opening
+words is worse than one carrying a few extra.
+
 Note this is all GPU, not "a core or two" — MLX dispatches to the Metal GPU, and
 these numbers are unreachable on CPU.
 
@@ -422,7 +528,14 @@ ctest --test-dir build --output-on-failure
   oldest first), WAV round-tripping within 16-bit quantisation **and clipping
   rather than wrapping** on out-of-range samples, reference-clip capture
   including the oversized-block overrun guard, and that a transcription backend
-  can never report itself runtime-available when it was not compiled in.
+  can never report itself runtime-available when it was not compiled in. Also
+  locale-list parsing, which both backends key off — one to race several
+  recognisers, the other to decide which single locale it degrades to — so a
+  trailing comma must not become an empty locale that fails deep in a backend.
+  Also `SpeechCapture`: that a slice is the length asked for, that words from
+  before it are left out, and that marks are dropped with the audio they name
+  as the window slides — the alignment that decides whether a clone is
+  conditioned on the right sentence.
 - `person_tracker` — azimuth against analytically-derived angles, a near person
   beating a full-frame back wall, **depth speckle failing to hijack the track**,
   undersized-blob rejection, hold-then-release timing, and smoothing convergence.

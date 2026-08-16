@@ -24,4 +24,12 @@
     "command": "cmake --build build --target freenect_test -j$(sysctl -n hw.logicalcpu) && ./build/freenect_test/freenect_test",
     "cwd": "$ZED_WORKTREE_ROOT",
   },
+  {
+    // Long-lived: holds the TTS model resident on 127.0.0.1:8765 until killed.
+    // Only one can own the port, hence no concurrent runs.
+    "label": "voice server: Run",
+    "command": ".venv-voice/bin/python tools/voice_server.py",
+    "cwd": "$ZED_WORKTREE_ROOT/kinect_v2_validate",
+    "allow_concurrent_runs": false,
+  },
 ]

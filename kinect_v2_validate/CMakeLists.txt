@@ -27,12 +27,14 @@ execute_process(COMMAND xcrun --show-sdk-version --sdk macosx
 
 set(KV2_SPEECH_ANALYZER OFF)
 if(_sdk_version AND _sdk_version VERSION_GREATER_EQUAL 26.0)
-  # Swift is enabled only when it will actually be used: turning the language on
-  # unconditionally makes every configure depend on a working Swift toolchain.
-  include(CheckLanguage)
-  check_language(Swift)
-  if(CMAKE_Swift_COMPILER)
-    enable_language(Swift)
+  # Deliberately *not* enable_language(Swift): CMake implements Swift only for
+  # the Ninja and Xcode generators, so `enable_language` hard-errors under the
+  # Makefiles generator this project otherwise builds fine with. Since the Swift
+  # half is a single file exporting a handful of @_cdecl symbols, invoking
+  # swiftc directly is both simpler and generator-independent -- see
+  # kv2_add_speech_analyzer() below.
+  find_program(KV2_SWIFTC swiftc)
+  if(KV2_SWIFTC)
     set(KV2_SPEECH_ANALYZER ON)
     message(STATUS "transcription: SpeechAnalyzer + SFSpeechRecognizer "
                    "(SDK ${_sdk_version})")
@@ -44,6 +46,48 @@ else()
   message(STATUS "transcription: SFSpeechRecognizer only "
                  "(SDK ${_sdk_version} < 26.0, so SpeechAnalyzer is unavailable; "
                  "build against the macOS 26 SDK to enable it)")
+endif()
+
+if(KV2_SPEECH_ANALYZER)
+  set(_sa_swift "${CMAKE_CURRENT_SOURCE_DIR}/src/demo/transcriber_analyzer.swift")
+  set(_sa_obj "${CMAKE_CURRENT_BINARY_DIR}/transcriber_analyzer.o")
+
+  # Pinned to the Swift 5 language mode. Under Swift 6's strict concurrency the
+  # AVAudioConverter input block trips Sendable diagnostics -- warnings today,
+  # errors if the toolchain default ever moves -- and the block is documented to
+  # run synchronously on the calling thread, so there is nothing to fix.
+  # -parse-as-library: without it swiftc treats a lone file as a script and
+  # synthesises a `main`, which then collides with the real one at link time.
+  set(_sa_flags -parse-as-library -swift-version 5 -O -wmo
+                -module-name kv2_speech -sdk "${_sdk_path}")
+  if(CMAKE_OSX_DEPLOYMENT_TARGET)
+    # Match the C++ half, so `#available(macOS 26.0, *)` stays a real runtime
+    # check rather than a statically-true one.
+    set(_sa_target "${CMAKE_SYSTEM_PROCESSOR}-apple-macos${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    list(APPEND _sa_flags -target "${_sa_target}")
+  endif()
+
+  add_custom_command(OUTPUT "${_sa_obj}"
+      COMMAND "${KV2_SWIFTC}" -c "${_sa_swift}" -o "${_sa_obj}" ${_sa_flags}
+      DEPENDS "${_sa_swift}"
+      COMMENT "Compiling Swift SpeechAnalyzer backend"
+      VERBATIM)
+  add_custom_target(kv2_speech_analyzer_swift DEPENDS "${_sa_obj}")
+  # swiftc stamps LC_LINKER_OPTION load commands for swiftCore, _Concurrency and
+  # friends into the object, so the ordinary clang link picks the Swift runtime
+  # up on its own -- no swiftc-driven link step, no -L needed.
+  set_source_files_properties("${_sa_obj}" PROPERTIES
+      EXTERNAL_OBJECT TRUE GENERATED TRUE)
+
+  # Adds the backend to `target`: the prebuilt Swift object, the C++ shim that
+  # adapts its C ABI to the Transcriber interface, and the feature macro that
+  # transcriber_sf.mm keys the kAuto preference off.
+  function(kv2_add_speech_analyzer target)
+    target_sources(${target} PRIVATE
+        "${_sa_obj}" src/demo/transcriber_analyzer_shim.cpp)
+    add_dependencies(${target} kv2_speech_analyzer_swift)
+    target_compile_definitions(${target} PRIVATE KV2_WITH_SPEECH_ANALYZER=1)
+  endfunction()
 endif()
 
 # We build libfreenect2 from source into external/libfreenect2/install
@@ -106,14 +150,7 @@ else()
       "-framework Speech" "-framework AVFoundation")
 
   if(KV2_SPEECH_ANALYZER)
-    target_sources(kinect_v2_demo PRIVATE
-        src/demo/transcriber_analyzer.swift
-        src/demo/transcriber_analyzer_shim.cpp)
-    target_compile_definitions(kinect_v2_demo PRIVATE KV2_WITH_SPEECH_ANALYZER=1)
-    # The Swift half only exports @_cdecl symbols, so no bridging header or
-    # generated interface is needed in either direction.
-    set_target_properties(kinect_v2_demo PROPERTIES
-        Swift_COMPILATION_MODE Wholemodule)
+    kv2_add_speech_analyzer(kinect_v2_demo)
   else()
     target_compile_definitions(kinect_v2_demo PRIVATE KV2_WITH_SPEECH_ANALYZER=0)
   endif()
@@ -152,11 +189,7 @@ target_include_directories(kinect_v2_voice_test PRIVATE src/demo)
 target_link_libraries(kinect_v2_voice_test PRIVATE
     "-framework Foundation" "-framework Speech" "-framework AVFoundation")
 if(KV2_SPEECH_ANALYZER)
-  target_sources(kinect_v2_voice_test PRIVATE
-      src/demo/transcriber_analyzer.swift
-      src/demo/transcriber_analyzer_shim.cpp)
-  target_compile_definitions(kinect_v2_voice_test PRIVATE
-      KV2_WITH_SPEECH_ANALYZER=1)
+  kv2_add_speech_analyzer(kinect_v2_voice_test)
 else()
   target_compile_definitions(kinect_v2_voice_test PRIVATE
       KV2_WITH_SPEECH_ANALYZER=0)

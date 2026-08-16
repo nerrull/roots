@@ -15,11 +15,12 @@ extern "C" {
 bool kv2_sa_available();
 void* kv2_sa_create();
 void kv2_sa_destroy(void* handle);
-bool kv2_sa_start(void* handle, double sample_rate, const char* locale,
+bool kv2_sa_start(void* handle, double sample_rate, const char* locales,
                   char* err, int err_len);
 void kv2_sa_feed(void* handle, const float* samples, int count);
 void kv2_sa_stop(void* handle);
-bool kv2_sa_poll(void* handle, char* text, int text_len, bool* is_final);
+bool kv2_sa_poll(void* handle, char* text, int text_len, bool* is_final,
+                 char* locale, int locale_len);
 void kv2_sa_error(void* handle, char* buf, int buf_len);
 }
 
@@ -29,6 +30,8 @@ namespace {
 // One utterance's worth of text, with room to spare.
 constexpr int kTextBuf = 8192;
 constexpr int kErrBuf = 1024;
+// A BCP-47 identifier, with room for the long ones ("zh-Hant-HK").
+constexpr int kLocaleBuf = 64;
 
 class AnalyzerTranscriber final : public Transcriber {
  public:
@@ -76,11 +79,16 @@ class AnalyzerTranscriber final : public Transcriber {
   void poll(std::vector<Result>& out) override {
     if (!handle_) return;
     std::vector<char> buf(kTextBuf, 0);
+    std::vector<char> loc(kLocaleBuf, 0);
     bool is_final = false;
     // Bounded so a flood of volatile results can never stall the UI thread.
     for (int i = 0; i < 256; ++i) {
-      if (!kv2_sa_poll(handle_, buf.data(), kTextBuf, &is_final)) break;
-      out.push_back(Result{std::string(buf.data()), is_final});
+      if (!kv2_sa_poll(handle_, buf.data(), kTextBuf, &is_final, loc.data(),
+                       kLocaleBuf)) {
+        break;
+      }
+      out.push_back(
+          Result{std::string(buf.data()), is_final, std::string(loc.data())});
     }
   }
 

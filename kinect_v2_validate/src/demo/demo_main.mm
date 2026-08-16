@@ -337,6 +337,9 @@ int main(int argc, char** argv) {
   bool want_transcribe = false;
   transcribe::Backend asr_backend = transcribe::Backend::kAuto;
   std::string asr_locale = "en-US";
+  // Locale of the most recent finalised utterance; only interesting when
+  // asr_locale names more than one.
+  std::string asr_last_locale;
   std::string voice_url = "http://127.0.0.1:8765";
 
   // Default: pin the Kinect v2 by its USB VID:PID and require the 4-mic array.
@@ -428,7 +431,13 @@ int main(int argc, char** argv) {
           "                          'analyzer' is SpeechAnalyzer, which needs\n"
           "                          macOS 26 both to build and to run; this\n"
           "                          binary was built %s it.\n"
-          "  --asr-locale <id>       BCP-47 locale, default en-US\n"
+          "  --asr-locale <ids>      BCP-47 locale, default en-US. A comma-\n"
+          "                          separated list ('en-US,fr-CA') runs one\n"
+          "                          recogniser per language over the same\n"
+          "                          audio and keeps whichever is more\n"
+          "                          confident, for a bilingual room.\n"
+          "                          SpeechAnalyzer only; SFSpeechRecognizer\n"
+          "                          uses the first.\n"
           "  --voice-url <url>       voice-cloning server, default\n"
           "                          http://127.0.0.1:8765 "
           "(tools/voice_server.py)\n",
@@ -603,6 +612,19 @@ int main(int argc, char** argv) {
   std::vector<transcribe::Result> asr_results;
   std::vector<float> speech_buf;
 
+  // The locale list, editable at runtime. Held in a text buffer because the
+  // interesting operation -- switching a bilingual room from en-US,fr-CA to
+  // something else -- is a mid-session decision, not a launch-time one.
+  char asr_locale_buf[128] = {0};
+  std::snprintf(asr_locale_buf, sizeof(asr_locale_buf), "%s",
+                asr_locale.c_str());
+
+  // A rolling window of exactly the audio transcription has consumed, so a
+  // cloning reference can be lifted straight out of it -- see SpeechCapture.
+  // Long enough to cover the widest 'ref sec' setting.
+  const double kAsrKeepSeconds = 20.0;
+  transcribe::SpeechCapture asr_capture;
+
   voice::VoiceCloner cloner;
   cloner.setEndpoint(voice_url);
   cloner.probeAsync();
@@ -664,12 +686,30 @@ int main(int argc, char** argv) {
     // replaying it on every toggle would transcribe the same words twice.
     asr_cursor = audio.beamCursorNow();
     asr_dropped = 0;
+    // The kept audio and its marks belong to the session that produced them;
+    // carrying them across a restart would pair one session's words with
+    // another's sound.
+    asr_capture.reset(int(audio.sampleRate()), kAsrKeepSeconds);
+    asr_last_locale.clear();
     asr_on = true;
   };
 
   auto stop_asr = [&]() {
     if (asr) asr->stop();
     asr_on = false;
+  };
+
+  // Applies whatever is in asr_locale_buf, restarting a live session so the
+  // change takes effect immediately -- a locale is fixed when a transcriber is
+  // constructed, so there is no way to switch one in place.
+  auto apply_asr_locale = [&]() {
+    const std::string want(asr_locale_buf);
+    if (want == asr_locale || transcribe::SplitLocales(want).empty()) return;
+    asr_locale = want;
+    if (asr_on) {
+      stop_asr();
+      start_asr();
+    }
   };
 
   if (want_transcribe) start_asr();
@@ -808,10 +848,20 @@ int main(int argc, char** argv) {
         asr_dropped += audio.beamDrain(asr_cursor, speech_buf);
         if (!speech_buf.empty()) {
           asr->feed(speech_buf.data(), int(speech_buf.size()));
+          // Keep the same samples we just fed: this is the audio the transcript
+          // describes, sample for sample, which is what lets it double as a
+          // cloning reference without a second capture pass.
+          asr_capture.append(speech_buf.data(), int(speech_buf.size()));
         }
         asr_results.clear();
         asr->poll(asr_results);
-        for (const transcribe::Result& r : asr_results) transcript.add(r);
+        for (const transcribe::Result& r : asr_results) {
+          transcript.add(r);
+          // Which language won the last utterance. Worth surfacing when more
+          // than one is running, since the whole point is that it switches.
+          if (r.is_final && !r.locale.empty()) asr_last_locale = r.locale;
+          if (r.is_final) asr_capture.markFinal(r.text);
+        }
 
         // A backend that dies mid-stream otherwise looks exactly like a quiet
         // room, so surface it and stop pretending to listen.
@@ -1258,6 +1308,53 @@ int main(int argc, char** argv) {
           ImGui::SameLine();
           if (ImGui::SmallButton("clear")) transcript.clear();
 
+          // Language selection. A comma-separated list races one recogniser
+          // per language; the preset covers the case this installation
+          // actually has, which is a room where either language may be spoken.
+          ImGui::PushItemWidth(160 * scale);
+          const bool locale_committed = ImGui::InputText(
+              "##asrlocale", asr_locale_buf, sizeof(asr_locale_buf),
+              ImGuiInputTextFlags_EnterReturnsTrue);
+          ImGui::PopItemWidth();
+          if (locale_committed) apply_asr_locale();
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "BCP-47 locale, or several separated by commas.\n"
+                "Enter applies; a running session restarts, because a\n"
+                "locale is fixed when the recogniser is built.");
+          }
+          ImGui::SameLine();
+          if (ImGui::SmallButton("en+fr")) {
+            std::snprintf(asr_locale_buf, sizeof(asr_locale_buf), "en-US,fr-CA");
+            apply_asr_locale();
+          }
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Bilingual: run en-US and fr-CA together and\n"
+                              "keep whichever is more confident per utterance.");
+          }
+
+          // With several locales racing, the interesting state is which one is
+          // currently winning -- that is the bilingual feature working or not.
+          if (transcribe::SplitLocales(asr_locale).size() > 1) {
+            ImGui::SameLine();
+            if (asr_last_locale.empty()) {
+              ImGui::TextDisabled("racing...");
+            } else {
+              ImGui::TextColored(ImVec4(0.6f, 1.f, 0.7f, 1.f), "-> %s",
+                                 asr_last_locale.c_str());
+            }
+            if (ImGui::IsItemHovered()) {
+              ImGui::SetTooltip(
+                  "One recogniser per language runs over the same audio.\n"
+                  "Each utterance is kept from whichever is more confident,\n"
+                  "because a recogniser given the wrong language does not\n"
+                  "fail -- it returns fluent nonsense. This shows which one\n"
+                  "won the last utterance.\n\n"
+                  "It follows a speaker who settles into a language; it does\n"
+                  "not follow one switching sentence to sentence.");
+            }
+          }
+
           // The SDK question and the OS question have different answers and
           // different fixes, so they are never collapsed into one line.
           if (!transcribe::BuiltWithSpeechAnalyzer()) {
@@ -1363,6 +1460,58 @@ int main(int argc, char** argv) {
                   "Records the beamformed output, so it captures whoever the\n"
                   "beam is currently steered at. Continuous natural speech\n"
                   "clones far better than a held vowel or a stop-start read.");
+            }
+
+            // The other way round: transcription has already been holding the
+            // audio *and* knows what was said, so a reference can be taken
+            // from what just happened rather than by asking someone to speak
+            // again on cue. This is the better path when it is available --
+            // there is nothing to stage, and the reference transcript that
+            // Qwen wants comes with it exactly rather than approximately.
+            const double kept_s = asr_capture.keptSeconds();
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!asr_on || kept_s < 1.0);
+            if (ImGui::Button("use what was just said")) {
+              std::vector<float> clip;
+              std::string spoken;
+              asr_capture.takeLast(ref_seconds, clip, spoken);
+              const int sr = asr_capture.sampleRate();
+              ref_path = std::string(NSTemporaryDirectory().UTF8String) +
+                         "kv2_voice_reference.wav";
+              std::string werr;
+              if (!voice::WriteWav16(ref_path, clip, sr, werr)) {
+                ref_status = werr;
+                ref_status_bad = true;
+                ref_path.clear();
+              } else {
+                std::snprintf(ref_text_buf, sizeof(ref_text_buf), "%s",
+                              spoken.c_str());
+                // Filled from a known transcript, not guessed at over a grace
+                // period, so the old auto-fill must not come along behind it.
+                ref_autofill_until = 0.0;
+                ref_text_edited = true;
+
+                float pk = 0.f;
+                for (float v : clip) pk = std::max(pk, std::fabs(v));
+                ref_status_bad = pk < 0.05f;
+                char msg[256];
+                std::snprintf(msg, sizeof(msg),
+                              "took %.1f s of transcribed speech (peak %.2f)%s",
+                              sr > 0 ? double(clip.size()) / sr : 0.0, pk,
+                              ref_status_bad
+                                  ? "  — very quiet; the clone will be poor"
+                                  : "");
+                ref_status = msg;
+              }
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered()) {
+              ImGui::SetTooltip(
+                  "Takes the last 'ref sec' seconds of what transcription has\n"
+                  "been listening to, and fills the reference transcript from\n"
+                  "the words it recognised in that same stretch.\n\n"
+                  "Needs transcription running. Only the last %.0f s are kept.",
+                  kAsrKeepSeconds);
             }
           }
           if (!ref_status.empty()) {

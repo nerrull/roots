@@ -92,7 +92,7 @@ class SfTranscriber final : public Transcriber {
  public:
   ~SfTranscriber() override { stop(); }
 
-  bool start(double sample_rate, const std::string& locale,
+  bool start(double sample_rate, const std::string& locales,
              std::string& err) override;
   void stop() override;
   bool running() const override { return running_; }
@@ -120,6 +120,9 @@ class SfTranscriber final : public Transcriber {
   std::deque<Result> pending_;
   std::string error_;
   std::string last_partial_;
+  // The single locale this recogniser was actually opened with, stamped onto
+  // every Result. Set once in start() and only read afterwards.
+  std::string locale_;
 
   SFSpeechRecognizer* recognizer_ = nil;
   SFSpeechAudioBufferRecognitionRequest* request_ = nil;
@@ -174,10 +177,20 @@ class SfTranscriber final : public Transcriber {
 namespace transcribe {
 namespace detail {
 
-bool SfTranscriber::start(double sample_rate, const std::string& locale,
+bool SfTranscriber::start(double sample_rate, const std::string& locales,
                           std::string& err) {
   if (running_) return true;
   sample_rate_ = sample_rate > 0 ? sample_rate : 16000.0;
+
+  // One recogniser, one language. Racing several locales the way the analyzer
+  // backend does would mean several SFSpeechRecognizers each recycling their
+  // own task on their own silence timer, which is a great deal of machinery for
+  // the backend we prefer *not* to use. Taking the first is the honest
+  // degradation, and locale_ is reported on every Result so the caller can see
+  // which one it got.
+  const std::vector<std::string> list = SplitLocales(locales);
+  const std::string locale = list.empty() ? std::string("en-US") : list.front();
+  locale_ = locale;
 
   NSString* loc = [NSString stringWithUTF8String:locale.c_str()];
   recognizer_ = [[SFSpeechRecognizer alloc]
@@ -266,7 +279,7 @@ void SfTranscriber::endTask(bool flush_partial) {
     if (!last_partial_.empty()) {
       // Promote it rather than dropping it: the words were spoken, and this
       // task will never get the chance to finalise them itself.
-      pending_.push_back(Result{last_partial_, true});
+      pending_.push_back(Result{last_partial_, true, locale_});
       last_partial_.clear();
     }
   }
@@ -324,7 +337,7 @@ void SfTranscriber::onResult(const std::string& text, bool is_final) {
   } else {
     last_partial_ = text;
   }
-  pending_.push_back(Result{text, is_final});
+  pending_.push_back(Result{text, is_final, locale_});
   // Bound the queue: if the UI stops polling we would otherwise grow forever.
   while (pending_.size() > 256) pending_.pop_front();
 }

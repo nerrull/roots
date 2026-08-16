@@ -59,15 +59,36 @@ bool BackendAvailable(Backend b);
 struct Result {
   std::string text;
   bool is_final = false;
+  // Which locale produced this, when several are running at once (see
+  // start()). Empty when only one was requested, or on a backend that cannot
+  // run more than one -- callers that do not care can ignore it entirely.
+  std::string locale;
 };
+
+// Splits a locale list ("en-US, fr-CA") into its parts, trimming whitespace and
+// dropping empties. A single identifier yields a one-element vector, so callers
+// need no special case.
+//
+// Pure string handling, kept out of the backends so it is testable without a
+// microphone -- and so both backends agree on what a locale list means.
+std::vector<std::string> SplitLocales(const std::string& locales);
 
 class Transcriber {
  public:
   virtual ~Transcriber() = default;
 
-  // `locale` is a BCP-47 identifier ("en-US"). Fails, with `err` explaining
-  // why, if the locale has no on-device model, if permission was refused, or if
-  // the backend is unavailable on this OS.
+  // `locale` is a BCP-47 identifier ("en-US"), or a comma-separated list of
+  // them ("en-US,fr-CA"). Fails, with `err` explaining why, if a locale has no
+  // on-device model, if permission was refused, or if the backend is
+  // unavailable on this OS.
+  //
+  // A list means *bilingual* recognition: SpeechAnalyzer runs one transcriber
+  // per locale over the same audio and emits whichever hypothesis the model is
+  // most confident in, since a recogniser handed the wrong language does not
+  // fail -- it returns fluent nonsense. Each locale costs roughly the same
+  // again in CPU, which is small (well under 1% of a core per stream at
+  // realtime) but not free. SFSpeechRecognizer cannot do this and uses the
+  // first locale in the list.
   virtual bool start(double sample_rate, const std::string& locale,
                      std::string& err) = 0;
   virtual void stop() = 0;
@@ -127,6 +148,51 @@ class TranscriptLog {
   std::vector<std::string> finals_;
   std::string partial_;
   size_t max_finals_;
+};
+
+// A rolling window of the audio a transcriber has been fed, with the finalised
+// text tagged by where in that audio it was recognised.
+//
+// The point is that transcription is already holding both halves of a voice
+// cloning reference -- the sound and the words -- so a clip can be lifted from
+// what a person just said instead of asking them to perform one on cue. The
+// reference transcript then matches the audio exactly, rather than being typed
+// out afterwards from memory.
+//
+// Bounded, because this runs for as long as the installation is open and only
+// the recent past is ever wanted. Here, beside TranscriptLog, for the same
+// reason: it is pure bookkeeping, and testable without a microphone.
+class SpeechCapture {
+ public:
+  // Clears everything and sets the window. Call at the start of each session:
+  // audio from one session must never be paired with another's words.
+  void reset(int sample_rate, double keep_seconds);
+
+  // The same samples that went to the transcriber, in the same order.
+  void append(const float* samples, int n);
+
+  // Records that `text` was finalised at the current position. Recognition
+  // lags its audio, so a mark sits slightly *after* the words it names.
+  void markFinal(const std::string& text);
+
+  int sampleRate() const { return sample_rate_; }
+  double keptSeconds() const {
+    return sample_rate_ > 0 ? double(buf_.size()) / sample_rate_ : 0.0;
+  }
+
+  // The most recent `seconds` of audio, and the finals marked within it joined
+  // by spaces. Asking for more than is held yields everything held.
+  void takeLast(double seconds, std::vector<float>& clip,
+                std::string& text) const;
+
+ private:
+  std::vector<float> buf_;
+  // Samples ever appended. Marks are positions on this axis, so they stay
+  // meaningful as the window slides and `buf_` renumbers itself.
+  uint64_t total_ = 0;
+  std::vector<std::pair<uint64_t, std::string>> marks_;
+  size_t keep_ = 0;
+  int sample_rate_ = 16000;
 };
 
 }  // namespace transcribe
