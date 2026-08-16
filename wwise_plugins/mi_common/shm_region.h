@@ -110,9 +110,19 @@ private:
 
         if (create)
         {
-            // ftruncate on an already-sized segment (a second creator racing the
-            // first) is harmless: it just re-asserts the same size.
-            if (ftruncate(m_fd, (off_t)sizeBytes) != 0)
+            // Size the segment only if it is not already big enough.
+            //
+            // This is not an optimization. On macOS a POSIX shared-memory object
+            // can be ftruncate()d exactly once, when it is first created;
+            // afterwards it returns EINVAL forever. The objects outlive the
+            // process that made them (they persist until unlinked or the machine
+            // reboots), so unconditionally truncating means the *first* run of a
+            // writer works and every run after it fails to open at all --
+            // silently, since a failed Open just means nothing is published.
+            struct stat st;
+            const bool bigEnough = fstat(m_fd, &st) == 0 &&
+                                   (size_t)st.st_size >= sizeBytes;
+            if (!bigEnough && ftruncate(m_fd, (off_t)sizeBytes) != 0)
             {
                 close(m_fd);
                 m_fd = -1;

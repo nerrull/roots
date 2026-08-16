@@ -14,6 +14,7 @@ was built separately against Wwise 2025.1.10 on Windows — see
 | Macro Oscillator | Source | Plaits | 48 kHz native | All 24 synthesis engines |
 | Drum Synth | Source | Peaks | 48 kHz native | Bass drum, snare, hi-hat, FM drum |
 | Signal Scope | Effect | (none) | Any | Pure audio tap -- publishes whatever passes through it to shared memory for the external `scope_monitor` app; doesn't touch the signal |
+| Onset Tap | Effect | (none) | Any | Pure analysis tap -- detects transients against a self-adjusting threshold and publishes the events to shared memory for a program outside Wwise; doesn't touch the signal |
 
 The MI code is MIT licensed (Copyright Emilie Gillet) and is compiled
 **unmodified** from a checkout of `pichenettes/eurorack` for the macOS build;
@@ -32,6 +33,10 @@ mi_common/          shared adaptation layer
   mi_resampler.h      polyphase 48k <-> 32k rational resampler
   mi_arena.h          IAkPluginMemAlloc-backed arena for stmlib::BufferAllocator
   patched/            headers that shadow the checkout (one file, one line)
+  onset_detector.h    transient detection with a self-adjusting threshold
+  onset_shm.h         the event stream Onset Tap publishes through
+  signal_scope_shm.h  the audio ring Signal Scope publishes through
+  shm_region.h        named shared memory, Win32 and POSIX
 <PluginName>/       one directory per plug-in, from wp.py's scaffolding
 tests/              offline DSP harnesses (no Wwise required)
 ```
@@ -53,7 +58,7 @@ export WWISESDK=$WWISEROOT/SDK
 export AK_XCODE_DEVELOPER_DIR_2600=/Applications/Xcode.app/Contents/Developer
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 
-for P in ModalResonator MacroOscillator GranularTexture ModalVoice DrumSynth; do
+for P in ModalResonator MacroOscillator GranularTexture ModalVoice DrumSynth SignalScope OnsetTap; do
   (cd $P \
     && python3 $WWISEROOT/Scripts/Build/Plugins/wp.py premake Mac \
     && xcodebuild -workspace ${P}_Mac.xcworkspace -scheme All \
@@ -137,6 +142,64 @@ This only works when the plug-in and the monitor app run on the same
 machine (same OS shared-memory namespace) -- e.g. Wwise Authoring's local
 Play/Preview alongside `scope_monitor` on this machine, not a remote
 CrossOver/Wine Authoring session watched from elsewhere.
+
+## Onset Tap: transients out of Wwise, into another program
+
+`OnsetTap` is an authoring+sound-engine **Effect** that, like Signal Scope,
+never alters the audio passing through it. What it publishes is not audio but
+*events*: on every `Execute()` it runs a transient detector over the block and,
+when one fires, writes "a hit landed, this hard, panned here" into a named
+shared-memory ring keyed by a **Tap ID** property (0-15). It also republishes
+the live level and the threshold that level would have to clear, every block,
+so a receiving program can show why nothing is firing.
+
+Built for driving visuals from sound -- in this repo, `mirror_app`'s raindrops
+(`mirror_app/src/audio_pulse.h` reads the stream; see that app's README).
+
+**Why the detection is in the plug-in.** A program on the other side of a
+SignalScope-style audio ring could run its own detector, but it would be doing
+it on samples it is always slightly behind on, on a thread that also has a
+frame to draw, at whatever rate it happens to poll. Onsets are a millisecond-
+scale phenomenon; the audio thread is where they are visible. Only the
+conclusion needs to cross the process boundary, and a conclusion is 48 bytes.
+
+**The threshold adapts, and that is the whole point.** A fixed level cannot
+serve one show that carries a rain bed at -45 dBFS and a struck resonator
+peaking near 0: a threshold that catches the rain fires continuously on the
+resonator, and one tuned to the resonator never hears the rain. What makes a
+hit a hit is not its level but how much louder it is than the moment before it,
+so the detection function is the positive rise of the level in dB per ~1.3 ms
+hop, and the bar is that function's own recent statistics --
+`mean + sensitivity x stddev` over the adaptation window. Everything is in dB,
+so turning a bus down does not change what it detects. Three guards keep it
+honest, each against a specific way an adaptive threshold embarrasses itself:
+**Level Floor** (an absolute gate, or room tone's statistically-exceptional
+rises fire constantly), **Minimum Rise** (a floor under the adaptive threshold,
+or a very steady source adapts down onto its own noise), and **Minimum
+Interval** (a refractory period, or one hit is reported once per analysis hop
+for as long as its attack lasts).
+
+The detector is mono -- a transient is an event in time, and running it per
+channel would report one stereo hit twice a millisecond apart. The channels are
+downmixed for detection and their balance measured separately, travelling with
+the event as `pan` so a receiving program can place it where it was heard.
+
+Properties: **Tap ID**, **Name**, **Detection Enabled**, **Sensitivity**
+(~1.5 twitchy, 2.5 musical, 4+ only the big hits), **Level Floor (dB)**,
+**Minimum Rise (dB)**, **Minimum Interval (ms)**, **Adaptation Window (ms)**.
+
+`mi_common/onset_detector.h` is the detector (header-only, no Wwise, no
+allocation after `Init()`), `mi_common/onset_shm.h` the layout both sides
+speak, and `tests/onset_detector_test.cpp` drives both offline -- synthetic
+material with known transients, plus the writer and reader against each other.
+Pass it a WAV to print onset counts at three sensitivities over real material,
+which is how to pick a Sensitivity without guessing:
+
+```sh
+tests/run_tests.sh /tmp/out path/to/ambience.wav
+```
+
+Same-machine only, for the same reason Signal Scope is (see above).
 
 ## Things worth knowing
 
@@ -303,7 +366,7 @@ set WWISEROOT=Q:\Development\Audiokinetic\Wwise_2025.1.10.9233
 set WWISESDK=%WWISEROOT%\SDK
 set MI_EURORACK_DIR=Q:\Development\git\eurorack
 
-for %P in (RacineComb ModalResonator GranularTexture MacroOscillator ModalVoice DrumSynth SignalScope) do (
+for %P in (RacineComb ModalResonator GranularTexture MacroOscillator ModalVoice DrumSynth SignalScope OnsetTap) do (
   cd %P
   python %WWISEROOT%\Scripts\Build\Plugins\wp.py premake Authoring
   python %WWISEROOT%\Scripts\Build\Plugins\wp.py build Authoring -t vc170 -c Release
@@ -311,9 +374,12 @@ for %P in (RacineComb ModalResonator GranularTexture MacroOscillator ModalVoice 
 )
 ```
 
-Signal Scope has no `eurorack`/MI dependency (it doesn't need `MI_EURORACK_DIR`) and
-also builds for the plain Windows sound-engine target, same as the other plug-ins:
-`wp.py build Windows_vc170 -c Release` from inside `SignalScope/`.
+Signal Scope and Onset Tap have no `eurorack`/MI dependency (they don't need
+`MI_EURORACK_DIR`) and also build for the plain Windows sound-engine target, same as
+the other plug-ins: `wp.py build Windows_vc170 -c Release` from inside the plug-in's
+directory. Onset Tap's Windows authoring DLL has **not** been built yet -- only the
+macOS sound-engine side (`libOnsetTap.dylib` / `libOnsetTapFX.a`) has, so it does not
+appear in `dist/` alongside the others.
 
 `build Authoring` compiles both the sound-engine static lib and the authoring
 DLL and drops the DLL straight into

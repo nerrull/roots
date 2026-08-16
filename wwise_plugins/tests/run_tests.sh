@@ -13,12 +13,6 @@ ROOT="$(dirname "$HERE")"
 MI="${MI_EURORACK_DIR:-$(cd "$ROOT/../.." && pwd)/eurorack}"
 OUT="${1:-${TMPDIR:-/tmp}/mi_tests}"
 
-if [ ! -d "$MI/stmlib" ]; then
-    echo "eurorack checkout not found at $MI"
-    echo "set MI_EURORACK_DIR to point at it"
-    exit 1
-fi
-
 mkdir -p "$OUT"
 
 # TEST selects stmlib's portable code paths (no Cortex-M asm, IN_RAM a no-op).
@@ -44,6 +38,26 @@ build_and_run() {
         fail=1
     fi
 }
+
+# The onset detector and its shared-memory stream: no MI code involved, so this
+# runs even without an eurorack checkout. Pass a WAV as $2 to also print onset
+# counts at three sensitivities over real material.
+build_and_run onset_test "$HERE/onset_detector_test.cpp"
+if [ -n "${2:-}" ]; then
+    (cd "$OUT" && ./onset_test "$2")
+fi
+
+# Everything below drives the Mutable Instruments cores.
+if [ ! -d "$MI/stmlib" ]; then
+    echo
+    echo "eurorack checkout not found at $MI -- skipping the MI harnesses"
+    echo "set MI_EURORACK_DIR to point at it"
+    if [ $fail -ne 0 ]; then
+        echo "SOME TESTS FAILED"
+        exit 1
+    fi
+    exit 0
+fi
 
 build_and_run resampler_test "$HERE/resampler_test.cpp"
 
