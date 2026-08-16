@@ -72,6 +72,69 @@ be folded together.
 
 ## Always visible
 
+### show
+
+`run the show` hands the scene selector over to the timeline. Off by default —
+development is one scene at a time, and a timeline reassigning the scene under
+you while you tune a shader is an obstacle. The installation turns it on.
+
+**The running order is code, not configuration.** `show_timeline.cpp`'s `kGraph`
+is the piece: idle waits for someone, fitting captures them, the transition
+hands off, roots grow, and an empty room resets it.
+
+| phase | leaves on | to | its `max` sends it to |
+|---|---|---|---|
+| idle | `face_hold` — a face, held | fitting | — |
+| fitting | `fit_hold` — a converged fit | transition | idle |
+| | `absent_hold` — they left | idle | |
+| transition | `done_hold` — the scene finished | roots | roots |
+| roots | `absent_hold` — the room emptied | idle | — |
+
+Edges are checked in that order and the first match wins, so `fitting` reads a
+fit landing as someone steps back as a capture rather than a departure.
+
+What an install changes is *when*, and that lives in `mirror_app/shows/*.show`:
+
+- **`min`** is a floor — the events the room produces on its own can't advance
+  the phase below it, so someone walking past can't retrigger the piece every
+  few seconds.
+- **`max`** is a ceiling — the escape hatch, so a fit that never converges
+  can't strand the piece. Where it goes is fixed by the graph.
+- **the edge keys** above are debounces. A dropped tracker frame is not somebody
+  leaving the room.
+
+One exception to the floor: `scene_done` ignores it. Holding a completed
+transition on screen to satisfy a minimum is a freeze, not a beat.
+
+The panel shows the phase, its clock, why the last transition happened, and the
+two live signals (`face`, `fit`, with the fit's residual in pixels). Nearly
+every "why did it not advance" is answered by watching those while standing in
+front of the camera.
+
+**Forcing:** the four buttons, keys `1`–`4`, or a MIDI CC on `phase CC`
+(default 101) whose value selects the phase across 0–127. `space`, the `go`
+button, and a CC on `cue CC` (default 100) take the current phase's forward
+edge — the same meaning in every phase, so an operator never has to know which
+event they're short-circuiting.
+
+**Editing:** `script ▸ reload` re-reads the file. The phase that is running
+stays, with its clock restarted — retiming on an install day shouldn't cut back
+to the top of the piece. A bad key is reported with its line number *and the
+keys that phase does have*, and the running script is kept, so a typo saved
+mid-show can't leave the installation with no running order. A script names only
+what it moves; everything else keeps the graph's default, and an empty file runs
+the piece as designed.
+
+**`fit converged under (px)`** is the mean landmark error the fitting phase
+waits for. Above ~8 px the mask is visibly a different face.
+
+**Text** scheduled by the script overrides only *what* the overlay says and
+*when*; placement, size, font, warp and turbulence stay whatever the text
+section and the preset set them to. `fade` drives the overlay's `reveal`, so a
+scheduled caption comes together out of the noise and breaks apart again rather
+than cross-fading. See [text](#text) and the format's own documentation at the
+top of `mirror_app/shows/default.show`.
+
 ### scene
 
 `mirror` · `roots` · `transition` · `fit view` · `cam mask`
@@ -173,6 +236,45 @@ from the neural fit` are handoffs to the root scene.
 
 **[?]** Identity arguably belongs in its own top-level section rather than
 nested under tracking.
+
+---
+
+### screen orientation
+
+`compose for:` auto / landscape / portrait, `panel aspect (w/h)`, `feed x`,
+`feed y`, `feed zoom`, `centre feed`.
+
+Always visible, because the frame's shape is upstream of everything: the
+mirror's coord space spans (-aspect, aspect) x (-1, 1), the root renderer builds
+its frustum from it, the text places itself in coord units, and the camera is
+cropped into it.
+
+The installation's screen is portrait and macOS is set to portrait there, so its
+drawable is already tall and **auto** composes for it with no bars. **portrait**
+on a landscape dev monitor is the preview: the same aspect, the same camera crop
+and the same place the text lands, in a tall box in the middle of the window.
+The bars go black when letterboxed so the preview reads like the panel rather
+than like a window.
+
+`panel aspect` is the installation panel's width/height stood on its end --
+0.5625 for a 1920x1080 panel turned 90 degrees. It is stated rather than taken
+from the current monitor, because a preview is only worth anything if it matches
+the screen the piece will run on and not the one previewing it.
+
+**The camera does not turn around when the screen does.** The sensor is 16:9, so
+a portrait frame keeps a tall rect out of it and throws the sides away -- about
+**32%** of the sensor's width survives. `feed x` / `feed y` / `feed zoom` place
+that rect. This is not a fine adjustment; it decides who is in the picture, and
+it is worth setting on site with someone standing where the audience will.
+
+The tracker and the fit are always handed the same crop, so moving these cannot
+put the mask off the face. The source preview follows it too: it is drawn at the
+composition's aspect, so what you see in the corner is what the fit is being
+given, not the whole sensor.
+
+One thing to watch when switching: a title set as one long line in landscape can
+run off the sides in portrait, where x only spans ±0.5625. Break it over two
+lines (the text box takes newlines) or drop `size`.
 
 ---
 
@@ -399,4 +501,5 @@ Not controls, but the same surface from the command line:
 | `--presettest` | growth-parameter round-trip |
 | `--growshot` | render the grown root system to a PPM |
 | `--textshot` | the text overlay over a live pond, through the real present pass |
+| `--orientshot` | the mirror+text and the root scene composed at a given drawable size (defaults to the installation's 1080x1920) |
 | `--roottest`, `--rootshot`, `--fieldshot`, `--maskshot`, `--transhot`, `--mirrorclip` | older shot/bench modes |

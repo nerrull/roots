@@ -1,0 +1,102 @@
+# default.show — the piece's timings and captions.
+#
+# The running order itself is in code (show_timeline.cpp, `kGraph`): idle waits
+# for someone, fitting captures them, the transition hands off, roots grow, and
+# an empty room resets it. That sequence is the piece and is not configurable.
+# This file sets *when*, not *what*.
+#
+# Reloadable from the Show panel while the app runs: edit, save, hit reload. The
+# phase you are in stays, with its clock restarted, so retiming during an
+# install does not cut back to the top.
+#
+# Every key is `name: value`. The colon is optional, indentation is decorative,
+# `#` comments to end of line, durations take an optional s / ms suffix.
+# Anything not named here keeps the default compiled into the graph.
+#
+# In any phase:
+#
+#   min:     floor — the events the room produces on its own (a face arriving,
+#            a fit converging) cannot advance the phase before this.
+#   max:     ceiling — the escape hatch. Where it goes is fixed by the graph.
+#   <edge>:  debounce on one of this phase's exits, named per phase below. How
+#            long the condition must hold: a dropped tracker frame is not
+#            somebody leaving the room.
+#   text:    a caption. Opens a block; the keys under it belong to it until the
+#            next `text` or `phase`.
+#              at / after   delay, from the phase's start or from the anchor
+#              for          how long it stays; omitted = until the phase ends
+#              fade         in and out. Drives the overlay's turbulent reveal,
+#                           so the words come together out of the noise and
+#                           break apart again rather than cross-fading.
+#              when         anchor to an event instead of the phase's start:
+#                           face_present, face_absent, fit_converged, fit_lost,
+#                           scene_done
+#            `\n` splits lines.
+#
+# A bad key is reported with its line number and the alternatives for that
+# phase, and the running script is kept — a typo saved mid-show cannot leave
+# the installation with no running order.
+
+show: jardins racine
+
+
+# --- 1. idle mirror ----------------------------------------------------------
+# The floor is what stops someone walking past from retriggering the piece every
+# few seconds, and it gives the title time to land before anything reacts.
+# Exits: face_hold — a face, held this long, opens the fitting phase.
+
+phase idle
+	min: 8s
+	face_hold: 1.5s
+
+	text: "JARDINS\nRACINE"
+		at: 3s
+		for: 7s
+		fade: 1.2s
+
+
+# --- 2. face fitting ---------------------------------------------------------
+# Ends when the fit has actually settled on this face, not on a timer chosen for
+# the average one. The ceiling is the escape hatch: a fit that never converges
+# (glasses, a hat, someone side-on) releases the piece instead of stranding it.
+# Exits: fit_hold — a converged fit hands off to the transition.
+#        absent_hold — they walked away.
+
+phase fitting
+	min: 2s
+	max: 30s
+	fit_hold: 1.5s
+	absent_hold: 2.5s
+
+	text: "RESTEZ IMMOBILE"
+		at: 1s
+		for: 5s
+		fade: 0.8s
+
+
+# --- 3. transition -----------------------------------------------------------
+# TransitionScene owns its own duration, so this phase just waits for it — and
+# that wait ignores the floor, because holding a finished transition on screen
+# would be a freeze rather than a beat. The ceiling only covers the case where
+# the scene never reports done.
+# Exits: done_hold — a delay after the scene finishes, if the cut wants padding.
+
+phase transition
+	max: 12s
+	done_hold: 0s
+
+
+# --- 4. roots and face meshes ------------------------------------------------
+# The long one. The floor guarantees the growth is worth watching even if the
+# person steps away early; the absence hold is generous because people move
+# around in front of it and the tracker loses them for seconds at a time.
+# Exits: absent_hold — the room emptied.
+
+phase roots
+	min: 40s
+	absent_hold: 8s
+
+	text: "VOS RACINES"
+		at: 4s
+		for: 8s
+		fade: 1.5s

@@ -13,6 +13,7 @@ struct KinectFitTarget::Impl {
     uint64_t frames = 0;
     bool mirrored = true;
     bool have_frame = false;
+    FeedCrop crop;
 };
 
 KinectFitTarget::KinectFitTarget() : impl_(new Impl()) {}
@@ -48,6 +49,8 @@ std::string KinectFitTarget::error() const { return impl_->err; }
 uint64_t KinectFitTarget::frames() const { return impl_->frames; }
 void KinectFitTarget::setMirrored(bool m) { impl_->mirrored = m; }
 bool KinectFitTarget::mirrored() const { return impl_->mirrored; }
+void KinectFitTarget::setCrop(const FeedCrop& c) { impl_->crop = c; }
+FeedCrop KinectFitTarget::crop() const { return impl_->crop; }
 void KinectFitTarget::setRateHz(float hz) { impl_->src.setColorRate(hz); }
 
 std::string KinectFitTarget::deviceInfo() const {
@@ -63,8 +66,10 @@ bool KinectFitTarget::lastFrameRGB8(int w, int h,
     if (!f.valid || f.data.empty()) return false;
 
     const bool rgbx = (f.format == libfreenect2::Frame::RGBX);
-    DownsampleToRGB8(f.data.data(), f.width, f.height, f.bytes_per_pixel,
-                     rgbx ? 0 : 2, rgbx ? 2 : 0, w, h, rgb);
+    DownsampleRectToRGB8(f.data.data(), f.width, f.height, f.bytes_per_pixel,
+                         rgbx ? 0 : 2, rgbx ? 2 : 0,
+                         ComputeFeedRect(f.width, f.height, w, h, impl_->crop),
+                         w, h, rgb);
     // Mirrored to match what poll() produced, so landmark coordinates line up
     // with the fit target's pixels.
     if (impl_->mirrored) MirrorRGB8(w, h, rgb);
@@ -93,8 +98,10 @@ bool KinectFitTarget::poll(int w, int h, std::vector<float>& rgb) {
     const int r_off = rgbx ? 0 : 2;
     const int b_off = rgbx ? 2 : 0;
 
-    DownsampleRGB8(f.data.data(), f.width, f.height, f.bytes_per_pixel,
-                   r_off, b_off, w, h, rgb);
+    DownsampleRectRGB8(f.data.data(), f.width, f.height, f.bytes_per_pixel,
+                       r_off, b_off,
+                       ComputeFeedRect(f.width, f.height, w, h, impl_->crop),
+                       w, h, rgb);
 
     if (impl_->mirrored) {
         for (int y = 0; y < h; ++y) {

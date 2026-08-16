@@ -13,10 +13,17 @@ namespace {
 // giving the tracker a subtly different image from the one being fitted.
 template <typename T, typename Store>
 void BoxDownsample(const unsigned char* src, int src_w, int src_h,
-                   int stride_px, int r_off, int b_off,
+                   int stride_px, int r_off, int b_off, SrcRect rect,
                    int dst_w, int dst_h, std::vector<T>& dst, Store store) {
     dst.assign(size_t(dst_w) * dst_h * 3, T(0));
     if (!src || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0) return;
+
+    // A rect from a preset or a stale frame size is not trusted to be inside the
+    // image: the inner loop indexes rows directly off it.
+    rect.x = std::min(std::max(rect.x, 0), src_w - 1);
+    rect.y = std::min(std::max(rect.y, 0), src_h - 1);
+    rect.w = std::min(std::max(rect.w, 1), src_w - rect.x);
+    rect.h = std::min(std::max(rect.h, 1), src_h - rect.y);
 
     const int g_off = (r_off + b_off) / 2;   // green sits between them either way
 
@@ -24,11 +31,11 @@ void BoxDownsample(const unsigned char* src, int src_w, int src_h,
         // Source rows covered by this destination row. Computed as a half-open
         // span so every source pixel lands in exactly one box -- rounding both
         // ends independently would double-count or drop rows.
-        const int y0 = int(int64_t(dy) * src_h / dst_h);
-        const int y1 = std::max(y0 + 1, int(int64_t(dy + 1) * src_h / dst_h));
+        const int y0 = rect.y + int(int64_t(dy) * rect.h / dst_h);
+        const int y1 = std::max(y0 + 1, rect.y + int(int64_t(dy + 1) * rect.h / dst_h));
         for (int dx = 0; dx < dst_w; ++dx) {
-            const int x0 = int(int64_t(dx) * src_w / dst_w);
-            const int x1 = std::max(x0 + 1, int(int64_t(dx + 1) * src_w / dst_w));
+            const int x0 = rect.x + int(int64_t(dx) * rect.w / dst_w);
+            const int x1 = std::max(x0 + 1, rect.x + int(int64_t(dx + 1) * rect.w / dst_w));
 
             uint32_t acc_r = 0, acc_g = 0, acc_b = 0, n = 0;
             for (int y = y0; y < y1; ++y) {
@@ -52,20 +59,77 @@ void BoxDownsample(const unsigned char* src, int src_w, int src_h,
 
 }  // namespace
 
+namespace {
+inline auto StoreF() { return [](float v) { return v * (1.f / 255.f); }; }
+inline auto StoreU8() {
+    return [](float v) {
+        return (unsigned char)(v < 0.f ? 0.f : (v > 255.f ? 255.f : v) + 0.5f);
+    };
+}
+inline SrcRect WholeImage(int w, int h) { return SrcRect{0, 0, w, h}; }
+}  // namespace
+
+SrcRect ComputeFeedRect(int src_w, int src_h, int dst_w, int dst_h,
+                        const FeedCrop& c) {
+    SrcRect r;
+    if (src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0) return r;
+
+    const double want = double(dst_w) / double(dst_h);
+    // The largest rect of the output's aspect that fits in the source.
+    double w = src_w, h = src_h;
+    if (double(src_w) / double(src_h) > want) w = h * want;
+    else h = w / want;
+
+    const double zoom = std::min(std::max(double(c.zoom), 1e-2), 50.0);
+    w /= zoom;
+    h /= zoom;
+    w = std::min(w, double(src_w));
+    h = std::min(h, double(src_h));
+
+    // Shifted inside rather than shrunk: the framing controls asked for this
+    // scale, and quietly widening the rect at the edge of travel would change
+    // how big the person is as they walk across the frame.
+    double x = double(c.cx) * src_w - w * 0.5;
+    double y = double(c.cy) * src_h - h * 0.5;
+    x = std::min(std::max(x, 0.0), double(src_w) - w);
+    y = std::min(std::max(y, 0.0), double(src_h) - h);
+
+    r.x = int(std::lround(x));
+    r.y = int(std::lround(y));
+    r.w = std::max(1, int(std::lround(w)));
+    r.h = std::max(1, int(std::lround(h)));
+    r.x = std::min(r.x, src_w - r.w);
+    r.y = std::min(r.y, src_h - r.h);
+    return r;
+}
+
 void DownsampleRGB8(const unsigned char* src, int src_w, int src_h,
                     int stride_px, int r_off, int b_off,
                     int dst_w, int dst_h, std::vector<float>& dst) {
-    BoxDownsample(src, src_w, src_h, stride_px, r_off, b_off, dst_w, dst_h, dst,
-                  [](float v) { return v * (1.f / 255.f); });
+    BoxDownsample(src, src_w, src_h, stride_px, r_off, b_off,
+                  WholeImage(src_w, src_h), dst_w, dst_h, dst, StoreF());
 }
 
 void DownsampleToRGB8(const unsigned char* src, int src_w, int src_h,
                       int stride_px, int r_off, int b_off,
                       int dst_w, int dst_h, std::vector<unsigned char>& dst) {
-    BoxDownsample(src, src_w, src_h, stride_px, r_off, b_off, dst_w, dst_h, dst,
-                  [](float v) {
-                      return (unsigned char)(v < 0.f ? 0.f : (v > 255.f ? 255.f : v) + 0.5f);
-                  });
+    BoxDownsample(src, src_w, src_h, stride_px, r_off, b_off,
+                  WholeImage(src_w, src_h), dst_w, dst_h, dst, StoreU8());
+}
+
+void DownsampleRectRGB8(const unsigned char* src, int src_w, int src_h,
+                        int stride_px, int r_off, int b_off, const SrcRect& rect,
+                        int dst_w, int dst_h, std::vector<float>& dst) {
+    BoxDownsample(src, src_w, src_h, stride_px, r_off, b_off, rect,
+                  dst_w, dst_h, dst, StoreF());
+}
+
+void DownsampleRectToRGB8(const unsigned char* src, int src_w, int src_h,
+                          int stride_px, int r_off, int b_off,
+                          const SrcRect& rect, int dst_w, int dst_h,
+                          std::vector<unsigned char>& dst) {
+    BoxDownsample(src, src_w, src_h, stride_px, r_off, b_off, rect,
+                  dst_w, dst_h, dst, StoreU8());
 }
 
 void MirrorRGB8(int w, int h, std::vector<unsigned char>& rgb) {

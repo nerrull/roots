@@ -35,12 +35,22 @@ Done (validated, on `jardins_racine` main):
   the sample coordinate refracted by the *same* ripple gradient the feature
   kernel uses. Crisp at any scale, over any scene, and it never touches the
   network — see [Text](#text).
+- **Show timeline** — `show_timeline`: the four phases (idle → fitting →
+  transition → roots) as a **fixed graph in code**, advanced on **time or
+  event**, with the durations and the text cues set by `shows/*.show` and
+  reloadable without a rebuild — see [The show](#the-show).
+- **Screen orientation** — the composition is its own size (`screen_layout`),
+  separate from the drawable: scenes render at it, present blits it into a
+  centred viewport, and the camera is cropped into its aspect. Forcing Portrait
+  on a landscape monitor is a true preview of the installation — see
+  [Orientation](#orientation).
 
 Headless coverage: `--selftest`, `--roottest`, `--rootshot`,
 `--growshot`, `--fieldshot`, `--rootbench`, `--fieldbench`, `--facetest`,
-`--maskshot`, `--mirrorclip`, `--transhot`, `--textshot`,
+`--maskshot`, `--mirrorclip`, `--transhot`, `--textshot`, `--orientshot`,
 `mlp_parity_test`, `pond_parity_test`, `ripple_parity_test`, `face_fit_test`,
-`face_mask_test`, `cloth_test`, `text_sdf_test`. (`mlp_parity_test` and `pond_parity_test` read fixtures by
+`face_mask_test`, `cloth_test`, `text_sdf_test`, `screen_layout_test`,
+`show_timeline_test`. (`mlp_parity_test` and `pond_parity_test` read fixtures by
 relative path — run them from `mirror_app/tests/`.)
 
 ## Context
@@ -114,12 +124,17 @@ effect, not an alpha fade.
    reimplementation" goal, less churn to the GL apps).
 5. ✅ **Cached-system scaling**: instances + LOD + frustum/sub-pixel culling +
    auto render-scale (`addInstance`, `RootScene::buildField`, `--fieldbench`).
+6. ✅ **Show timeline**: `show_timeline` — the four phases as a fixed graph in
+   code, advanced on **time or event**; `shows/*.show` sets only the durations
+   and the text cues. See [The show](#the-show).
 
 ## Next
 
-1. **Scene handoff.** The hydro-dip transition itself is built (below); what is
-   still open is using it as the *director* between the two scenes — stopping the
-   mirror's sim, starting the roots', and running this effect over the seam.
+1. **Scene handoff, the sims.** The timeline now *directs* the four phases and
+   the hydro-dip runs over the seam (below). What is still open underneath it is
+   the sim handoff proper: stopping the mirror's training and starting the
+   roots' growth on the phase change, rather than both scenes being live and one
+   of them being the one that is drawn.
 
 ## Deferred
 
@@ -573,6 +588,98 @@ The second is arguably a latent flaw in the original design rather than in the
 port: a crossfade over a moving sheet was never going to do the job the TODO
 wanted from it.
 
+## The show
+
+The piece is not a demo with a scene radio button. It idles as a mirror until
+someone walks up to it, fits their face, falls through the transition, grows
+roots out of them, and lets go when they leave. `show_timeline` is that running
+order.
+
+### The shape is code; the timing is data
+
+That sequence *is* the piece. It is not a thing to be configured, so the graph
+is a fixed table in `show_timeline.cpp`:
+
+| phase | edges, in priority order | `max` → |
+|---|---|---|
+| idle | `face_present` → fitting | — |
+| fitting | `fit_converged` → transition, `face_absent` → idle | idle |
+| transition | `scene_done` → roots | roots |
+| roots | `face_absent` → idle | — |
+
+A format that let you rewire that would be a format in which the piece could be
+described wrongly, and every edge would need a runtime error for the case where
+it was. What an install actually needs to change is *when* — how long the idle
+floor is, how long a face must be gone before the piece lets go, when a caption
+lands. Those are durations, and durations are all the script file sets.
+
+Every one has a default in the graph, so `ShowScript()` **is** the designed
+piece: a script names only what it moves, and a missing file is not a degraded
+mode. That also removes the drift a separate built-in fallback script would have
+had.
+
+### Why both kinds of edge
+
+A system that handles only one is wrong in a way that shows in the room.
+
+| | what it is for |
+|---|---|
+| time | The idle phase needs a **floor**, or someone walking past retriggers the piece every few seconds. The roots need a minimum before the piece may reset. |
+| events | The fitting phase is over when the fit has converged on *this* face, not after a duration chosen for the average one. The transition is over when `TransitionScene::done()` says so. |
+
+So they compose: `min` is a floor the room's own events cannot fire below, `max`
+is a ceiling whose target the graph fixes, and between them the edges decide.
+One exception to the floor, deliberate — a scene reporting itself finished
+advances regardless, because holding a completed transition on screen to satisfy
+a minimum is a freeze, not a beat.
+
+The level signals (`face_present`, `fit_converged`) are set by `main.mm` as
+plain per-frame booleans; the debounce that makes them events lives in the
+timeline, because "how long must a face be gone before the piece lets go" is a
+decision about the room and belongs in the script next to the phase it governs.
+A dropped tracker frame is not somebody leaving.
+
+### The format
+
+Line-oriented `key: value`, documented in `shows/default.show` itself. Three
+properties it was designed for, each a fix for a way the first cut was worse:
+
+- **No positional syntax.** Everything is a named field, so there is no order to
+  get wrong and nothing to memorise about where a modifier goes.
+- **Indentation is decorative.** A key attaches to the most recent item that
+  accepts it, and the cue keys (`at`, `for`, `fade`, `when`) are disjoint from
+  the keys that open one — so where a line belongs is unambiguous from the line
+  itself, and re-indenting a file cannot change its meaning.
+- **The colon is optional.** Punctuation that can be forgotten in the dark of an
+  install will be.
+
+Because the graph is fixed, the set of knobs a phase has is knowable, so an
+unknown key is rejected *with the alternatives for that phase* rather than
+merely refused. The error carries its line number and the running script is
+kept, so a typo saved mid-show cannot leave the installation with no running
+order. Reload keeps the phase that is running and restarts its clock rather than
+cutting to the top of the piece.
+
+### What it owns, and what it does not
+
+It holds no Metal, no scenes and no textures: a state machine over durations and
+booleans, which is what lets `show_timeline_test` drive the whole thing at a
+fixed step — including asserting the *shape* of the graph, since the graph is
+code. Its failure modes — a floor checked against the wrong clock, a debounce a
+single dropped frame defeats, a caption whose fade-out never starts because its
+duration is shorter than its fade — are all invisible until they happen in the
+room and are then unreproducible.
+
+The host reads `phase()` to pick a scene, watches `entries()` to know a phase
+just started (where `TransitionScene::restart()` and the identity-collection
+kickoff go), and copies `text()` into `TextParams`. The script owns *what* the
+text says and *when*; placement, size, font and turbulence stay whatever the
+panel set them to, so a scheduled caption is not a second, worse text editor.
+
+Edge 0 of each phase is the forward path, which is what the operator's `go`
+(space, a button, a MIDI CC) takes — so "go" means the same thing in every phase
+without anyone having to know which event it is short-circuiting.
+
 ## Text
 
 The show needs legible text over the work. The neural mirror cannot supply it and
@@ -671,3 +778,63 @@ run time, so a clean build says nothing about it); `text_sdf_test` checks the
 distance transform against an analytic disc, which is the only way to catch the
 error an approximate transform makes — still smooth, still monotone, wrong by a
 fraction of a pixel in the places that make a straight stem wobble.
+
+
+## Orientation
+
+The installation runs on a portrait screen. Development does not. Almost
+everything in the app is derived from the frame's shape — the mirror's coord
+space spans (-aspect, aspect) x (-1, 1), `MetalRootRenderer` builds its frustum
+from `w/h`, the text overlay places itself in coord units, and the camera has to
+be resampled into it — so composing for the drawable directly makes the
+installation's framing something you can only see by standing in front of it.
+
+**The composition is its own size.** `ComputeLayout` returns the largest rect of
+the target aspect that fits the drawable, centred; scenes render at that, and the
+present pass sets a viewport for it. The letterbox needs no shader change at all:
+the fullscreen triangle is in clip space, so restricting the viewport *is* the
+letterbox, and the text overlay inside it keeps composing in composition coords.
+
+One rule covers both cases, which is the point — the installation's drawable is
+genuinely tall (macOS is set to portrait there), so its composition is the
+drawable and nothing is letterboxed, while Portrait on a 16:9 dev monitor yields
+a 608x1080 box in the middle. There is no fills-vs-letterboxes branch to get
+wrong.
+
+`portrait_aspect` is **stated** (0.5625 for a 1920x1080 panel on its end) rather
+than derived by inverting the dev monitor's aspect. Inverting passes on a 16:9
+monitor and is quietly wrong on 16:10, and a preview that matches the machine
+previewing it rather than the panel it is previewing is worth nothing.
+
+**No rotation is involved**, deliberately. macOS rotates the installation's
+display, so the app only has to compose tall. A physically rotated panel fed a
+landscape signal would need the blit to rotate too; that is not built.
+
+### The camera does not turn around
+
+The sensor is 16:9 and stays that way. Resampling it into a portrait fit grid
+would stretch whoever is standing there — the kind of wrong that looks nearly
+right in a thumbnail and unmistakable at 1080x1920. So `ComputeFeedRect` takes a
+rect of the *output's* aspect out of the source: at 1080x1920, **32% of the
+sensor's width survives**.
+
+That makes framing a real decision rather than a nicety, hence `feed x/y/zoom`.
+Two details worth keeping:
+
+- The rect is **shifted** inside the source at the edge of travel, never shrunk.
+  Widening it there would change how large a person is as they walk across the
+  frame.
+- The crop is applied to the fit target, the tracker's image **and** the source
+  preview, from one `SrcRect`. The landmarks are normalised to whatever image
+  they were found in, so cropping one and not another puts the training mask
+  somewhere the face is not — the same invariant the shared box filter already
+  existed to protect.
+
+`screen_layout_test` covers the arithmetic: the installation's exact case, the
+16:10 trap, viewport containment over a size sweep, panning that does not resize,
+absurd and zero zoom staying inside the sensor, and the float and byte crops
+agreeing. `--orientshot` renders the mirror-plus-text and the root scene at a
+given drawable size (1080x1920 by default) — aspect bugs fail by looking
+*plausible*, so that one is for looking at.
+
+The root scene needed no change: its projection already came from `w/h`.

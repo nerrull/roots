@@ -36,6 +36,32 @@ public:
 
 // --- helpers shared by the implementations ----------------------------------
 
+// How a source frame maps into a differently-shaped output frame.
+//
+// The sensor is 16:9 and does not turn around when the screen does. Resampling
+// it straight into a portrait fit grid stretches whoever is standing there into
+// a caricature -- and it is the kind of wrong that looks almost right in a
+// preview thumbnail and unmistakable at scale. So a rect of the *output's*
+// aspect is taken out of the source instead, which means a portrait frame throws
+// away most of a 16:9 image and where that rect sits becomes a real decision.
+// Hence the framing controls: with only a third of the sensor's width surviving,
+// nobody can be relied on to stand in the middle of it.
+struct FeedCrop {
+    float cx = 0.5f, cy = 0.5f;  // rect centre, normalised source coords
+    float zoom = 1.f;            // > 1 takes a smaller rect, i.e. moves in
+};
+
+// A rect in source pixels.
+struct SrcRect { int x = 0, y = 0, w = 0, h = 0; };
+
+// The rect `c` selects when resampling into a dst_w x dst_h frame: the largest
+// rect of the output's aspect at zoom 1, divided by zoom, centred on (cx, cy)
+// and shifted -- never shrunk -- to stay inside the source. Clamping by shifting
+// keeps the scale the framing controls ask for, so panning to the edge slides
+// the crop rather than silently zooming it out.
+SrcRect ComputeFeedRect(int src_w, int src_h, int dst_w, int dst_h,
+                        const FeedCrop& c);
+
 // Box-filter downsample of an 8-bit interleaved image into h*w*3 floats.
 //
 // Box rather than point sampling: the colour camera is 1920x1080 and the fit
@@ -45,6 +71,17 @@ public:
 void DownsampleRGB8(const unsigned char* src, int src_w, int src_h,
                     int stride_px, int r_off, int b_off,
                     int dst_w, int dst_h, std::vector<float>& dst);
+
+// The same, over a sub-rect of the source (see ComputeFeedRect). The full-frame
+// versions are these with the rect set to the whole image, so there is one
+// filter and the cropped and uncropped paths cannot drift apart.
+void DownsampleRectRGB8(const unsigned char* src, int src_w, int src_h,
+                        int stride_px, int r_off, int b_off, const SrcRect& rect,
+                        int dst_w, int dst_h, std::vector<float>& dst);
+void DownsampleRectToRGB8(const unsigned char* src, int src_w, int src_h,
+                          int stride_px, int r_off, int b_off,
+                          const SrcRect& rect, int dst_w, int dst_h,
+                          std::vector<unsigned char>& dst);
 
 // The same resampling, to 8-bit RGB. MediaPipe wants bytes, and it wants them
 // at a higher resolution than the fit grid -- the fit runs at a couple of

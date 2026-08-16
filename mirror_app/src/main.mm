@@ -33,6 +33,8 @@
 #include "midi_in.h"
 #include "fullscreen_present.h"
 #include "text_overlay.h"
+#include "screen_layout.h"
+#include "show_timeline.h"
 
 #include <algorithm>
 #include <chrono>
@@ -402,6 +404,32 @@ double g_id_started = 0.0;
 float g_id_collect_secs = 5.0f;
 float g_id_residual  = -1.f;
 std::string g_track_err;
+
+// --- the show ---------------------------------------------------------------
+// The running order, when the piece is driving itself rather than being driven
+// from the scene radio buttons. Off by default: development is one scene at a
+// time, and a timeline that started reassigning the scene under you while you
+// were tuning a shader would be an obstacle. The installation turns it on.
+show::Timeline g_show;
+bool  g_show_on = false;
+std::string g_show_name = "default";
+std::string g_show_err;
+// Which scene each phase renders. A phase is a moment in the piece, not a
+// renderer, and the two are worth being able to repoint independently -- the
+// fitting phase showing the diagnostic fit view instead of the mirror is a
+// setting, not a rebuild. Indexed by show::Phase.
+int g_show_scene[(int)show::Phase::Count] = {0, 0, 2, 1};  // mirror,mirror,trans,roots
+// Mean landmark error, in pixels, under which the identity fit counts as
+// converged. Above ~8 px the mask is visibly the wrong face; this is the
+// threshold the fitting phase waits on.
+float g_show_fit_px = 6.f;
+// Operator overrides. Any CC on `cue_cc` past halfway takes the current phase's
+// forward edge -- "go" means the same thing everywhere, so nobody has to know
+// which event it is short-circuiting. Any on `phase_cc` jumps straight to the
+// phase its value selects.
+int g_show_cue_cc = 100;
+int g_show_phase_cc = 101;
+bool g_show_log = true;
 std::vector<unsigned char> g_track_rgb;
 std::vector<unsigned char> g_fit_mask;
 int64_t g_track_ts = 0;         // must increase monotonically for video mode
@@ -424,6 +452,22 @@ bool  g_face_colors_fresh = false;
 // reproducible, which is what lets a known face be fitted and compared run to
 // run. The photo is simply substituted into the stream -- nothing downstream
 // knows the difference.
+// --- screen orientation ------------------------------------------------------
+//
+// The installation's screen is portrait; development happens on a landscape
+// monitor. See screen_layout.h -- scenes render at the *composition* size, which
+// is the drawable in Auto and a centred tall box when Portrait is forced on a
+// wide window. Everything shape-dependent follows from that one size: the
+// mirror's coord aspect, the root frustum, where the text lands, and the rect
+// taken out of the camera.
+int   g_orientation = (int)mirror::Orientation::Auto;
+float g_portrait_aspect = 9.f / 16.f;   // the panel's w/h stood on its end
+
+// How the 16:9 sensor is framed into that shape. A portrait frame keeps about a
+// third of the sensor's width, so this is not a fine adjustment -- it decides
+// who is in the picture.
+mirror::FeedCrop g_feed;
+
 enum class Source { Kinect = 0, Photo = 1 };
 int g_source = (int)Source::Kinect;
 std::vector<unsigned char> g_photo;      // full-res RGB8
@@ -517,7 +561,10 @@ static void ApplyCamMask8(std::vector<unsigned char>& rgb, int w, int h) {
 static bool SourceRGB8(int w, int h, std::vector<unsigned char>& out) {
     if (g_source == (int)Source::Photo) {
         if (g_photo.empty()) return false;
-        mirror::DownsampleToRGB8(g_photo.data(), g_photo_w, g_photo_h, 3, 0, 2, w, h, out);
+        mirror::DownsampleRectToRGB8(
+            g_photo.data(), g_photo_w, g_photo_h, 3, 0, 2,
+            mirror::ComputeFeedRect(g_photo_w, g_photo_h, w, h, g_feed),
+            w, h, out);
         ApplyCamMask8(out, w, h);
         return true;
     }
@@ -533,7 +580,10 @@ static bool SourceRGB8(int w, int h, std::vector<unsigned char>& out) {
 static bool SourceRGBF(int w, int h, std::vector<float>& out) {
     if (g_source == (int)Source::Photo) {
         if (g_photo.empty()) return false;
-        mirror::DownsampleRGB8(g_photo.data(), g_photo_w, g_photo_h, 3, 0, 2, w, h, out);
+        mirror::DownsampleRectRGB8(
+            g_photo.data(), g_photo_w, g_photo_h, 3, 0, 2,
+            mirror::ComputeFeedRect(g_photo_w, g_photo_h, w, h, g_feed),
+            w, h, out);
         ApplyCamMaskF(out, w, h);
         return true;
     }
@@ -622,6 +672,41 @@ static void UpdateHeadBox() {
 // Defined below, next to the placement it describes: the mask and the region
 // both need it, and both are built before it.
 static void PinTransform(float& scale, float& u, float& v);
+
+// --- the show's two derived signals -----------------------------------------
+//
+// Both are levels, sampled every frame; the debounce that turns them into
+// events lives in show::Timeline, not here. Deliberately: "how long must a face
+// be gone before the piece lets go" is a decision about the room, and belongs
+// in the script next to the phase it governs.
+
+// Someone is in front of the piece. `g_face.valid` already survives short
+// detection misses (the acquire/hold logic above), so this is the honest
+// per-frame answer and the script's `hold` covers the rest.
+static bool ShowFacePresent() {
+    return g_track_on && g_face.valid;
+}
+
+// The identity fit has settled on *this* face. Collection running means it has
+// not yet; a residual above the threshold means it landed on the wrong shape,
+// which is a fit that should time out rather than one to hand a transition.
+static bool ShowFitConverged() {
+    return g_track_on && g_face.valid && !g_collect_id && g_id_residual >= 0.f &&
+           g_id_residual <= g_show_fit_px;
+}
+
+// Loads `shows/<name>.show`, keeping the running script on failure -- a typo
+// saved mid-show must not leave the installation with no running order. Returns
+// false with g_show_err set.
+static bool ShowLoad(const std::string& name) {
+    show::ShowScript s;
+    if (!show::LoadShow(show::ShowDir() + "/" + name + ".show", s, g_show_err))
+        return false;
+    g_show.setScript(s);
+    g_show_name = name;
+    g_show_err.clear();
+    return true;
+}
 
 // Is there a face to narrow the fit to at all?
 static bool HaveCrop() {
@@ -1358,7 +1443,132 @@ static int transhot(const char* prefix, int frames, const char* photo, float fps
     return 0;
 }
 
-// --textshot <out.ppm> [text] [warp]
+// --orientshot <prefix> [w] [h]
+//
+// The composition at a given drawable size, for both scenes that care about its
+// shape. Defaults to 1080x1920 -- the installation's panel with macOS set to
+// portrait -- because the whole point of the orientation work is that the piece
+// is composed for a screen nobody is developing on.
+//
+// Renders <prefix>_mirror.ppm (pond + text overlay, through the real present
+// path) and <prefix>_roots.ppm (the 3D scene), and prints the layout and the
+// camera rect. Aspect-dependent things fail here by looking *plausible* -- a
+// squashed face, a title running off the side, a frustum that crops the roots --
+// so this exists to be looked at.
+static int orientshot(const char* prefix, int dw, int dh, int orient) {
+    MetalContext ctx;
+    if (!ctx.device()) { fprintf(stderr, "orientshot: no Metal device\n"); return 1; }
+
+    const mirror::ScreenLayout L = mirror::ComputeLayout(
+        dw, dh, (mirror::Orientation)orient, 9.f / 16.f);
+    const int W = L.comp_w, H = L.comp_h;
+    printf("orientshot: drawable %dx%d -> compose %dx%d (aspect %.4f)%s\n",
+           dw, dh, W, H, float(W) / float(H),
+           L.letterboxed ? " letterboxed" : "");
+
+    const mirror::SrcRect fr =
+        mirror::ComputeFeedRect(1920, 1080, W / 4, H / 4, mirror::FeedCrop{});
+    printf("orientshot: 1920x1080 sensor -> crop %dx%d at (%d, %d), "
+           "%.0f%% of the width kept\n",
+           fr.w, fr.h, fr.x, fr.y, 100.0 * fr.w / 1920.0);
+
+    char path[512];
+
+    // --- the mirror, with the text over it ---------------------------------
+    {
+        MirrorScene m(ctx, 11, W / 2, H / 2);
+        if (!m.valid()) { fprintf(stderr, "orientshot: mirror invalid\n"); return 1; }
+        m.params().drops = 5;
+        m.params().orbit_on = true;
+
+        FullscreenPresent present(ctx,
+            std::string(MIRROR_APP_SHADER_DIR) + "/present.metal",
+            MTLPixelFormatRGBA16Float);
+        if (!present.valid()) {
+            fprintf(stderr, "orientshot: present shader failed\n"); return 1;
+        }
+        mirror::TextOverlay text(ctx);
+        mirror::TextParams tp;
+        tp.on = true;
+        tp.text = "JARDINS\nRACINE";
+        text.update(tp);
+
+        // Drawable-sized, with the composition blitted into its viewport --
+        // the same two calls the frame loop makes, so a letterbox that is
+        // offset or the wrong size shows up here rather than on the wall.
+        MTLTextureDescriptor* d = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                         width:dw height:dh mipmapped:NO];
+        d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        d.storageMode = MTLStorageModeShared;
+        id<MTLTexture> out = [ctx.device() newTextureWithDescriptor:d];
+
+        @autoreleasepool {
+            m.advance(1.0);
+            id<MTLTexture> pond = m.render();
+
+            mirror::TextRipple tr;
+            const mirror::PondParams& P = m.params();
+            tr.k = P.ring_freq;
+            tr.decay = P.decay;
+            tr.core_r2 = P.core_rolloff ? P.core_radius * P.core_radius : 0.f;
+            const auto& srcs = m.pond().lastSources();
+            tr.n = int(std::min(srcs.size(), size_t(16)));
+            for (int i = 0; i < tr.n; ++i)
+                for (int j = 0; j < 4; ++j) tr.src[i][j] = srcs[i][j];
+
+            MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+            rpd.colorAttachments[0].texture = out;
+            rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
+            rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+            rpd.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+
+            id<MTLCommandBuffer> cb = [ctx.queue() commandBuffer];
+            id<MTLRenderCommandEncoder> re =
+                [cb renderCommandEncoderWithDescriptor:rpd];
+            [re setViewport:(MTLViewport){
+                (double)L.vp_x, (double)L.vp_y,
+                (double)L.vp_w, (double)L.vp_h, 0.0, 1.0}];
+            present.encode(re, pond, text.texture(),
+                           text.uniforms(tp, float(W) / float(H), tr, 1.0));
+            [re endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            snprintf(path, sizeof(path), "%s_mirror.ppm", prefix);
+            writePPM(path, out, dw, dh);
+            printf("orientshot: wrote %s\n", path);
+        }
+    }
+
+    // --- the root scene -----------------------------------------------------
+    {
+        RootScene roots(ctx, W, H);
+        if (!roots.valid()) {
+            fprintf(stderr, "orientshot: root scene invalid\n"); return 1;
+        }
+        roots.autoOrbit = false;
+        // The same camera --rootshot uses, and enough steps for the growth to
+        // be worth looking at: one frame in, the system is a single capsule and
+        // says nothing about how the scene frames up in a tall window.
+        roots.azimuth = 0.6f; roots.elevation = 0.35f; roots.radius = 42.f;
+        id<MTLTexture> tex = nil;
+        for (int i = 0; i < 300; ++i) {
+            @autoreleasepool {
+                id<MTLCommandBuffer> cb = [ctx.queue() commandBuffer];
+                roots.advance(1.0 / 60.0);
+                tex = roots.render(cb);
+                [cb commit];
+                [cb waitUntilCompleted];
+            }
+        }
+        snprintf(path, sizeof(path), "%s_roots.ppm", prefix);
+        writePPM(path, tex, W, H);
+        printf("orientshot: wrote %s\n", path);
+    }
+    return 0;
+}
+
+// --textshot <out.ppm> [text] [warp] [reveal] [softness]
 //
 // The text overlay over a live pond, through the real present pass. Headless
 // because the two things most likely to be wrong about this effect -- whether
@@ -1450,6 +1660,13 @@ int main(int argc, char** argv) {
             const char* photo = (i + 3 < argc) ? argv[i + 3] : "";
             float fps = (i + 4 < argc) ? (float)atof(argv[i + 4]) : 30.f;
             return transhot(prefix, n, photo, fps);
+        }
+        if (a == "--orientshot") {
+            const char* pre = (i + 1 < argc) ? argv[i + 1] : "orient";
+            int ow = (i + 2 < argc) ? atoi(argv[i + 2]) : 1080;
+            int oh = (i + 3 < argc) ? atoi(argv[i + 3]) : 1920;
+            int oo = (i + 4 < argc) ? atoi(argv[i + 4]) : 0;   // 0 auto 1 land 2 port
+            return orientshot(pre, ow, oh, oo);
         }
         if (a == "--textshot") {
             const char* out = (i + 1 < argc) ? argv[i + 1] : "text.ppm";
@@ -1878,6 +2095,14 @@ int main(int argc, char** argv) {
     enum class Scene { Mirror = 0, Roots = 1, Transition = 2, FitView = 3,
                        CamMask = 4 };
     int scene = (int)Scene::Mirror;
+
+    // The running order off disk, falling back to the built-in one. A missing
+    // or broken file is reported rather than fatal: the app is still usable
+    // scene by scene without a show, and the panel says why the file did not
+    // take.
+    if (!ShowLoad(g_show_name))
+        printf("show: %s -- using the built-in running order\n", g_show_err.c_str());
+
     int downscale = 4;       // mirror render-resolution divisor (low-res + upsample)
     int rootDownscale = 1;   // roots render-resolution divisor (manual, when auto off)
     bool rootAutoScale = true;   // cap the roots' internal resolution (see below)
@@ -1894,6 +2119,22 @@ int main(int argc, char** argv) {
         int fbw, fbh;
         glfwGetFramebufferSize(win, &fbw, &fbh);
         layer.drawableSize = CGSizeMake(std::max(1, fbw), std::max(1, fbh));
+
+        // The frame the work is composed for, which is the drawable in Auto and
+        // a centred tall box when Portrait is forced on this landscape monitor.
+        // Every size below comes from this rather than from the window, so
+        // previewing the installation's framing is a setting and not a
+        // rebuild -- and on the installation's own portrait display the two are
+        // the same thing and nothing is letterboxed.
+        const mirror::ScreenLayout layout = mirror::ComputeLayout(
+            fbw, fbh, (mirror::Orientation)g_orientation, g_portrait_aspect);
+        const int compW = layout.comp_w, compH = layout.comp_h;
+
+        // The sensor's crop follows the composition, so it is pushed before
+        // anything polls a frame.
+#if MIRROR_HAVE_KINECT
+        g_kinect.setCrop(g_feed);
+#endif
 
         @autoreleasepool {
             id<CAMetalDrawable> drawable = [layer nextDrawable];
@@ -1925,8 +2166,8 @@ int main(int argc, char** argv) {
                 // this frame's ensureSize() has not set yet -- the two agree by
                 // construction, and reading it after the fact would be a frame
                 // behind on a resize.
-                const int lw = std::max(1, fbw / std::max(1, downscale));
-                const int lh = std::max(1, fbh / std::max(1, downscale));
+                const int lw = std::max(1, compW / std::max(1, downscale));
+                const int lh = std::max(1, compH / std::max(1, downscale));
                 // Which tuning applies is decided by the *previous* frame's
                 // crop state: the grid has to be chosen before the frame is
                 // pulled, and whether there is a crop is not known until the
@@ -2021,6 +2262,64 @@ int main(int argc, char** argv) {
             ApplyHeadMode(mirror.params(), fit_w, fit_h);
             if (live_fresh) PlaceLiveFrame(live_rgb, fit_w, fit_h);
 
+            // --- the show -------------------------------------------------
+            //
+            // Stepped here: after the tracker and the fit have produced this
+            // frame's answers, before anything reads `scene`. A timeline
+            // advanced after the scene was chosen would render one frame of the
+            // phase it just left, which on the transition is a visible stutter
+            // at exactly the moment the piece is meant to be seamless.
+            if (g_show_on) {
+                show::Signals sig;
+                sig.face_present = ShowFacePresent();
+                sig.fit_converged = ShowFitConverged();
+                g_show.setSignals(sig);
+                // The transition owns its own duration, so it reports its end
+                // rather than being timed from outside.
+                if (scene == (int)Scene::Transition && trans.valid() && trans.done())
+                    g_show.sceneDone();
+
+                const unsigned before = g_show.entries();
+                g_show.advance(dt);
+
+                if (g_show.entries() != before) {
+                    const show::Phase p = g_show.phase();
+                    scene = g_show_scene[(int)p];
+                    if (g_show_log)
+                        printf("show: %s (%s)\n", show::PhaseName(p),
+                               g_show.lastReason().c_str());
+
+                    switch (p) {
+                        case show::Phase::Idle:
+                            // Forget the last person. Without this the next one
+                            // walks into a converged fit of somebody else's
+                            // face and the fitting phase ends instantly.
+                            g_collect_id = false;
+                            g_id_residual = -1.f;
+                            if (g_fitter.valid()) g_fitter.clearIdentity();
+                            break;
+                        case show::Phase::Fitting:
+                            // Start collecting the moment the phase opens, so
+                            // the `min` and the collection window overlap
+                            // rather than running back to back.
+                            if (g_fitter.valid()) {
+                                g_fitter.clearIdentity();
+                                g_id_residual = -1.f;
+                                g_collect_id = true;
+                                g_id_started = nowT;
+                            }
+                            break;
+                        case show::Phase::Transition:
+                            // From the top, with whatever face the fitting
+                            // phase ended up with.
+                            if (trans.valid()) trans.restart();
+                            break;
+                        default:
+                            break;
+                    }
+                }
+            }
+
             // --- source overlay: upload the raw frame ---------------------
             //
             // Deliberately the *same* call the tracker makes (SourceRGB8), not a
@@ -2036,17 +2335,25 @@ int main(int argc, char** argv) {
             int pipW = 0, pipH = 0;
             const bool wantSource = g_show_source || scene == (int)Scene::CamMask;
             if (wantSource && SourceReady()) {
-                // Preview at the source's own aspect. 320 wide is enough to see
-                // a face in the corner and cheap to box-filter down to; the mask
-                // editor draws it full-frame, so it gets a real resolution --
-                // edges are what is being placed there.
+                // Preview at the *composition's* aspect, not the source's.
+                // Once the frame is a different shape from the sensor, the crop
+                // is what the fit and the tracker are handed, and a preview of
+                // the whole 16:9 sensor would be showing something no part of
+                // the app ever sees -- which is exactly the wrong thing to be
+                // looking at when the complaint is "the fit is not following
+                // me". The mask editor draws this full-frame, so it also has to
+                // be the shape the mask will be applied in.
+                //
+                // 320 on the long edge is enough to see a face in the corner and
+                // cheap to box-filter down to; the editor gets a real resolution
+                // because edges are what is being placed there.
                 const int base = scene == (int)Scene::CamMask ? 960 : 320;
-                if (g_source == (int)Source::Photo && g_photo_w > 0 && g_photo_h > 0) {
+                if (compW >= compH) {
                     pipW = base;
-                    pipH = std::max(1, base * g_photo_h / g_photo_w);
+                    pipH = std::max(1, int(int64_t(base) * compH / compW));
                 } else {
-                    pipW = base;                 // the colour camera is 1920x1080
-                    pipH = std::max(1, base * 9 / 16);
+                    pipH = base;
+                    pipW = std::max(1, int(int64_t(base) * compW / compH));
                 }
 #if MIRROR_HAVE_KINECT
                 // Advance the retained snapshot when nothing else did. Without
@@ -2094,7 +2401,7 @@ int main(int argc, char** argv) {
             // scenes need exactly this and a copy in each would be two places
             // for the training schedule to drift apart.
             auto renderMirror = [&]() -> id<MTLTexture> {
-                mirror.ensureSize(fbw / std::max(1, downscale), fbh / std::max(1, downscale));
+                mirror.ensureSize(compW / std::max(1, downscale), compH / std::max(1, downscale));
                 mirror.advance(dt);
                 // Training runs here, not inside render(): one place, once per
                 // frame, so the cost is attributable and the displayed frame is
@@ -2172,7 +2479,7 @@ int main(int argc, char** argv) {
                 } else {
                     fitview.clearMesh();
                 }
-                fitview.ensureSize(fbw, fbh);
+                fitview.ensureSize(compW, compH);
                 sceneTex = fitview.render(cb);
             } else if (scene == (int)Scene::CamMask && fitview.valid()) {
                 // The raw camera frame, full-frame, with the mask already
@@ -2182,7 +2489,7 @@ int main(int argc, char** argv) {
                 fitview.setBackground(srcTex);
                 fitview.clearMask();
                 fitview.clearMesh();
-                fitview.ensureSize(fbw, fbh);
+                fitview.ensureSize(compW, compH);
                 sceneTex = fitview.render(cb);
             } else if (scene == (int)Scene::Transition && trans.valid()) {
                 // The transition is driven by the mirror, so the mirror keeps
@@ -2190,12 +2497,12 @@ int main(int argc, char** argv) {
                 // training is left alone: the effect is a handoff, and a fit
                 // that kept moving during it would change the sheet's skin
                 // mid-fall.
-                mirror.ensureSize(fbw / std::max(1, downscale), fbh / std::max(1, downscale));
+                mirror.ensureSize(compW / std::max(1, downscale), compH / std::max(1, downscale));
                 mirror.advance(dt);
                 trans.setPondTexture(mirror.render());
                 if (g_track_on && g_fitter.valid() && g_face.valid && !trans.hasFace())
                     trans.setFaceMesh(g_fitter.vertices(), g_fitter.basis().triangles());
-                trans.ensureSize(fbw, fbh);
+                trans.ensureSize(compW, compH);
                 trans.advance(dt);
                 sceneTex = trans.render(cb);
             } else if (scene == (int)Scene::Roots && roots.valid()) {
@@ -2208,7 +2515,7 @@ int main(int argc, char** argv) {
                 // window stays fast instead of collapsing on a dense/zoomed nest.
                 int effDs = std::max(1, rootDownscale);
                 if (rootAutoScale) {
-                    int maxdim = std::max(fbw, fbh);
+                    int maxdim = std::max(compW, compH);
                     effDs = std::max(1, (maxdim + rootTargetDim - 1) / rootTargetDim);
                 }
                 // A fitted face on the root scene's masks, re-uploaded only
@@ -2235,7 +2542,7 @@ int main(int argc, char** argv) {
                     roots.setFaceColors(g_face_colors);
                     g_face_colors_fresh = false;
                 }
-                roots.ensureSize(fbw / effDs, fbh / effDs);
+                roots.ensureSize(compW / effDs, compH / effDs);
                 roots.advance(dt);
                 sceneTex = roots.render(cb);   // encodes geometry + fog passes into cb
             }
@@ -2243,7 +2550,9 @@ int main(int argc, char** argv) {
             MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
             rpd.colorAttachments[0].texture = drawable.texture;
             rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
-            rpd.colorAttachments[0].clearColor = MTLClearColorMake(0.05, 0.05, 0.06, 1.0);
+            rpd.colorAttachments[0].clearColor =
+                layout.letterboxed ? MTLClearColorMake(0, 0, 0, 1)
+                                   : MTLClearColorMake(0.05, 0.05, 0.06, 1.0);
             rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
 
             // MIDI, then the panel. Draining first means a knob moved this
@@ -2252,7 +2561,26 @@ int main(int argc, char** argv) {
             if (g_midi.isOpen()) {
                 static std::vector<midi::CC> ccs;
                 g_midi.drain(ccs);
-                for (const midi::CC& c : ccs) ui::ApplyCC(c.channel, c.cc, c.value);
+                for (const midi::CC& c : ccs) {
+                    // Two CCs are the show's, not parameters: they are edges
+                    // rather than values, which is what a cue is. Routed before
+                    // ui::ApplyCC so a binding accidentally learned onto one of
+                    // them cannot swallow the operator's override.
+                    if (g_show_on && c.cc == g_show_cue_cc) {
+                        if (c.value >= 64) g_show.go();
+                        continue;
+                    }
+                    if (g_show_on && c.cc == g_show_phase_cc) {
+                        // The full 0-127 range across the four phases, so a
+                        // fader selects them as quarters and a pad sending 0 /
+                        // 42 / 85 / 127 lands on one each.
+                        const int p = std::min((int)show::Phase::Count - 1,
+                                               c.value * (int)show::Phase::Count / 128);
+                        g_show.goTo((show::Phase)p);
+                        continue;
+                    }
+                    ui::ApplyCC(c.channel, c.cc, c.value);
+                }
                 // Devices plugged in mid-session are the normal case.
                 static double last_scan = 0.0;
                 if (nowT - last_scan > 2.0) { g_midi.rescan(); last_scan = nowT; }
@@ -2262,6 +2590,19 @@ int main(int argc, char** argv) {
             ImGui_ImplMetal_NewFrame(rpd);
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
+
+            // Keyboard cues, for rehearsal without a controller: 1-4 force a
+            // phase, space fires the "go" cue. Guarded on WantCaptureKeyboard,
+            // or typing a caption into the text field would jump the show
+            // around. Read after NewFrame so the key state is this frame's.
+            if (g_show_on && !ImGui::GetIO().WantCaptureKeyboard) {
+                for (int p = 0; p < (int)show::Phase::Count; ++p) {
+                    if (ImGui::IsKeyPressed((ImGuiKey)(ImGuiKey_1 + p), false))
+                        g_show.goTo((show::Phase)p);
+                }
+                if (ImGui::IsKeyPressed(ImGuiKey_Space, false))
+                    g_show.go();
+            }
 
             ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_FirstUseEver);
@@ -2276,6 +2617,183 @@ int main(int argc, char** argv) {
             ImGui::SameLine();
             ImGui::RadioButton("cam mask", &scene, (int)Scene::CamMask);
             ImGui::Separator();
+
+            // --- show -----------------------------------------------------
+            // Above everything else, because when it is on it is what is
+            // choosing the scene: a panel that showed the radio buttons as the
+            // authority while a timeline was reassigning them would be lying.
+            ui::PushSection("show");
+            {
+                if (ui::Checkbox("run the show", &g_show_on) && g_show_on)
+                    g_show.restart();
+                ImGui::SameLine();
+                ImGui::BeginDisabled(!g_show_on);
+                if (ImGui::Button("restart")) g_show.restart();
+                ImGui::EndDisabled();
+
+                if (g_show_on) {
+                    const show::Phase p = g_show.phase();
+                    const show::PhaseScript& ps = g_show.script()[p];
+                    ImGui::Text("%s  %.1fs", show::PhaseName(p), g_show.phaseTime());
+                    if (ps.max_time > 0.f) {
+                        ImGui::SameLine();
+                        ImGui::ProgressBar(g_show.phaseProgress(), ImVec2(90, 0));
+                    }
+                    ImGui::TextDisabled("%s", g_show.lastReason().c_str());
+
+                    // The two signals, live. Nearly every "why did it not
+                    // advance" question is answered by looking at these while
+                    // standing in front of the camera.
+                    const bool face = ShowFacePresent();
+                    const bool fit = ShowFitConverged();
+                    ImGui::TextColored(face ? ImVec4(0.4f, 0.9f, 0.4f, 1)
+                                            : ImVec4(0.5f, 0.5f, 0.5f, 1),
+                                       "face");
+                    ImGui::SameLine();
+                    ImGui::TextColored(fit ? ImVec4(0.4f, 0.9f, 0.4f, 1)
+                                           : ImVec4(0.5f, 0.5f, 0.5f, 1),
+                                       "fit");
+                    ImGui::SameLine();
+                    if (g_id_residual >= 0.f)
+                        ImGui::TextDisabled("(%.1f px)", g_id_residual);
+                    else
+                        ImGui::TextDisabled(g_collect_id ? "(collecting)" : "(none)");
+
+                    if (!g_track_on) {
+                        ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1),
+                                           "face tracking is off: the show");
+                        ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1),
+                                           "can only advance on time");
+                    }
+
+                    const show::ActiveText& at = g_show.text();
+                    if (at.on)
+                        ImGui::TextDisabled("text: \"%s\" %.0f%%",
+                                            at.text.c_str(), at.reveal * 100.f);
+
+                    ImGui::SeparatorText("force");
+                    for (int i = 0; i < (int)show::Phase::Count; ++i) {
+                        if (i) ImGui::SameLine();
+                        if (ImGui::SmallButton(show::PhaseName((show::Phase)i)))
+                            g_show.goTo((show::Phase)i);
+                    }
+                    if (ImGui::SmallButton("go")) g_show.go();
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(keys 1-4, space)");
+                }
+
+                if (ImGui::CollapsingHeader("script")) {
+                    static std::vector<std::string> shows = show::ListShows();
+                    if (ImGui::BeginCombo("file", g_show_name.c_str())) {
+                        for (const std::string& n : shows) {
+                            if (ImGui::Selectable(n.c_str(), n == g_show_name))
+                                ShowLoad(n);
+                        }
+                        ImGui::EndCombo();
+                    }
+                    // Reload is the install-day control: edit the file in an
+                    // editor, save, click. The phase that is running stays,
+                    // with its clock restarted, so retiming does not cut back
+                    // to the top of the piece.
+                    if (ImGui::Button("reload")) ShowLoad(g_show_name);
+                    ImGui::SameLine();
+                    if (ImGui::Button("rescan")) shows = show::ListShows();
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", show::ShowDir().c_str());
+                    if (!g_show_err.empty())
+                        ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "%s",
+                                           g_show_err.c_str());
+
+                    ImGui::SeparatorText("phase -> scene");
+                    const char* kScenes[] = {"mirror", "roots", "transition",
+                                             "fit view", "cam mask"};
+                    for (int i = 0; i < (int)show::Phase::Count; ++i) {
+                        ImGui::SetNextItemWidth(120);
+                        ImGui::Combo(show::PhaseName((show::Phase)i),
+                                     &g_show_scene[i], kScenes, IM_ARRAYSIZE(kScenes));
+                        ui::DeclareInt(show::PhaseName((show::Phase)i),
+                                       &g_show_scene[i], 0, IM_ARRAYSIZE(kScenes) - 1);
+                    }
+
+                    ImGui::SeparatorText("signals");
+                    ui::SliderFloat("fit converged under (px)", &g_show_fit_px,
+                                    1.f, 20.f, "%.1f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "Mean landmark error of the identity fit. Above\n"
+                            "~8 px the mask is visibly a different face, so a\n"
+                            "fit that never gets under this should time out\n"
+                            "rather than be handed to the transition.");
+                    }
+                    ui::SliderInt("cue CC", &g_show_cue_cc, 0, 127);
+                    ui::SliderInt("phase CC", &g_show_phase_cc, 0, 127);
+                    ui::Checkbox("log phase changes", &g_show_log);
+                }
+            }
+            ui::PopSection();               // "show"
+            ImGui::Separator();
+
+            // --- screen ---------------------------------------------------
+            // Always visible: the composition's shape is upstream of every
+            // scene, the text's placement and the camera's crop.
+            ui::PushSection("screen");
+            if (ImGui::CollapsingHeader("screen orientation")) {
+                ImGui::TextUnformatted("compose for:"); ImGui::SameLine();
+                ImGui::RadioButton("auto", &g_orientation,
+                                   (int)mirror::Orientation::Auto);
+                ImGui::SameLine();
+                ImGui::RadioButton("landscape", &g_orientation,
+                                   (int)mirror::Orientation::Landscape);
+                ImGui::SameLine();
+                ImGui::RadioButton("portrait", &g_orientation,
+                                   (int)mirror::Orientation::Portrait);
+                // Declared rather than drawn by ui:: -- a radio group is three
+                // widgets over one value, and the registry stores the value.
+                ui::DeclareInt("orientation", &g_orientation, 0, 2);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "The installation's screen is portrait, so macOS is set\n"
+                        "to portrait there and the drawable is already tall --\n"
+                        "'auto' composes for it and nothing is letterboxed.\n\n"
+                        "'portrait' on this landscape monitor is the preview:\n"
+                        "the same aspect, the same camera crop, the same place\n"
+                        "the text lands, in a tall box in the middle.");
+                }
+
+                ui::SliderFloat("panel aspect (w/h)", &g_portrait_aspect,
+                                0.3f, 1.0f, "%.4f");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "The installation panel's width/height stood on its\n"
+                        "end. 0.5625 is a 1920x1080 panel turned 90 degrees.\n\n"
+                        "Stated rather than taken from this monitor: the\n"
+                        "preview is only worth anything if it matches the\n"
+                        "screen the piece will run on.");
+                }
+
+                ImGui::TextDisabled("compose %d x %d  ->  window %d x %d%s",
+                                    compW, compH, fbw, fbh,
+                                    layout.letterboxed ? "  (letterboxed)" : "");
+
+                ImGui::Separator();
+                ImGui::TextUnformatted("camera framing");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "The sensor is 16:9 and does not turn around when the\n"
+                        "screen does, so a portrait frame keeps a tall rect out\n"
+                        "of it and throws the sides away -- about a third of\n"
+                        "the width survives. This is where that rect sits.\n\n"
+                        "The tracker and the fit are given the same crop, so\n"
+                        "moving this cannot put the mask off the face.");
+                }
+                ui::SliderFloat("feed x", &g_feed.cx, 0.f, 1.f);
+                ui::SliderFloat("feed y", &g_feed.cy, 0.f, 1.f);
+                ui::SliderFloat("feed zoom", &g_feed.zoom, 1.f, 4.f);
+                if (ImGui::Button("centre feed")) {
+                    g_feed = mirror::FeedCrop{};
+                }
+            }
+            ui::PopSection();               // "screen"
 
             // --- camera mask ---------------------------------------------
             ui::PushSection("camera mask");
@@ -3761,14 +4279,41 @@ int main(int argc, char** argv) {
                 for (int i = 0; i < tr.n; ++i)
                     for (int j = 0; j < 4; ++j) tr.src[i][j] = srcs[i][j];
             }
-            text.update(textp);
+            // The show owns *what* the text says and *when*, and nothing else:
+            // placement, size, font and the turbulence all stay whatever the
+            // panel and the preset set them to. So the script is a running
+            // order rather than a second, worse text editor, and a caption
+            // scheduled at 3s looks exactly like the one that was dialled in by
+            // hand -- the same font, in the same place, with the same warp.
+            mirror::TextParams eff = textp;
+            if (g_show_on) {
+                const show::ActiveText& at = g_show.text();
+                eff.on = at.on;
+                eff.text = at.text;
+                eff.reveal = at.reveal;
+            }
+            text.update(eff);
             const float texAsp =
                 sceneTex ? float(sceneTex.width) / float(sceneTex.height) : 1.f;
             const mirror::TextUniforms tu =
-                text.uniforms(textp, texAsp, tr, glfwGetTime());
+                text.uniforms(eff, texAsp, tr, glfwGetTime());
 
             id<MTLRenderCommandEncoder> re = [cb renderCommandEncoderWithDescriptor:rpd];
-            if (sceneTex) present.encode(re, sceneTex, text.texture(), tu);
+            if (sceneTex) {
+                // The composition lands in its own viewport rather than across
+                // the drawable. The fullscreen triangle is in clip space, so
+                // restricting the viewport is the whole of the letterbox --
+                // no transform in present.metal, and the text overlay inside it
+                // stays in composition coords and rotates nothing.
+                [re setViewport:(MTLViewport){
+                    (double)layout.vp_x, (double)layout.vp_y,
+                    (double)layout.vp_w, (double)layout.vp_h, 0.0, 1.0}];
+                present.encode(re, sceneTex, text.texture(), tu);
+                // ImGui draws to the whole window: the panel belongs to the
+                // machine this is being operated from, not to the frame.
+                [re setViewport:(MTLViewport){0.0, 0.0, (double)std::max(1, fbw),
+                                              (double)std::max(1, fbh), 0.0, 1.0}];
+            }
             ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cb, re);
             [re endEncoding];
 

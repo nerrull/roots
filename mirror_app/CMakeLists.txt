@@ -92,12 +92,18 @@ add_library(mirror_core STATIC
     src/face_basis.cpp
     src/face_fit.cpp
     src/mirror_render.cpp
+    src/screen_layout.cpp
+    src/show_timeline.cpp
     src/pond_state.cpp)
 target_include_directories(mirror_core PUBLIC src ${MLX_INCLUDE_DIRS})
 # external/ is gitignored: face_basis.bin and the MediaPipe dylib are both
 # generated, not committed. PUBLIC so the tests find the basis too.
 target_compile_definitions(mirror_core PUBLIC
-    MIRROR_APP_EXTERNAL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/external")
+    MIRROR_APP_EXTERNAL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/external"
+    # show_timeline resolves shows/ against this, the same way RootScene
+    # resolves presets/ -- scripts are edited in the source tree during an
+    # install, not copied into a build directory.
+    MIRROR_APP_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(mirror_core PUBLIC mlx)
 
 # --- MediaPipe face tracking -------------------------------------------------
@@ -224,6 +230,18 @@ target_link_libraries(face_mask_test PRIVATE mirror_core)
 # identity. Needs external/face_basis.bin; skips cleanly without it.
 add_executable(face_fit_test tests/face_fit_test.cpp)
 target_link_libraries(face_fit_test PRIVATE mirror_core)
+
+# Composition size / letterbox arithmetic, and the camera crop that follows it.
+# Pure arithmetic, no Metal: exactly the part that is wrong by a few pixels in a
+# way a screenshot does not show.
+add_executable(screen_layout_test tests/screen_layout_test.cpp)
+target_link_libraries(screen_layout_test PRIVATE mirror_core)
+
+# The show's running order: floors, ceilings, debounced events, text cues. Pure
+# state machine, driven at a fixed step -- the alternative is discovering a bad
+# debounce with somebody standing in front of the piece.
+add_executable(show_timeline_test tests/show_timeline_test.cpp)
+target_link_libraries(show_timeline_test PRIVATE mirror_core)
 
 # The text overlay's distance transform, against an analytically known shape.
 # Pure geometry: no Metal, no fonts, no MLX.

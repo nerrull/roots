@@ -54,6 +54,16 @@ public:
     void setMirrored(bool m);
     bool mirrored() const;
 
+    // How the 16:9 sensor is cropped into the frame's aspect (see FeedCrop).
+    // Set from the app, because which rect to keep is a framing decision about
+    // the installation and not a property of the sensor. Applied identically to
+    // poll() and lastFrameRGB8(), so the tracker and the fit keep seeing the
+    // same image -- landmarks are normalised to whatever was handed over, and a
+    // crop applied to only one of the two would put the mask somewhere the face
+    // is not.
+    void setCrop(const FeedCrop& c);
+    FeedCrop crop() const;
+
     // Cap how often frames are pulled. The sensor free-runs at 30 Hz; pulling
     // less often costs freshness, not stability.
     void setRateHz(float hz);
