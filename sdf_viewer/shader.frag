@@ -125,6 +125,74 @@ vec3 capsuleNormal(vec3 p, vec3 a, vec3 b) {
 }
 
 // ---------------------------------------------------------------------------
+// Pinnately lobed leaf outline (chrysanthemum).
+//
+// A width-versus-position profile -- hw(s), which is what the blade outline uses
+// for petals -- can only ever carve bumps that stick out PERPENDICULAR to the
+// midrib, symmetric about each station along it. A chrysanthemum leaf is nothing
+// like that: its lobes angle FORWARD toward the tip, the sinuses between them
+// are deep and narrow, and every lobe carries its own teeth. So the leaf gets a
+// real 2D silhouette instead: a union of oriented, tapering, toothed lobes in
+// the blade's own (along, across) plane, with the across coordinate folded to
+// |v| so one set of lobes serves both margins.
+// ---------------------------------------------------------------------------
+
+// One lobe: a 2D capsule a->b whose radius lerps r0->r1, nibbled by `teeth`
+// marginal serrations at `tf` cycles along its length.
+float sdLobe2(vec2 p, vec2 a, vec2 b, float r0, float r1, float teeth, float tf) {
+    vec2  pa = p - a, ba = b - a;
+    float h  = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-8), 0.0, 1.0);
+    float r  = mix(r0, r1, h) * (1.0 - teeth * (0.5 + 0.5 * cos(6.2831853 * h * tf)));
+    return length(pa - ba * h) - r;
+}
+
+// Distance from a point to the leaf's venation: the midrib, plus one vein
+// running out into each lateral lobe. Used to raise a slight rib along them.
+float sdSeg2(vec2 p, vec2 a, vec2 b) {
+    vec2  pa = p - a, ba = b - a;
+    float h  = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-8), 0.0, 1.0);
+    return length(pa - ba * h);
+}
+
+float leafVeinDist(vec2 p, float L, float W) {
+    float d = sdSeg2(p, vec2(0.02 * L, 0.0), vec2(0.97 * L, 0.0));   // midrib
+    for (int i = 0; i < 3; ++i) {
+        float f   = float(i);
+        vec2  a   = vec2((0.15 + 0.225 * f) * L, 0.0);
+        float len = W * (0.46 + 0.30 * sin(3.14159265 * (f + 0.85) / 3.0));
+        float ang = radians(58.0 - 7.0 * f);
+        d = min(d, sdSeg2(p, a, a + vec2(cos(ang), sin(ang)) * len * 0.88));
+    }
+    return d;
+}
+
+// L = blade length, W = half width. Returns <0 inside the leaf.
+float sdLeafOutline(vec2 p, float L, float W) {
+    // Central body: a wedge widening from the cuneate base toward the tip. It has
+    // to stay substantial -- the sinuses cut roughly half way in on a real leaf,
+    // and a thin body turns the lobes into the arms of a starfish.
+    float d = sdLobe2(p, vec2(0.02 * L, 0.0), vec2(0.46 * L, 0.0),
+                      W * 0.09, W * 0.34, 0.0, 1.0);
+    d = min(d, sdLobe2(p, vec2(0.46 * L, 0.0), vec2(0.78 * L, 0.0),
+                       W * 0.34, W * 0.30, 0.0, 1.0));
+    // Terminal lobe, tapering to a blunt point.
+    d = min(d, sdLobe2(p, vec2(0.60 * L, 0.0), vec2(0.99 * L, 0.0),
+                       W * 0.30, W * 0.07, 0.16, 3.0));
+    // Three pairs of lateral lobes, each swept forward and separated from its
+    // neighbours by a deep narrow sinus. Broad and blunt with their own marginal
+    // teeth, smallest at the base -- not tapering spikes.
+    for (int i = 0; i < 3; ++i) {
+        float f    = float(i);
+        vec2  a    = vec2((0.15 + 0.225 * f) * L, 0.0);
+        float len  = W * (0.46 + 0.30 * sin(3.14159265 * (f + 0.85) / 3.0));
+        float ang  = radians(58.0 - 7.0 * f);          // forward sweep
+        vec2  b    = a + vec2(cos(ang), sin(ang)) * len;
+        d = min(d, sdLobe2(p, a, b, W * 0.30, W * 0.13, 0.22, 2.5));
+    }
+    return d;
+}
+
+// ---------------------------------------------------------------------------
 // Blade primitive: a leaf/petal surface. A thin slab in the (axis, width)
 // plane, clipped to a tapering lanceolate outline, its mid-surface cupped
 // across the width and curled/drooped along its length -- so it reads as an
@@ -142,16 +210,26 @@ float sdBlade(vec3 pt, vec3 a, vec3 ax, float L, vec3 wdir, vec3 nrm,
     float w = dot(d, nrm);           // off the surface
     float sLocal = clamp(u / L, 0.0, 1.0);
     float s = mix(s0, s1, sLocal);   // fraction of the WHOLE petal (strip-aware)
-    float prof = pow(sin(3.14159265 * s), oExp) * (1.0 - tipTaper * s);
     if (lobe > 0.0) {
-        // Carve pinnate lobes + finer marginal teeth into the half-width along
-        // the midrib, so one blade reads as a deeply-lobed, serrated leaf. The
-        // modulation only ever REDUCES width (never exceeds hw0), so the quad
-        // bound still covers the surface.
-        float lobes = 0.5 + 0.5 * cos(6.2831853 * (s * 3.5 - 0.15));  // ~3-4 lobe pairs
-        float teeth = 0.5 + 0.5 * cos(6.2831853 * s * 11.0);          // fine serration
-        prof *= 1.0 - lobe * (0.5 * lobes + 0.12 * teeth);
+        // Leaf: the outline comes from the pinnate silhouette above, so the
+        // half-width profile below does not apply. The cup is a shallow parabolic
+        // channel rather than the rolled arc petals use -- a leaf never cups past
+        // vertical, and a height field leaves the silhouette exact.
+        float bend = curl * 0.6 * L * s * s;
+        float cupD = latCup * 0.45 * (v * v) / max(hw0, 1e-4) * (1.0 - 0.5 * s);
+        float wS2  = w - bend - cupD;
+        float thk2 = th * (1.0 - 0.35 * s);
+        // Venation: thicken the slab slightly along the midrib and lobe veins, so
+        // they stand as ribs. Cheap, and it is what stops a leaf reading as a
+        // paper cut-out.
+        vec2  p2   = vec2(u, abs(v));
+        float dv   = leafVeinDist(p2, L, hw0) / max(0.055 * hw0, 1e-4);
+        thk2 *= 1.0 + 0.55 * exp(-dv * dv);
+        float dSil = sdLeafOutline(p2, L, hw0);
+        vec2  q2   = vec2(dSil, abs(wS2) - thk2);
+        return min(max(q2.x, q2.y), 0.0) + length(max(q2, 0.0)) - 0.01;
     }
+    float prof = pow(sin(3.14159265 * s), oExp) * (1.0 - tipTaper * s);
     float hw   = hw0 * max(prof, 0.015);
     float bend = curl * 0.6 * L * s * s;          // lengthwise curl/droop toward the tip
     float wS   = w - bend;

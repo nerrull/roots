@@ -18,6 +18,7 @@
 #include "backends/imgui_impl_glfw.h"
 #include "backends/imgui_impl_metal.h"
 
+#include "audio_pulse.h"
 #include "metal_context.h"
 #include "mirror_scene.h"
 #include "fit_target.h"
@@ -44,6 +45,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 // Headless check of the MLX→Metal texture path (no window): render a few mirror
@@ -186,9 +188,11 @@ static int rootshot(const char* path, float az, float el, float rad, int mode, b
 }
 
 // Headless live-growth check: steps the CPlantBox sim `steps` frames, then
-// renders to a PPM. Usage: --growshot <out.ppm> [steps] [az] [el] [radius]
+// renders to a PPM. Usage:
+//   --growshot <out.ppm> [steps] [az] [el] [radius] [faceScale] [targetY] [faceRecess]
 static int growshot(const char* path, int steps, float az, float el, float rad,
-                    float faceScale = -1.f, float targetY = -1e9f) {
+                    float faceScale = -1.f, float targetY = -1e9f,
+                    float faceRecess = 1e9f) {
     MetalContext ctx;
     if (!ctx.device()) { fprintf(stderr, "growshot: no Metal device\n"); return 1; }
     const int W = 960, H = 540;
@@ -201,6 +205,9 @@ static int growshot(const char* path, int steps, float az, float el, float rad,
     // masks are a couple of centimetres on a fifty-centimetre cone, and their
     // orientation is not decidable at the scale the whole system is shot at.
     if (faceScale > 0) roots.faceScale = faceScale;
+    // Recess is signed and 0 is a meaningful value, so the "unset" sentinel has
+    // to sit outside the slider's range rather than at zero.
+    if (faceRecess < 1e8f) roots.faceRecess = faceRecess;
     if (targetY > -1e8f) roots.target[1] = targetY;
     roots.azimuth = az; roots.elevation = el;
     id<MTLTexture> tex = nil;
@@ -684,6 +691,14 @@ mirror::KinectFitTarget g_kinect;
 // MIDI stays open across the session; the registry holds the bindings.
 midi::Input g_midi;
 std::string g_midi_err;
+
+// Onsets from the Wwise OnsetTap plug-in, and what they are allowed to do.
+// Kept alive across scene changes: reconnecting on every switch would lose the
+// stream's read position and replay nothing, but it would also make a live show
+// depend on which scene happens to be up.
+mirror::AudioPulses g_pulses;
+bool  g_pulse_drops  = true;    // onsets spawn raindrops
+float g_pulse_gain   = 1.0f;    // scales an onset's strength before it is used
 
 mirror::FaceTracker g_tracker;
 mirror::FaceResult  g_face;
@@ -1819,7 +1834,7 @@ static int orientshot(const char* prefix, int dw, int dh, int orient) {
     {
         MirrorScene m(ctx, 11, W / 2, H / 2);
         if (!m.valid()) { fprintf(stderr, "orientshot: mirror invalid\n"); return 1; }
-        m.params().drops = 5;
+        m.params().drops_on = true;
         m.params().orbit_on = true;
 
         FullscreenPresent present(ctx,
@@ -1856,7 +1871,7 @@ static int orientshot(const char* prefix, int dw, int dh, int orient) {
             const auto& srcs = m.pond().lastSources();
             tr.n = int(std::min(srcs.size(), size_t(16)));
             for (int i = 0; i < tr.n; ++i)
-                for (int j = 0; j < 4; ++j) tr.src[i][j] = srcs[i][j];
+                for (int j = 0; j < mirror::RIPPLE_SRC_DIM; ++j) tr.src[i][j] = srcs[i][j];
 
             MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
             rpd.colorAttachments[0].texture = out;
@@ -1920,6 +1935,64 @@ static int orientshot(const char* prefix, int dw, int dh, int orient) {
 // Ripples are turned on here even though they default off: the warp is the half
 // of the effect that has anything to go wrong in it, and with no sources the
 // shader's refraction branch never runs.
+// --taptest: is the Wwise onset tap actually reaching this app?
+//
+// The failure this exists for is silent and has four or five possible causes at
+// once -- no plug-in instance, the wrong Tap ID, a bus with nothing on it, a
+// threshold nobody can clear, a sound engine that is not running -- and from
+// inside the panel they all look identical. This connects to a tap, watches it
+// for a while with nothing else in the way, and prints what arrives.
+static int taptest(uint32_t tapId, double seconds) {
+    mirror::AudioPulses pulses;
+    printf("taptest: taps currently publishing:\n");
+    for (const mirror::AudioTap& t : pulses.taps())
+        printf("  #%u  %-24s %u Hz\n", t.tapId,
+               t.label.empty() ? "(unnamed)" : t.label.c_str(), t.sampleRate);
+    if (!pulses.connect(tapId)) {
+        fprintf(stderr, "taptest: no tap #%u -- is an Onset Tap effect on a bus,"
+                        " with that Tap ID, in a running sound engine?\n", tapId);
+        return 1;
+    }
+    printf("connected to #%u \"%s\"; watching for %.0f s\n",
+           tapId, pulses.label().c_str(), seconds);
+
+    // The drops are driven too, so this covers the spawner as well as the
+    // transport: a tap that delivers events into a pond that ignores them is
+    // still a broken installation.
+    mirror::Pond pond(11);
+    mirror::PondParams p;
+    p.drops_on = true;
+    p.spawn.rain_on = false;      // audio only, so every drop below is a hit
+
+    // A plain steady clock, not glfwGetTime(): GLFW is not initialised on this
+    // path, and its clock reads a constant 0 until it is -- which is an
+    // infinite loop rather than a wrong number.
+    const auto clock_now = [] {
+        using namespace std::chrono;
+        return duration<double>(steady_clock::now().time_since_epoch()).count();
+    };
+    int hits = 0;
+    const double t0 = clock_now();
+    double t = 0.0;
+    while (t < seconds) {
+        for (const mirror::AudioOnset& e : pulses.poll()) {
+            ++hits;
+            printf("  %6.2fs  strength %.2f  pan %+.2f  %.1f dB\n",
+                   t, e.strength, e.pan, e.levelDb);
+            pond.triggerDrop(e.strength, e.pan);
+        }
+        pond.render(48, 64, t, p);
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        t = clock_now() - t0;
+    }
+    printf("taptest: %d onsets in %.0f s (%.2f/s), %d drops still in flight, "
+           "level %.1f dB vs a %.1f dB bar, %s\n",
+           hits, seconds, hits / seconds, (int)pond.lastSources().size(),
+           pulses.levelDb(), pulses.thresholdDb(),
+           pulses.live() ? "tap is live" : "TAP IS IDLE (no audio being processed)");
+    return hits > 0 ? 0 : 1;
+}
+
 static int textshot(const char* path, const char* str, float warp,
                     float reveal, float softness) {
     MetalContext ctx;
@@ -1928,7 +2001,7 @@ static int textshot(const char* path, const char* str, float warp,
     const int W = 1280, H = 720;
     MirrorScene mirror(ctx, 11, W / 2, H / 2);
     if (!mirror.valid()) { fprintf(stderr, "textshot: mirror invalid\n"); return 1; }
-    mirror.params().drops = 5;
+    mirror.params().drops_on = true;
     mirror.params().orbit_on = true;
     mirror.params().warp = 0.3f;
 
@@ -1967,7 +2040,7 @@ static int textshot(const char* path, const char* str, float warp,
         const auto& srcs = mirror.pond().lastSources();
         tr.n = int(std::min(srcs.size(), size_t(16)));
         for (int i = 0; i < tr.n; ++i)
-            for (int j = 0; j < 4; ++j) tr.src[i][j] = srcs[i][j];
+            for (int j = 0; j < mirror::RIPPLE_SRC_DIM; ++j) tr.src[i][j] = srcs[i][j];
         printf("textshot: %d ripple sources, warp %.2f, reveal %.2f\n",
                tr.n, warp, reveal);
 
@@ -2023,6 +2096,11 @@ int main(int argc, char** argv) {
             float reveal = (i + 4 < argc) ? (float)atof(argv[i + 4]) : 1.f;
             float soft = (i + 5 < argc) ? (float)atof(argv[i + 5]) : 1.f;
             return textshot(out, str, warp, reveal, soft);
+        }
+        if (a == "--taptest") {
+            const uint32_t tap = (i + 1 < argc) ? (uint32_t)atoi(argv[i + 1]) : 0;
+            const double secs = (i + 2 < argc) ? atof(argv[i + 2]) : 10.0;
+            return taptest(tap, secs);
         }
         if (a == "--fitviewtest") {
             // The fit view's shaders are loaded from disk at run time, so a
@@ -2157,7 +2235,8 @@ int main(int argc, char** argv) {
             float rad = (i + 5 < argc) ? atof(argv[i + 5]) : -1.f;
             float fs  = (i + 6 < argc) ? atof(argv[i + 6]) : -1.f;
             float ty  = (i + 7 < argc) ? atof(argv[i + 7]) : -1e9f;
-            return growshot(path, steps, az, el, rad, fs, ty);
+            float rc  = (i + 8 < argc) ? atof(argv[i + 8]) : 1e9f;
+            return growshot(path, steps, az, el, rad, fs, ty, rc);
         }
         if (a == "--leafshot") {
             const char* path = (i + 1 < argc) ? argv[i + 1] : "leaf.ppm";
@@ -2813,6 +2892,18 @@ int main(int argc, char** argv) {
                 }
             }
 
+            // Audio onsets -> raindrops. Polled here, once per frame and
+            // whatever scene is up: the tap is a live input, and letting it
+            // back up while another scene is showing would land the whole
+            // backlog at once on the way back to the mirror.
+            {
+                const std::vector<mirror::AudioOnset> hits = g_pulses.poll();
+                if (g_pulse_drops && mirror.valid()) {
+                    for (const mirror::AudioOnset& e : hits)
+                        mirror.pond().triggerDrop(e.strength * g_pulse_gain, e.pan);
+                }
+            }
+
             id<MTLTexture> sceneTex = nil;
 
             // The mirror's frame, trained and rendered. A lambda because two
@@ -3246,7 +3337,8 @@ int main(int argc, char** argv) {
                     ImGui::TextDisabled("(keys 1-4, space)");
                 }
 
-                if (ImGui::CollapsingHeader("script")) {
+                ui::BeginHeader("script", /*default_open=*/false);
+                {
                     static std::vector<std::string> shows = show::ListShows();
                     if (ImGui::BeginCombo("file", g_show_name.c_str())) {
                         for (const std::string& n : shows) {
@@ -3293,6 +3385,7 @@ int main(int argc, char** argv) {
                     ui::SliderInt("phase CC", &g_show_phase_cc, 0, 127);
                     ui::Checkbox("log phase changes", &g_show_log);
                 }
+                ui::EndHeader();
             }
             ui::PopSection();               // "show"
             ImGui::Separator();
@@ -3301,7 +3394,8 @@ int main(int argc, char** argv) {
             // Always visible: the composition's shape is upstream of every
             // scene, the text's placement and the camera's crop.
             ui::PushSection("screen");
-            if (ImGui::CollapsingHeader("screen orientation")) {
+            ui::BeginHeader("screen orientation", /*default_open=*/false);
+            {
                 ImGui::TextUnformatted("compose for:"); ImGui::SameLine();
                 ImGui::RadioButton("auto", &g_orientation,
                                    (int)mirror::Orientation::Auto);
@@ -3357,13 +3451,13 @@ int main(int argc, char** argv) {
                     g_feed = mirror::FeedCrop{};
                 }
             }
+            ui::EndHeader();
             ui::PopSection();               // "screen"
 
             // --- camera mask ---------------------------------------------
             ui::PushSection("camera mask");
-            if (ImGui::CollapsingHeader("camera mask",
-                                        scene == (int)Scene::CamMask
-                                            ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
+            ui::BeginHeader("camera mask", /*default_open=*/true);
+            {
                 ui::Checkbox("mask the camera", &g_cam_mask_on);
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip(
@@ -3393,11 +3487,13 @@ int main(int argc, char** argv) {
                     ImGui::TextDisabled("(the 'cam mask' scene has drag handles)");
                 }
             }
+            ui::EndHeader();
             ui::PopSection();
 
             // --- face tracking (feeds both scenes) ------------------------
             ui::PushSection("face tracking");
-            if (ImGui::CollapsingHeader("face tracking")) {
+            ui::BeginHeader("face tracking", /*default_open=*/false);
+            {
                 if (!mirror::FaceTracker::available()) {
                     ImGui::TextDisabled("MediaPipe not compiled in");
                     ImGui::TextDisabled("run ./setup-mediapipe.sh, then re-cmake");
@@ -3759,6 +3855,7 @@ int main(int argc, char** argv) {
                     ui::PopSection();       // "identity"
                 }
             }
+            ui::EndHeader();
             ui::PopSection();               // "face tracking"
             ImGui::Separator();
 
@@ -3820,7 +3917,8 @@ int main(int argc, char** argv) {
             // Outside the per-scene blocks: it composites in the present pass,
             // so it is available over every scene.
             ui::PushSection("text");
-            if (ImGui::CollapsingHeader("text overlay")) {
+            ui::BeginHeader("text overlay", /*default_open=*/false);
+            {
                 ui::Checkbox("show text", &textp.on);
                 static char buf[256] = {};
                 static bool buf_init = false;
@@ -3874,6 +3972,7 @@ int main(int argc, char** argv) {
                     ImGui::TextDisabled("(no ripples in this scene: unwarped)");
                 }
             }
+            ui::EndHeader();
             ui::PopSection();               // "text"
 
             if (scene == (int)Scene::Mirror) {
@@ -3885,7 +3984,100 @@ int main(int argc, char** argv) {
                 ui::SliderFloat("ripple speed", &P.speed, 0.0f, 6.0f);
                 ui::SliderFloat("ripple phase", &P.ripple_offset, 0.0f, 2.0f * (float)M_PI);
                 ui::SliderFloat("refraction (warp)", &P.warp, 0.0f, 1.0f);
-                ui::SliderInt("raindrops", &P.drops, 0, 12);
+                ui::Checkbox("raindrops", &P.drops_on);
+                ui::BeginGroup("rain", true, P.drops_on);
+                {
+                    mirror::DropSpawnParams& S = P.spawn;
+                    if (ui::Visible()) {
+                        ImGui::Text("%d in flight, %d spawned",
+                                    (int)mirror.pond().spawner().drops().size(),
+                                    mirror.pond().spawner().spawnCount());
+                        if (ImGui::Button("drop one")) mirror.pond().triggerDrop();
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(a hit, same as an audio onset)");
+                    }
+
+                    ui::Checkbox("falling", &S.rain_on);
+                    ui::SliderFloat("rate (drops/s)", &S.rate, 0.02f, 12.0f);
+                    ui::SliderFloat("rate jitter", &S.rate_jitter, 0.0f, 1.0f);
+                    ui::SliderFloat("size", &S.width, 0.02f, 0.6f);
+                    ui::SliderFloat("size jitter", &S.width_jitter, 0.0f, 1.0f);
+                    ui::SliderFloat("strength", &S.amp, 0.0f, 2.0f);
+                    ui::SliderFloat("strength jitter", &S.amp_jitter, 0.0f, 1.0f);
+                    ui::SliderFloat("spread jitter", &S.speed_jitter, 0.0f, 1.0f);
+                    ui::SliderFloat("area x", &S.area_x, 0.0f, 1.2f);
+                    ui::SliderFloat("area y", &S.area_y, 0.0f, 1.2f);
+                    ui::SliderFloat("area centre x", &S.bias_x, -1.5f, 1.5f);
+                    ui::SliderFloat("area centre y", &S.bias_y, -1.0f, 1.0f);
+                    ui::SliderInt("max in flight", &S.max_active, 1, 24);
+                }
+                ui::EndGroup();
+
+                ui::BeginGroup("rain from audio", true, P.drops_on);
+                if (ui::Visible()) {
+                    // The tap list comes from whatever OnsetTap instances are
+                    // live in Wwise right now; picking one is the whole setup.
+                    const auto& taps = g_pulses.taps();
+                    std::string current = g_pulses.connected()
+                        ? (g_pulses.label().empty()
+                               ? ("Tap " + std::to_string(g_pulses.tapId()))
+                               : g_pulses.label())
+                        : std::string("(not connected)");
+                    ImGui::SetNextItemWidth(200);
+                    if (ImGui::BeginCombo("tap", current.c_str())) {
+                        if (ImGui::Selectable("(not connected)", !g_pulses.connected()))
+                            g_pulses.disconnect();
+                        for (const mirror::AudioTap& t : taps) {
+                            const std::string name =
+                                (t.label.empty() ? ("Tap " + std::to_string(t.tapId))
+                                                 : t.label) +
+                                "  #" + std::to_string(t.tapId);
+                            const bool sel = g_pulses.connected() &&
+                                             g_pulses.tapId() == t.tapId;
+                            if (ImGui::Selectable(name.c_str(), sel))
+                                g_pulses.connect(t.tapId);
+                        }
+                        ImGui::EndCombo();
+                    }
+                    if (taps.empty()) {
+                        ImGui::TextDisabled("no OnsetTap instance is publishing");
+                        ImGui::TextDisabled("(add the Onset Tap effect to a bus in Wwise)");
+                    }
+
+                    if (g_pulses.connected()) {
+                        // Level against the bar it has to clear. Without both,
+                        // "nothing is firing" and "the threshold is too high"
+                        // are the same silence -- and the threshold moves with
+                        // the material, so a static number would not tell you.
+                        const float lvl = g_pulses.levelDb();
+                        ImGui::Text("%s   %.1f dB, needs a %.1f dB rise",
+                                    g_pulses.live() ? "LIVE" : "idle",
+                                    lvl, g_pulses.thresholdDb());
+                        const float norm = std::clamp((lvl + 80.f) / 80.f, 0.f, 1.f);
+                        ImGui::ProgressBar(norm, ImVec2(-1, 6), "");
+                        const double since = g_pulses.sinceLast();
+                        ImGui::Text("%.1f onsets/s", g_pulses.rate());
+                        ImGui::SameLine();
+                        if (since < 0.15)
+                            ImGui::TextColored(ImVec4(1, 0.9f, 0.4f, 1), "HIT");
+                        else
+                            ImGui::TextDisabled("last %.1fs ago", since);
+                        if (g_pulses.missed())
+                            ImGui::TextDisabled("%u events missed", g_pulses.missed());
+                    }
+                }
+                {
+                    ui::Checkbox("onsets spawn drops", &g_pulse_drops);
+                    ui::SliderFloat("onset gain", &g_pulse_gain, 0.1f, 4.0f);
+                    // How much of the drop the hit gets to decide. At 0 across
+                    // the board the audio only chooses *when*, which is a real
+                    // setting: a steady shower on the beat.
+                    ui::SliderFloat("hit -> strength", &P.spawn.hit_amp, 0.0f, 1.0f);
+                    ui::SliderFloat("hit -> size", &P.spawn.hit_width, 0.0f, 1.0f);
+                    ui::SliderFloat("hit -> position", &P.spawn.hit_pan, 0.0f, 1.0f);
+                }
+                ui::EndGroup();
+
                 ui::Checkbox("moving ripple", &P.orbit_on);
                 ui::Checkbox("soft centers (anti-alias)", &P.core_rolloff);
                 if (P.core_rolloff) {
@@ -4185,7 +4377,8 @@ int main(int argc, char** argv) {
                 ImGui::Separator();
                 // --- the network itself -----------------------------------
                 ui::PushSection("network");
-                if (ImGui::CollapsingHeader("network")) {
+                ui::BeginHeader("network", /*default_open=*/false);
+                {
                 ui::SliderInt("sine layers (0 = tanh only)", &P.sine_layers,
                                  0, 5);
                 if (ImGui::IsItemHovered()) {
@@ -4218,11 +4411,13 @@ int main(int argc, char** argv) {
                 ui::SliderFloat("contrast (w out)", &P.contrast, 1.0f, 12.0f);
                 if (ImGui::Button("reseed network")) mirror.reseed();
                 }
+                ui::EndHeader();
                 ui::PopSection();
 
                 // --- colour & tone ----------------------------------------
                 ui::PushSection("colour");
-                if (ImGui::CollapsingHeader("colour & tone")) {
+                ui::BeginHeader("colour & tone", /*default_open=*/false);
+                {
                 ui::Checkbox("sRGB fix", &P.srgb_fix); ImGui::SameLine();
                 if (ImGui::Button("reset color")) { P.srgb_fix = false; P.gamma = 1.0f; }
                 ui::SliderFloat("gamma (>1 darkens)", &P.gamma, 0.3f, 2.0f);
@@ -4238,11 +4433,13 @@ int main(int argc, char** argv) {
                 ui::Checkbox("swap R/B", &P.swap_rb);
                 ui::Checkbox("color travel (palette follows orbit)", &P.color_travel);
                 }
+                ui::EndHeader();
                 ui::PopSection();
 
                 // --- the z latent -----------------------------------------
                 ui::PushSection("z");
-                if (ImGui::CollapsingHeader("z latent")) {
+                ui::BeginHeader("z latent", /*default_open=*/false);
+                {
                 // z latent
                 ImGui::Text("z phase = %6.2f  (circular morph)", P.z);
                 ImGui::DragFloat("z", &P.z, 0.02f);
@@ -4253,21 +4450,25 @@ int main(int argc, char** argv) {
                 if (ImGui::Button("z + step")) P.z += P.z_step; ImGui::SameLine();
                 if (ImGui::Button("z = 0")) P.z = 0.0f;
                 }
+                ui::EndHeader();
                 ui::PopSection();
 
                 // --- clock & render ---------------------------------------
                 ui::PushSection("render");
-                if (ImGui::CollapsingHeader("clock & render")) {
+                ui::BeginHeader("clock & render", /*default_open=*/false);
+                {
                 // time
                 ui::SliderFloat("ripple time scale", &P.time_scale, 0.0f, 4.0f);
                 ui::Checkbox("pause", &P.paused);
                 ui::SliderInt("downscale", &downscale, 1, 10);
                 ImGui::Text("render %d x %d -> %d x %d", mirror.lowW(), mirror.lowH(), fbw, fbh);
                 }
+                ui::EndHeader();
                 ui::PopSection();
                 // mask emergence transition
                 ui::PushSection("mask emergence (transition)");
-                if (ImGui::CollapsingHeader("mask emergence (transition)")) {
+                ui::BeginHeader("mask emergence (transition)", /*default_open=*/false);
+                {
                     ui::SliderFloat("transition (0 pond -> 1 mask)", &P.transition, 0.0f, 1.0f);
                     ui::Checkbox("auto-play", &P.trans_auto); ImGui::SameLine();
                     if (ImGui::Button("reset t")) { P.transition = 0.0f; P.trans_auto = false; }
@@ -4281,6 +4482,7 @@ int main(int argc, char** argv) {
                     ui::SliderFloat("sheen tightness", &P.shininess, 4.0f, 96.0f);
                     ui::SliderFloat("background dim", &P.bg_dim, 0.0f, 1.0f);
                 }
+                ui::EndHeader();
                 ui::PopSection();
                 ui::PopSection();          // "mirror"
             } else {
@@ -4300,7 +4502,8 @@ int main(int argc, char** argv) {
 
                 // --- growth ------------------------------------------------
                 ui::PushSection("growth");
-                if (ImGui::CollapsingHeader("growth", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ui::BeginHeader("growth", /*default_open=*/true);
+                {
                     rootsim::SimParams& SP = roots.simParams();
                     ImGui::Text("%s", roots.simActive()
                                     ? (roots.simDone() ? "grown" : "growing")
@@ -4386,11 +4589,13 @@ int main(int argc, char** argv) {
                     ImGui::SameLine();
                     ImGui::TextDisabled("seed %u", SP.seed);
                 }
+                ui::EndHeader();
                 ui::PopSection();
 
                 // --- presets -----------------------------------------------
                 ui::PushSection("presets");
-                if (ImGui::CollapsingHeader("presets")) {
+                ui::BeginHeader("presets", /*default_open=*/false);
+                {
                     static std::vector<std::string> presets = RootScene::listPresets();
                     static char preset_name[128] = "untitled";
                     static std::string preset_msg;
@@ -4424,11 +4629,13 @@ int main(int argc, char** argv) {
                     if (ImGui::Button("rescan")) presets = RootScene::listPresets();
                     if (!preset_msg.empty()) ImGui::TextDisabled("%s", preset_msg.c_str());
                 }
+                ui::EndHeader();
                 ui::PopSection();
 
                 // --- camera ------------------------------------------------
                 ui::PushSection("camera");
-                if (ImGui::CollapsingHeader("camera", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ui::BeginHeader("camera", /*default_open=*/true);
+                {
                     ui::Checkbox("frame automatically", &roots.autoFrame);
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip(
@@ -4469,6 +4676,7 @@ int main(int argc, char** argv) {
                     ui::SliderFloat("elevation", &roots.elevation, -1.5f, 1.5f);
                     ui::SliderFloat("fov", &roots.fov, 0.2f, 1.2f);
                 }
+                ui::EndHeader();
                 ui::PopSection();
                 ImGui::Separator();
                 ImGui::Separator();
@@ -4492,7 +4700,8 @@ int main(int argc, char** argv) {
                 ImGui::Separator();
                 // fog
                 ui::PushSection("fog & atmosphere");
-                if (ImGui::CollapsingHeader("fog & atmosphere")) {
+                ui::BeginHeader("fog & atmosphere", /*default_open=*/false);
+                {
                     ui::Checkbox("fog on", &R.fog.enabled);
                     ui::ColorEdit3("fog color", R.fog.color);
                     // Visibility rather than density, on a logarithmic slider:
@@ -4526,10 +4735,12 @@ int main(int argc, char** argv) {
                     ui::SliderFloat("wisp glow", &R.wispGlowStrength, 0.0f, 3.0f);
                     ui::SliderInt("wisps", &R.wispCount, 0, 8);
                 }
+                ui::EndHeader();
                 ui::PopSection();
                 // pulses
                 ui::PushSection("travelling pulses");
-                if (ImGui::CollapsingHeader("travelling pulses")) {
+                ui::BeginHeader("travelling pulses", /*default_open=*/false);
+                {
                     ui::Checkbox("pulses on", &R.pulse.enabled);
                     ui::SliderFloat("pulse speed", &R.pulse.speed, 0.0f, 40.0f);
                     ui::SliderFloat("pulse spacing", &R.pulse.spacing, 4.0f, 60.0f);
@@ -4537,9 +4748,11 @@ int main(int argc, char** argv) {
                     ui::SliderFloat("pulse intensity", &R.pulse.intensity, 0.0f, 4.0f);
                     ui::ColorEdit3("pulse color", R.pulse.color);
                 }
+                ui::EndHeader();
                 ui::PopSection();
                 ui::PushSection("environment & material");
-                if (ImGui::CollapsingHeader("environment & material")) {
+                ui::BeginHeader("environment & material", /*default_open=*/false);
+                {
                     // The tranche buttons are a coarse quality dial and the A/B
                     // control: each one is a whole group of the settings below,
                     // so a look can be compared against the previous stage
@@ -4588,9 +4801,11 @@ int main(int argc, char** argv) {
                     ui::SliderInt("AO samples", &R.ao.samples, 4, 24);
                     ui::SliderInt("AO downscale", &R.ao.downscale, 1, 4);
                 }
+                ui::EndHeader();
                 ui::PopSection();
                 ui::PushSection("post");
-                if (ImGui::CollapsingHeader("post")) {
+                ui::BeginHeader("post", /*default_open=*/false);
+                {
                     ui::Checkbox("post chain", &R.post.enabled);
                     ui::SliderInt("supersample", &R.post.ssaa, 1, 3);
                     ImGui::TextDisabled("scene renders at %dx%d", R.width() * R.post.ssaa,
@@ -4612,9 +4827,11 @@ int main(int argc, char** argv) {
                     ui::SliderFloat("fog dither", &R.post.fogDither, 0.0f, 1.0f);
                     ui::Checkbox("output dither", &R.post.dither);
                 }
+                ui::EndHeader();
                 ui::PopSection();
                 ui::PushSection("lens & film");
-                if (ImGui::CollapsingHeader("lens & film")) {
+                ui::BeginHeader("lens & film", /*default_open=*/false);
+                {
                     ImGui::TextUnformatted("lens");
                     if (ImGui::Button("wide angle")) roots.setWideAngle(true);
                     ImGui::SameLine();
@@ -4663,9 +4880,11 @@ int main(int argc, char** argv) {
                         }
                     }
                 }
+                ui::EndHeader();
                 ui::PopSection();
                 ui::PushSection("face masks");
-                if (ImGui::CollapsingHeader("face masks")) {
+                ui::BeginHeader("face masks", /*default_open=*/false);
+                {
                     if (ui::Checkbox("show faces", &roots.showFace)) roots.rebuildFace();
                     if (ui::SliderFloat("face scale", &roots.faceScale, 0.3f, 1.5f))
                         roots.rebuildFace();
@@ -4688,9 +4907,11 @@ int main(int argc, char** argv) {
                     if (ui::Checkbox("smooth normals", &R.face.smoothNormals))
                         roots.rebuildFace();
                 }
+                ui::EndHeader();
                 ui::PopSection();
                 ui::PushSection("cached field: LOD & culling");
-                if (ImGui::CollapsingHeader("cached field: LOD & culling")) {
+                ui::BeginHeader("cached field: LOD & culling", /*default_open=*/false);
+                {
                     ui::SliderInt("grid NxN", &fieldGrid, 2, 20);
                     if (ImGui::Button("tile field")) roots.buildField(fieldGrid, 30.0f);
                     ImGui::SameLine();
@@ -4703,13 +4924,16 @@ int main(int argc, char** argv) {
                                 R.instanceCount(), R.lastVisibleInstances, R.lastCulledInstances);
                     ImGui::Text("capsules drawn: %ld", R.lastDrawnSegments);
                 }
+                ui::EndHeader();
                 ui::PopSection();
                 ui::PushSection("overlays");
-                if (ImGui::CollapsingHeader("overlays")) {
+                ui::BeginHeader("overlays", /*default_open=*/false);
+                {
                     ui::Checkbox("axes", &R.overlay.showAxes); ImGui::SameLine();
                     ui::Checkbox("grid", &R.overlay.showGrid);
                     ui::SliderFloat("grid spacing", &R.overlay.gridSpacing, 1.0f, 20.0f);
                 }
+                ui::EndHeader();
                 ui::PopSection();
                 ui::PopSection();          // "roots"
             }
@@ -4720,7 +4944,8 @@ int main(int argc, char** argv) {
             // once and then left alone, and putting it above the controls it
             // binds would push those further from the top every session.
             ImGui::Separator();
-            if (ImGui::CollapsingHeader("settings")) {
+            ui::BeginHeader("settings", /*default_open=*/false);
+            {
                 ImGui::Text("MIDI");
                 ImGui::SameLine();
                 if (g_midi.isOpen()) {
@@ -4842,6 +5067,7 @@ int main(int argc, char** argv) {
                     }
                 }
             }
+            ui::EndHeader();
             ImGui::End();
             if (panel_hidden) ImGui::PopStyleVar();
 
@@ -5005,7 +5231,7 @@ int main(int argc, char** argv) {
                 const auto& srcs = mirror.pond().lastSources();
                 tr.n = int(std::min(srcs.size(), size_t(16)));
                 for (int i = 0; i < tr.n; ++i)
-                    for (int j = 0; j < 4; ++j) tr.src[i][j] = srcs[i][j];
+                    for (int j = 0; j < mirror::RIPPLE_SRC_DIM; ++j) tr.src[i][j] = srcs[i][j];
             }
             // The show owns *what* the text says and *when*, and nothing else:
             // placement, size, font and the turbulence all stay whatever the

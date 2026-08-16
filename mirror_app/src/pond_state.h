@@ -11,6 +11,7 @@
 #include <optional>
 #include <vector>
 
+#include "drop_spawner.h"
 #include "mlp_forward.h"
 #include "mirror_render.h"
 #include "mirror_train.h"
@@ -28,11 +29,16 @@ struct PondParams {
     float ripple_offset = 0.0f;      // manual phase added to the time phase
     bool  color_travel = false;      // palette follows the orbit source
     float warp = 0.0f;               // refraction: ripple gradient warps colour coords
-    // Ripples off by default. They are a decorative field that dominates the
-    // MLP's input features, which is wrong once the network is being *fitted*
-    // to something -- during training they are signal the target does not
-    // contain. Turn them back on for the standalone pond look.
-    int   drops = 0;
+    // Raindrops on / off. Everything about *how* they fall is in `spawn`; this
+    // stays a plain bool so the rest of the app (and the presets) keep a single
+    // switch for "is there rain".
+    //
+    // Off by default: ripples are a decorative field that dominates the MLP's
+    // input features, which is wrong once the network is being *fitted* to
+    // something -- during training they are signal the target does not contain.
+    // Turn them on for the standalone pond look.
+    bool  drops_on = false;
+    DropSpawnParams spawn;
     bool  orbit_on = false;
     bool  core_rolloff = true;
     float core_radius = 0.12f;
@@ -161,6 +167,14 @@ public:
     // this, so `z` is free to animate everywhere else.
     float fitZ()     const { return fit_z_; }
 
+    // Spawn a drop right now: an audio onset, a MIDI hit, a button. `strength`
+    // is 0..1 (negative means "you choose"), `pan` -1..1 across the frame. Takes
+    // effect on the next render(), which is where drops learn what time it is.
+    void triggerDrop(float strength = -1.f, float pan = 0.f) {
+        spawner_.trigger(strength, pan);
+    }
+    const DropSpawner& spawner() const { return spawner_; }
+
     // The ripple sources the last render() actually used.
     //
     // Cached rather than recomputed by the caller from the clock: the text
@@ -175,12 +189,13 @@ private:
     std::vector<float> layer_scales(const PondParams& p) const;
     const mx::array& shaped_base(const PondParams& p);
     const mx::array& weights(const PondParams& p);
-    std::vector<RippleSource> sources(float asp, double t, const PondParams& p) const;
+    std::vector<RippleSource> sources(float asp, double t, const PondParams& p);
     mx::array apply_transition(const mx::array& img, const mx::array& coords,
                                int lh, int lw, float asp, const PondParams& p) const;
 
     MLPConfig cfg_;
     int seed_;
+    DropSpawner spawner_;
     mx::array wb_;                  // base (scale-1) weights, fp16
 
     // caches keyed on their inputs (mirrors PondState)

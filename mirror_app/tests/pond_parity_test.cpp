@@ -37,7 +37,7 @@ int main(int argc, char** argv) {
 
     mirror::Pond pond(11);
     mirror::PondParams p;      // defaults match PondState.__init__
-    p.drops = 0;
+    p.drops_on = false;   // the fixture is orbit-only, and drops are not deterministic
     p.orbit_on = true;
     p.z = (float)z;
 

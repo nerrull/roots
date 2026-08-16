@@ -25,6 +25,7 @@
 
 #include "mymath.h"
 
+#include <algorithm>
 #include <cmath>
 #include <map>
 #include <random>
@@ -84,13 +85,17 @@ struct FlowerMesh {
         nodes.push_back(p);
         return static_cast<int>(nodes.size()) - 1;
     }
-    void addSeg(int a, int b, double r) {
+    // s0/s1 are this capsule's fractional span of the colour gradient it belongs
+    // to. Defaulting them to the whole 0..1 range is right for a lone capsule but
+    // wrong for a chain: every link would ramp base->tip colour over its own
+    // length, banding a stem like a bamboo pole. Chains pass their own sub-range.
+    void addSeg(int a, int b, double r, double s0 = 0.0, double s1 = 1.0) {
         segments.push_back(Vector2i(a, b));
         radii.push_back(r);
         groups.push_back(curGroup);
         prims.push_back(PRIM_CAPSULE);
         frames.insert(frames.end(), {0.f, 0.f, 0.f, 0.f});
-        aux.insert(aux.end(), {0.f, 1.f, 0.f, 0.f});   // whole span, no cup/bias
+        aux.insert(aux.end(), {(float) s0, (float) s1, 0.f, 0.f});
     }
 
     // A blade/petal primitive: one flattened surface spanning base->tip.
@@ -133,14 +138,16 @@ struct FlowerMesh {
     // Straight tube a->b, subdivided into `sub` capsules whose radius lerps
     // r0->r1 (so a single tapering stem is smooth under lighting, not a cone
     // of hard radius steps). Returns the index of the final node.
-    int tube(const Vector3d& a, const Vector3d& b, double r0, double r1, int sub = 1) {
+    int tube(const Vector3d& a, const Vector3d& b, double r0, double r1, int sub = 1,
+             double s0 = 0.0, double s1 = 1.0) {
         sub = sub < 1 ? 1 : sub;
         int prev = addNode(a);
         for (int i = 1; i <= sub; ++i) {
             double t = static_cast<double>(i) / sub;
             Vector3d p = a.times(1.0 - t).plus(b.times(t));
             int cur = addNode(p);
-            addSeg(prev, cur, r0 + (r1 - r0) * (t - 0.5 / sub));
+            addSeg(prev, cur, r0 + (r1 - r0) * (t - 0.5 / sub),
+                   s0 + (s1 - s0) * (t - 1.0 / sub), s0 + (s1 - s0) * t);
             prev = cur;
         }
         return prev;
@@ -342,6 +349,316 @@ inline FlowerMesh buildFromPreset(Preset p) {
 }
 
 // ---------------------------------------------------------------------------
+// Tapered capsule chains without the banding.
+//
+// Where two collinear capsules of radii r and r-dr meet, the wider one's
+// spherical cap emerges from inside the narrower one's cylinder, and the union
+// has a crease whose normal kinks by about sqrt(2*dr/r) radians. The specular
+// lights every one of those creases, which is what made stems and petioles look
+// like bamboo or a string of beads -- it is a shading artifact of the taper, not
+// of the curve or the link count as such. A probe of four bare stalks (constant
+// vs tapered, 40 vs 220 links; see chrys_shot's CHRYS_STEMTEST) confirmed it:
+// constant-radius chains are clean at any density, tapered ones band until the
+// per-link step is small.
+//
+// So subdivision has to be chosen from the RADIUS RATIO a chain spans, not
+// picked by eye: taperSub() returns the number of links that keeps each crease
+// under `kink` radians.
+inline int taperSub(double r0, double r1, double kink = 0.085) {
+    double a = std::max(std::abs(r0), 1e-6), b = std::max(std::abs(r1), 1e-6);
+    double lr = std::abs(std::log(b / a));
+    int n = (int) std::ceil(lr / std::max(0.5 * kink * kink, 1e-6));
+    return std::max(2, std::min(n, 420));
+}
+
+inline double smoothstep01(double e0, double e1, double x) {
+    double t = (e1 - e0) != 0.0 ? (x - e0) / (e1 - e0) : 0.0;
+    t = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// ---------------------------------------------------------------------------
+// Stem as a chain of INTERNODES.
+//
+// A stalk is not a curve with an amplitude, it is a stack of segments, each of
+// which elongates on its own schedule and shifts its angle a little while it
+// does. Building it that way is what makes growth read as growth: the tip
+// wanders because the segments under it are still extending and settling, and
+// the wander never repeats, because it comes from a walk rather than from a
+// waveform. The previous version added a sine to an analytic bow, and looked
+// exactly like a sine.
+//
+// The walk is CORRELATED (each internode's lean is mostly its neighbour's, with
+// some new randomness mixed in), so the stalk curves in long arcs instead of
+// zig-zagging joint to joint.
+//
+// StemGrowth is the plan; buildStem() evaluates it at a growth value into a
+// StemPath, which is what everything that has to meet the stem (leaves, the
+// receptacle, the head) queries.
+// ---------------------------------------------------------------------------
+struct StemGrowth {
+    int      internodes = 16;
+    double   height     = 52.0;   // total length when mature
+    double   grown      = 1.0;    // 0 = nothing, 1 = fully extended
+    double   baseR      = 0.85;
+    double   topR       = 0.45;
+    double   lean       = 0.13;   // typical mature tilt of one internode (radians)
+    double   swing      = 0.30;   // extra tilt while an internode is still young
+    double   window     = 0.38;   // fraction of the timeline one internode takes
+    double   persist    = 0.62;   // how much of its neighbour's lean each one keeps
+    double   basalFlare = 0.55;
+    double   neckSwell  = 1.10;
+    double   neckStart  = 0.86;
+    unsigned seed       = 3;
+};
+
+// A grown stem: the joints, plus smooth queries along them. Positions are
+// interpolated Catmull-Rom through the joints, so a 16-segment stalk still reads
+// as a smooth stem rather than as a bent wire.
+struct StemPath {
+    std::vector<Vector3d> node;    // joints, base first
+    std::vector<double>   arc;     // cumulative length at each joint
+    double len = 0.0;
+    double baseR = 0.85, topR = 0.45;
+    double basalFlare = 0.55, neckSwell = 1.10, neckStart = 0.86;
+
+    Vector3d pos(double t) const {
+        if (node.empty()) return Vector3d(0, 0, 0);
+        if (node.size() == 1 || len <= 1e-9) return node[0];
+        double s = (t < 0 ? 0 : (t > 1 ? 1 : t)) * len;
+        size_t i = 1;
+        while (i + 1 < node.size() && arc[i] < s) ++i;
+        double a0 = arc[i - 1], a1 = arc[i];
+        double u = (a1 - a0) > 1e-9 ? (s - a0) / (a1 - a0) : 0.0;
+        const Vector3d& p1 = node[i - 1];
+        const Vector3d& p2 = node[i];
+        const Vector3d& p0 = node[i >= 2 ? i - 2 : 0];
+        const Vector3d& p3 = node[i + 1 < node.size() ? i + 1 : node.size() - 1];
+        double u2 = u * u, u3 = u2 * u;
+        return p0.times(-0.5 * u3 + u2 - 0.5 * u)
+            .plus(p1.times(1.5 * u3 - 2.5 * u2 + 1.0))
+            .plus(p2.times(-1.5 * u3 + 2.0 * u2 + 0.5 * u))
+            .plus(p3.times(0.5 * u3 - 0.5 * u2));
+    }
+    Vector3d dir(double t) const {
+        const double h = 2e-3;
+        Vector3d d = pos(std::min(1.0, t + h)).minus(pos(std::max(0.0, t - h)));
+        return d.length() < 1e-9 ? Vector3d(0, 1, 0) : d.normalized();
+    }
+    double radius(double t) const {
+        double gt = t < 0 ? 0 : (t > 1 ? 1 : t);
+        double r = baseR + (topR - baseR) * std::pow(gt, 0.75);
+        r *= 1.0 + basalFlare * std::exp(-gt * 16.0);
+        double n = smoothstep01(neckStart, 1.0, gt);
+        return r * (1.0 + neckSwell * n * n);
+    }
+    Vector3d top() const { return node.empty() ? Vector3d(0, 0, 0) : node.back(); }
+};
+
+inline StemPath buildStem(const StemGrowth& G) {
+    StemPath P;
+    P.baseR = G.baseR; P.topR = G.topR;
+    P.basalFlare = G.basalFlare; P.neckSwell = G.neckSwell; P.neckStart = G.neckStart;
+
+    const int N = std::max(3, G.internodes);
+    std::mt19937 rng(G.seed * 7919u + 11u);
+    std::uniform_real_distribution<double> u(-1.0, 1.0);
+
+    // --- Plan (independent of growth, so a plant does not re-roll its shape as
+    //     it grows): each internode's final length, its lean, and when it starts.
+    std::vector<double>   len(N), startG(N);
+    std::vector<Vector3d> latMature(N), latYoung(N);
+    double totalShape = 0.0;
+    Vector3d lat(0, 0, 0);                       // the correlated walk's state
+    for (int i = 0; i < N; ++i) {
+        double f = (N > 1) ? double(i) / (N - 1) : 0.0;
+        // Internodes are short at the base, longest around mid-stem, short again
+        // under the head -- the usual profile of a flowering stalk.
+        double shape = 0.55 + 0.75 * std::sin(M_PI * std::pow(f, 0.85));
+        len[i] = shape; totalShape += shape;
+        // Windows overlap, so several internodes are extending at any moment.
+        startG[i] = f * (1.0 - G.window);
+        // Correlated walk: mostly the previous lean, plus a new random push.
+        double a = 2.0 * M_PI * (0.5 + 0.5 * u(rng));
+        Vector3d push(std::cos(a), 0, std::sin(a));
+        lat = lat.times(G.persist).plus(push.times(1.0 - G.persist));
+        double tilt = G.lean * (0.55 + 0.75 * std::fabs(u(rng)));
+        latMature[i] = lat.times(tilt);
+        // While young an internode is more upright but swings further off-axis;
+        // it settles onto its mature lean as it finishes extending.
+        double b = a + 1.7 + 0.6 * u(rng);
+        latYoung[i] = lat.times(tilt * 0.35)
+                         .plus(Vector3d(std::cos(b), 0, std::sin(b)).times(G.swing));
+    }
+    for (int i = 0; i < N; ++i) len[i] *= G.height / totalShape;
+
+    // --- Evaluate at this growth: walk up the chain, accumulating joints. ---
+    const Vector3d up(0, 1, 0);
+    Vector3d p(0, 0, 0);
+    P.node.push_back(p);
+    P.arc.push_back(0.0);
+    double g = std::min(1.0, std::max(0.0, G.grown));
+    for (int i = 0; i < N; ++i) {
+        double e = smoothstep01(startG[i], startG[i] + G.window, g);
+        if (e <= 1e-4) break;                    // this internode has not started
+        Vector3d d = up.plus(latYoung[i].times(1.0 - e)).plus(latMature[i].times(e)).normalized();
+        double l = len[i] * e;
+        if (l <= 1e-6) break;
+        p = p.plus(d.times(l));
+        P.len += l;
+        P.node.push_back(p);
+        P.arc.push_back(P.len);
+    }
+    return P;
+}
+
+// ---------------------------------------------------------------------------
+// Stem centre-line (analytic).
+//
+// An ANALYTIC curve rather than a baked point list, so everything that has to
+// meet the stem -- leaves, the receptacle, the bloom -- can ask for the exact
+// position, tangent and radius at a height instead of guessing at a formula the
+// stem builder used. Guessed attachments were why leaves met the stalk in a bare
+// T-junction: the leaf was placed on a re-derived approximation of the curve.
+//
+// The profile is a taper with two departures from a cone: a flare at the ground
+// (a stalk is buttressed where it leaves the soil) and a swelling into the neck
+// (the peduncle thickens into the receptacle, so the head is carried rather than
+// skewered on a pole).
+// ---------------------------------------------------------------------------
+struct StemShape {
+    double height     = 42.0;
+    double baseR      = 0.70;   // cm at the ground, before the flare
+    double topR       = 0.40;   // cm just below the neck swelling
+    double sway       = 1.7;    // cm of lateral bow at the top
+    double swayPhase  = 0.0;    // azimuth of the bow plane
+    double basalFlare = 0.55;   // extra radius fraction at the very base
+    double neckSwell  = 1.10;   // extra radius fraction entering the receptacle
+    double neckStart  = 0.84;   // t where that swelling begins
+
+    // How much of `height` has actually been grown. The curve below is defined
+    // over the FULL height and does not depend on this -- growth only reveals
+    // more of a path that is fixed in space. Scaling the whole curve instead (the
+    // obvious way) drags the lower stem and its leaves sideways as the plant
+    // grows, which never happens: a stem elongates at its tip, and what is
+    // already built stays put.
+    double grown = 1.0;
+
+    // Circumnutation: a growing tip does not track a straight line, it circles.
+    // Two out-of-phase turns of different period give a path that wanders without
+    // repeating, and because the amplitude climbs with height, the tip sweeps
+    // further as it goes -- so during growth the tip is visibly moving around.
+    double wander     = 0.0;    // cm of tip wander at full height
+    double wanderTurn = 1.7;    // turns of the wander over the whole stem
+    double wanderPhase = 0.0;
+
+    Vector3d pos(double t) const {
+        t = t < 0 ? 0 : t;
+        // A lean that grows with height plus a slight secondary wobble -- a stalk
+        // carrying a heavy head bows, it does not stand like a ruler.
+        double bow = std::sin(t * M_PI * 0.80) * t;
+        double wob = std::sin(t * M_PI * 2.4 + 0.7) * t * 0.16;
+        double off = (bow + wob) * sway;
+        double x = std::cos(swayPhase) * off, z = std::sin(swayPhase) * off;
+        if (wander != 0.0) {
+            double a = wander * std::pow(t, 1.35);
+            double th = t * wanderTurn * 2.0 * M_PI + wanderPhase;
+            x += a * std::sin(th);
+            z += a * std::cos(th * 0.77 + 1.1);
+        }
+        return Vector3d(x, t * height, z);
+    }
+    Vector3d dir(double t) const {
+        const double h = 1e-3;
+        Vector3d d = pos(std::min(1.0, t + h)).minus(pos(std::max(0.0, t - h)));
+        return d.length() < 1e-9 ? Vector3d(0, 1, 0) : d.normalized();
+    }
+    double radius(double t) const {
+        // The taper and the neck swelling are relative to the GROWN length, not
+        // the eventual one: a half-grown stalk is a whole stalk of its own size,
+        // tapering into its own tip, not the bottom half of a mature one.
+        double gt = grown > 1e-6 ? std::min(1.0, t / grown) : 0.0;
+        double r = baseR + (topR - baseR) * std::pow(gt, 0.75);
+        r *= 1.0 + basalFlare * std::exp(-gt * 16.0);
+        double n = smoothstep01(neckStart, 1.0, gt);
+        return r * (1.0 + neckSwell * n * n);
+    }
+    Vector3d top() const { return pos(grown); }
+};
+
+// Emit the stem as a capsule chain, sampled ADAPTIVELY.
+//
+// Uniform sampling spends links where the stalk is a near-cylinder and starves
+// the two places the radius actually moves -- the basal flare and the neck
+// swelling -- so those bulges banded even at high link counts. Here the links
+// are placed at equal intervals of a cost that mixes arc-length with |dr|/r, so
+// density follows the taper. `sub` is the budget, not a fixed spacing.
+//
+// The colour gradient is also spread across the whole chain (see addSeg), so a
+// stem with distinct base/tip colours ramps once instead of once per link.
+// Emit a grown StemPath. Same adaptive-by-radius-ratio sampling as the analytic
+// version below (see taperSub for why the density is chosen and not guessed).
+inline void emitStemPath(FlowerMesh& m, const StemPath& S, int sub = 200) {
+    if (S.node.size() < 2 || S.len <= 1e-6) return;
+    const int F = 1200;
+    std::vector<double> cost(F + 1, 0.0);
+    for (int i = 1; i <= F; ++i) {
+        double r0 = S.radius(double(i - 1) / F), r1 = S.radius(double(i) / F);
+        double dr = std::abs(std::log(std::max(r1, 1e-6) / std::max(r0, 1e-6)));
+        cost[i] = cost[i - 1] + (1.0 / F) + dr * 2.2;
+    }
+    double total = cost[F];
+    int n = std::max(sub, std::min(600, (int) std::ceil(total / 0.0045)));
+    std::vector<double> ts(n + 1);
+    ts[0] = 0.0; ts[n] = 1.0;
+    int fi = 1;
+    for (int k = 1; k < n; ++k) {
+        double target = total * k / n;
+        while (fi < F && cost[fi] < target) ++fi;
+        ts[k] = double(fi) / F;
+    }
+    int prev = m.addNode(S.pos(ts[0]));
+    for (int k = 1; k <= n; ++k) {
+        int cur = m.addNode(S.pos(ts[k]));
+        m.addSeg(prev, cur, S.radius(0.5 * (ts[k - 1] + ts[k])), ts[k - 1], ts[k]);
+        prev = cur;
+    }
+}
+
+inline void emitStem(FlowerMesh& m, const StemShape& S, int sub = 200) {
+    sub = sub < 2 ? 2 : sub;
+    const double G = std::min(1.0, std::max(0.0, S.grown));
+    if (G < 1e-4) return;
+    // Cost curve over a fine sampling: uniform term + relative radius change.
+    const int F = 2000;
+    std::vector<double> cost(F + 1, 0.0);
+    for (int i = 1; i <= F; ++i) {
+        double t0 = G * double(i - 1) / F, t1 = G * double(i) / F;
+        double r0 = S.radius(t0), r1 = S.radius(t1);
+        double dr = std::abs(std::log(std::max(r1, 1e-6) / std::max(r0, 1e-6)));
+        cost[i] = cost[i - 1] + (1.0 / F) + dr * 2.2;
+    }
+    double total = cost[F];
+    // Give the chain enough links that the busiest stretch stays under the crease
+    // bound, then place them at equal cost.
+    int n = std::max(sub, std::min(600, (int) std::ceil(total / 0.0045)));
+    std::vector<double> ts(n + 1);
+    ts[0] = 0.0; ts[n] = G;
+    int fi = 1;
+    for (int k = 1; k < n; ++k) {
+        double target = total * k / n;
+        while (fi < F && cost[fi] < target) ++fi;
+        ts[k] = G * double(fi) / F;
+    }
+    int prev = m.addNode(S.pos(ts[0]));
+    for (int k = 1; k <= n; ++k) {
+        int cur = m.addNode(S.pos(ts[k]));
+        m.addSeg(prev, cur, S.radius(0.5 * (ts[k - 1] + ts[k])), ts[k - 1], ts[k]);
+        prev = cur;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Sunflower.
 // ---------------------------------------------------------------------------
 // float (not double) fields so the viewer's ImGui sliders can bind to them
@@ -382,29 +699,118 @@ inline void addPetal(FlowerMesh& m, const Vector3d& base, const Vector3d& dir,
     m.blade(base, tip, side.times(width * 0.5), thickness, curl, PRIM_BLADE, 0.0, 1.0, curl, 0.0);
 }
 
-// A lobed chrysanthemum leaf: a short petiole then a central pointed lobe with
-// two pairs of forward-swept side lobes, all coplanar -- the distinctive
-// oak-like chrysanthemum leaf silhouette. `attach` is the point on the stem,
-// `dir` the outward midrib direction, `up` world up (defines the leaf plane
-// with dir). Uses the current mesh group (call with G_LEAF).
+// A chrysanthemum leaf, built to the reference photograph rather than to the
+// idea of "a leaf with teeth":
+//
+//   * BROAD -- nearly as wide as it is long, widest below the middle, with a
+//     blunt rounded tip. (The outline itself is carved by the PRIM_LEAF branch
+//     of sdBlade; this builder just supplies the frame and proportions.)
+//   * SHORT PETIOLE, and a blade that is already wide where it starts, so the
+//     leaf sits close to the stalk instead of on the end of a stick.
+//   * HELD, NOT HANGING -- it leaves the stem angled up and arcs over gently.
+//     A steep arc turns the blade's plane on edge, and edge-on a lobed, cupped
+//     blade reads as a bumpy tube rather than a leaf.
+//   * ROLLED about its own midrib, and UNDULATING -- successive links of the
+//     blade cup in alternating directions, so the margins wave the way the
+//     reference's do instead of lying dead flat. The roll also means a leaf held
+//     near horizontal still shows its face to a camera near eye level.
+//
+// `attach` is the point on the stem, `dir` the outward midrib direction, `up`
+// world up. Uses the current mesh group (call with G_LEAF).
 inline void emitLobedLeaf(FlowerMesh& m, const Vector3d& attach, const Vector3d& dir,
-                          const Vector3d& up, double length, double width, double curl) {
+                          const Vector3d& up, double length, double width, double curl,
+                          double stemRad = 0.0, unsigned salt = 0u) {
     Vector3d d = dir.normalized();
     Vector3d side = d.cross(up);
     if (side.length() < 1e-5) side = d.cross(Vector3d(1, 0, 0));
     side = side.normalized();
-    Vector3d leafN = d.cross(side).normalized();          // leaf-plane normal
-    Vector3d wAx = leafN.cross(d).normalized();           // in-plane width axis
-    if (wAx.length() < 1e-6) wAx = side;
-    // Petiole (thin stalk), then ONE lobed blade: PRIM_LEAF carves pinnate
-    // lobes + marginal teeth into the blade outline in the SDF (see shader.frag
-    // sdBlade `lobe`), so a single primitive reads as a deeply-lobed, serrated
-    // chrysanthemum leaf instead of a coplanar fan of sub-blades (a blob).
-    Vector3d base = attach.plus(d.times(length * 0.14));
-    m.tube(attach, base, width * 0.05, width * 0.04, 2);
-    Vector3d tip = base.plus(d.times(length * 0.86));
-    // latCup 0.28 gives the leaf a shallow central channel; curl droops it.
-    m.blade(base, tip, wAx.times(width * 0.5), width * 0.045, curl, PRIM_LEAF, 0.0, 1.0, 0.28, 0.0);
+
+    std::mt19937 rng(salt * 2654435761u + 17u);
+    std::uniform_real_distribution<double> u(-1.0, 1.0);
+
+    // Petiole thickness is set by the stem it grows from, so the two meet at a
+    // matching diameter and taper away -- a fillet, not a butt joint. Its first
+    // sample starts INSIDE the stem (behind the surface) so there is no seam.
+    double sr   = stemRad > 0.0 ? stemRad : width * 0.055;
+    double petR = sr * 0.50;
+    double ribR = sr * 0.30;                                     // petioles barely taper
+
+    // The petiole lifts away from the stalk, and the blade carries on from where
+    // it ends -- so the leaf is held out and up, not pinned on at right angles.
+    // The caller now hands over a dir that is already pitched up, so the extra
+    // lift here is small -- doubling it up stands the leaf on end.
+    Vector3d liftDir = d.plus(up.times(0.12)).normalized();
+    double   petLen  = length * 0.13;                            // short: the blade sits close in
+    Vector3d bladeBase = attach.plus(liftDir.times(petLen));
+
+    // --- Petiole: sunk into the stem, tapering out. Subdivision comes from the
+    //     radius ratio (taperSub), not a fixed count -- a short stalk narrowing
+    //     2:1 over a handful of links is exactly the case that beads.
+    {
+        Vector3d sunk = attach.minus(d.times(sr * 0.75));        // start inside the stem
+        m.tube(sunk, bladeBase, petR, ribR, taperSub(petR, ribR));
+    }
+
+    // --- Sheathing leaf base: two small blades wrapping the stem at the node, so
+    //     the petiole appears to grow out of the stalk rather than be pinned to
+    //     it. Kept small and pressed against the stalk -- oversized ones read as
+    //     odd green buds. Skipped when there is no stem (isolated leaf harness).
+    if (stemRad > 0.0) {
+        for (int k = -1; k <= 1; k += 2) {
+            Vector3d sd = up.times(0.92).plus(d.times(0.34)).plus(side.times(0.40 * k)).normalized();
+            Vector3d sb = attach.minus(d.times(sr * 0.35)).minus(up.times(sr * 0.55));
+            // Strong negative cup rolls the sheath around the stalk.
+            m.curvedPetal(sb, sd, up, sr * 2.1, sr * 1.5, -0.30, sr * 0.10, PRIM_BLADE, -2.2, 0.25);
+        }
+    }
+
+    // --- Blade: ONE primitive for the whole leaf.
+    //
+    //     A chain of links was tried, to arc the leaf along a Bezier. It works for
+    //     a long narrow blade but not for this one: a chrysanthemum leaf is nearly
+    //     as wide as it is long, so every link is wider than it is long, and the
+    //     union's silhouette is dominated by the links' own straight side edges --
+    //     a row of overlapping ovals instead of a lobed outline. sdBlade shapes the
+    //     outline as a function of the fraction along the WHOLE blade, so the lobes
+    //     only read when one primitive spans the whole thing. The lengthwise arc
+    //     comes from `curl` instead, which bends the surface toward the blade
+    //     normal, and the midrib below is sampled from that same bend.
+    const double thick = width * 0.026;                 // blade half-thickness
+    const double bladeLen = length * 0.86;
+    // Roll the blade about its own midrib. Leaves held near horizontal are
+    // otherwise seen exactly edge-on from a camera near eye level; a little roll
+    // (alternating side to side between leaves) keeps a face turned outward.
+    const double roll = (0.55 + 0.18 * u(rng)) * ((salt & 1u) ? 1.0 : -1.0);
+
+    Vector3d ax = d.normalized();                        // blade axis follows the given dir
+    Vector3d wAx = ax.cross(up);
+    if (wAx.length() < 1e-5) wAx = ax.cross(Vector3d(1, 0, 0));
+    wAx = rotAxis(wAx.normalized(), ax, roll).normalized();
+    Vector3d nrm = ax.cross(wAx).normalized();           // sdBlade's normal axis (points down)
+    // Positive curl bends toward `nrm`, i.e. the tip arcs downward -- a leaf held
+    // out and curving over under its own weight.
+    double curlB = 0.42 + 0.22 * curl + 0.08 * u(rng);
+    double cup   = -0.22;                                // shallow channel along the midrib
+
+    m.blade(bladeBase, bladeBase.plus(ax.times(bladeLen)), wAx.times(width * 0.5),
+            thick, curlB, PRIM_LEAF, 0.0, 1.0, cup, 0.0);
+
+    // --- Midrib: a thin tube tracing the blade's own bent midline (the same
+    //     curl*0.6*L*s^2 sdBlade applies), tucked just under the surface, so the
+    //     petiole carries on into the leaf instead of ending against a bare sheet.
+    //     Sized off the BLADE, not the stem: a rib fatter than the leaf is thick
+    //     rides on top of the surface as a caterpillar.
+    double ribR0 = std::min(ribR, thick * 1.4);
+    const int ribSteps = 5;
+    Vector3d ribPrev = bladeBase;
+    for (int i = 1; i <= ribSteps; ++i) {
+        double s0 = double(i - 1) / ribSteps, s1 = double(i) / ribSteps;
+        double rr0 = ribR0 * (1.0 - 0.82 * s0), rr1 = ribR0 * (1.0 - 0.82 * s1);
+        Vector3d p = bladeBase.plus(ax.times(bladeLen * s1))
+                              .plus(nrm.times(curlB * 0.6 * bladeLen * s1 * s1 + rr1 * 0.6));
+        m.tube(ribPrev, p, rr0, rr1, taperSub(rr0, rr1));
+        ribPrev = p;
+    }
 }
 
 inline FlowerMesh buildSunflower(const SunflowerParams& P) {
@@ -531,11 +937,14 @@ enum ChrysForm { CHRYS_REFLEX = 0, CHRYS_INCURVE = 1, CHRYS_POMPOM = 2,
 
 struct ChrysanthParams {
     int   form        = CHRYS_INCURVE;
-    float stemHeight  = 42.0f;
-    float stemRadius  = 0.7f;
-    float radius      = 11.0f;   // bloom radius
+    float stemHeight  = 52.0f;
+    float stemRadius  = 0.62f;
+    // Bloom radius. A chrysanthemum head is roughly a sixth of the plant's
+    // height, not a third: at 11 on a 42 cm stalk the flower was half the plant
+    // and the leaves looked like a garnish.
+    float radius      = 6.4f;
     int   petalCount  = 0;       // 0 = use the form's tuned default
-    int   stemLeaves  = 3;
+    int   stemLeaves  = 9;
     float growth      = 1.0f;    // 0 = tight bud, 1 = fully open (decorative)
     unsigned seed     = 3;
 };
@@ -549,59 +958,111 @@ struct ChrysanthParams {
 // into a green ovoid (only the petal tips poke out); at growth 1 the target
 // drops to just below the equator so they cradle the underside without ever
 // splaying flat. `centre` is the bloom centre, `up` world up, `R` bloom radius.
-inline void emitInvolucre(FlowerMesh& m, const Vector3d& centre, const Vector3d& up,
-                          double R, double growth, unsigned seed) {
+// `up` here is the HEAD AXIS, not world up, and cupH/crownH are distances along
+// it from the stem tip -- so a nodding flower carries its receptacle and bracts
+// with it instead of leaving them behind, pinned to vertical.
+inline void emitInvolucre(FlowerMesh& m, const Vector3d& stemTop, const Vector3d& up,
+                          double stemR, double cupR, double cupH, double crownH,
+                          double growth, unsigned seed) {
     std::mt19937 rng(seed * 71u + 13u);
     std::uniform_real_distribution<double> u(-1.0, 1.0);
     auto lp = [](double a, double b, double t){ return a + (b - a) * t; };
     double g = std::min(1.0, std::max(0.0, growth));
-    Vector3d apex = centre.minus(up.times(R * 0.34));   // base of the bloom
+    // Radials are taken in the plane perpendicular to the HEAD AXIS, so the cup
+    // stays square to the flower when the head nods rather than shearing.
+    Vector3d BU = up.cross(Vector3d(0, 0, 1));
+    if (BU.length() < 1e-5) BU = up.cross(Vector3d(1, 0, 0));
+    BU = BU.normalized();
+    Vector3d BV = up.cross(BU).normalized();
 
-    // Receptacle: a compact green knob of short scales so the thin stem never
-    // visually disconnects from the wide bloom. Small and tight (not a frill).
-    m.curGroup = G_LEAF;
-    for (int i = 0; i < 20; ++i) {
-        double ang = i * kGoldenAngle;
-        Vector3d radial(std::cos(ang), 0, std::sin(ang));
-        Vector3d dir  = up.times(0.55).plus(radial.times(1.0)).normalized();
-        Vector3d side = dir.cross(up).normalized();
-        Vector3d b    = apex.plus(radial.times(R * 0.05)).plus(up.times(R * 0.03));
-        addPetal(m, b, dir, side, R * 0.12, R * 0.11, 0.05, 0.5);
+    // --- Receptacle: a trumpet that flares the stem out to the width the bloom
+    //     is carried on. This is the piece that was missing: the old receptacle
+    //     was a small knob of scales sitting at the bloom's own centre, so a thin
+    //     stalk ran up and stopped, and the head began somewhere above it. Built
+    //     from the ACTUAL stem top and radius, densely subdivided (the taper is
+    //     steep, and sparse links would crease it into rings).
+    //     The trumpet SCALES WITH GROWTH. Sized only for the open bloom it stays
+    //     a full-width green egg under a bud a fraction of its size -- the head
+    //     has to widen as the flower opens, not spring to final width at growth 0.
+    double neckH = std::max(cupH, cupR * 0.30) * lp(0.55, 1.0, g);
+    const double rimR = cupR * lp(0.26, 0.42, g);      // trumpet mouth
+    m.curGroup = G_STEM;
+    {
+        // The trumpet spans a large radius ratio over a short rise, so it is the
+        // most banding-prone chain in the plant: subdivide it by radius ratio.
+        const int sub = 26;
+        Vector3d prev = stemTop.minus(up.times(neckH * 0.10));   // start below, no seam
+        double   pr   = stemR * 1.02;
+        for (int i = 1; i <= sub; ++i) {
+            double q = double(i) / sub;
+            // Concave flare (q^1.8): hugs the stalk low, opens fast at the mouth.
+            double y = -neckH * 0.10 + neckH * 0.72 * q;
+            double r = stemR * 1.02 + (rimR - stemR * 1.02) * std::pow(q, 1.8);
+            Vector3d p = stemTop.plus(up.times(y));
+            m.tube(prev, p, pr, r, taperSub(pr, r), (i - 1.0) / sub, double(i) / sub);
+            prev = p; pr = r;
+        }
     }
+    Vector3d apex = stemTop.plus(up.times(neckH * 0.62));   // top of the trumpet
 
-    // Involucral bracts: 2 shingled rings (outer ring half-offset & slightly
-    // lower/longer). Convex curl makes each bract follow the bloom's surface.
-    const int rings = 2, per = 16;
+    // --- Involucral bracts: 3 shingled rings rising off the trumpet, aimed at
+    //     the ring where the outermost petals are ROOTED (cupR, cupY) rather than
+    //     at a fixed fraction of the bloom radius. That reach is the whole point:
+    //     stopping short at 0.4R left every petal base hanging in the open under
+    //     the flower -- the ragged bright collar between bloom and stem.
+    m.curGroup = G_LEAF;
+    const int rings = 3, per = 18;
     for (int ring = 0; ring < rings; ++ring) {
+        double rf  = double(ring) / (rings - 1);          // 0 inner .. 1 outer
         double off = (ring & 1) ? M_PI / per : 0.0;
         for (int i = 0; i < per; ++i) {
-            double ang = 2.0 * M_PI * i / per + off + 0.12 * u(rng);
-            Vector3d radial(std::cos(ang), 0, std::sin(ang));
-            Vector3d base = apex.plus(radial.times(R * (0.05 + 0.03 * ring)))
-                                .plus(up.times(R * 0.02));
-            // Target on the bloom surface: (ty = height along up, tr = radial
-            // reach). Open bracts stay SHORT and tucked under the bloom overhang
-            // (small green cup); bud bracts sweep up over the crown to enclose.
-            double ty_o = -R * (0.10 + 0.05 * ring);   // open: at/below the base
-            double tr_o =  R * (0.40 - 0.05 * ring);   // well inside the R overhang
-            // Bud: a rounded green lower cup whose bracts reach up to the bud's
-            // equator (a stable up-and-out aim, not straight up), letting the
-            // furled pink petal knob poke out the top (see buds_ref).
-            double ty_b =  R * (0.08 - 0.05 * ring);
-            double tr_b =  R * (0.40 - 0.04 * ring);
-            double ty   = lp(ty_b, ty_o, g), tr = lp(tr_b, tr_o, g);
-            Vector3d tgt = centre.plus(up.times(ty)).plus(radial.times(tr));
+            double ang = 2.0 * M_PI * i / per + off + 0.10 * u(rng);
+            Vector3d radial = BU.times(std::cos(ang)).plus(BV.times(std::sin(ang)));
+            // Bases climb the trumpet: outer rings start lower and wider.
+            double bq = 0.80 - 0.30 * rf;
+            double baseR = (stemR * 1.02 + (rimR - stemR * 1.02) * std::pow(bq, 1.8)) * 0.85;
+            Vector3d base = stemTop.plus(up.times(neckH * 0.72 * bq))
+                                  .plus(radial.times(baseR));
+            // OPEN: tips reach just under the petal ring -- the outer ring all the
+            // way out to it, inner rings tucked progressively further in, so the
+            // three rings shingle into a closed green underside.
+            // The outer ring reaches slightly PAST the petal-base ring: stopping
+            // exactly on it still showed the bases in silhouette at the widest
+            // azimuths, which is where the bright torn collar was left over.
+            double tr_o = cupR * (0.58 + 0.50 * rf);
+            double ty_o = cupH - cupH * 0.10 * (1.0 - rf);
+            // BUD: the bracts CONVERGE on the axis just over the furled petals,
+            // closing the head into a green ovoid. Aimed wide (a third of the cup)
+            // and high they instead stand off the flower as a ring of vertical
+            // spikes with the petals showing between them -- which is what the
+            // first growth frame used to be.
+            double tr_b = cupR * (0.10 + 0.05 * rf);
+            double ty_b = crownH * (0.88 + 0.08 * rf);
+            double tr = lp(tr_b, tr_o, g), ty = lp(ty_b, ty_o, g);
+            Vector3d tgt = stemTop.plus(up.times(ty)).plus(radial.times(tr));
             Vector3d dir = tgt.minus(base);
-            double len   = dir.length() * lp(1.02, 1.00, g);
+            double len = dir.length() * lp(1.04, 1.02, g);
+            if (len < 1e-5) continue;
             dir = dir.normalized();
-            double wid  = R * lp(0.19, 0.15, g);       // broad, overlapping into a collar
-            // The blade normal (ax x W) of an up-and-out bract points OUTWARD &
-            // DOWN, and +curl bends toward the normal -- so hugging the convex
-            // bloom surface (tips wrapping up & IN over it) needs NEGATIVE curl.
-            // Positive curl here was the old flat-green-skirt bug.
-            double curl = lp(-1.2, -0.7, g);
-            double cup  = lp(-1.5, -0.9, g);           // rolled at bud, shallow cup open
-            m.curvedPetal(base, dir, up, len, wid, curl, wid * 0.10, PRIM_PETAL, cup, 0.0);
+            // Width comes from the ring the bracts EMERGE on, not the ring they
+            // end on. Sized off a converging tip they turn into needles, and a bud
+            // built from needles is a fringe rather than a shell.
+            double ringR = std::max(std::max(baseR, tr), cupR * 0.16);
+            double wid = 2.0 * M_PI * ringR / per * lp(2.30, 1.30, g);
+            // The blade normal (ax x W) of an up-and-out bract points outward and
+            // down, and +curl bends toward that normal -- so following the convex
+            // underside (tips wrapping up & IN) needs NEGATIVE curl. Positive curl
+            // here was the old flat-green-skirt bug.
+            // sdBlade's bend is curl*0.6*L, so a LONG bract swings its tip much
+            // further than a short one for the same curl. Closed-bud bracts are
+            // near-vertical and long, and at the -1.1 the open pose wants, the tip
+            // is thrown a third of the bloom's radius sideways -- the bud came out
+            // as a green starburst. Scale the curl down by the bract's length so
+            // the bend stays a fixed fraction of it.
+            double curlRef = std::max(cupR * 0.55, 1e-3);
+            double curl = lp(-0.9, -0.55, g) * std::min(1.0, curlRef / len);
+            double cup  = lp(-1.5, -0.75, g);
+            m.curvedPetal(base, dir, up, len, wid, curl, wid * 0.09, PRIM_PETAL, cup, 0.12);
         }
     }
 }
@@ -611,38 +1072,117 @@ inline FlowerMesh buildChrysanthemum(const ChrysanthParams& P) {
     std::mt19937 rng(P.seed);
     std::uniform_real_distribution<double> u(-1.0, 1.0);
     const Vector3d up(0, 1, 0);
-    const double R = P.radius;
+    const double Rfull = P.radius;
+    const double g = std::min(1.0, std::max(0.0, (double) P.growth));
+
+    // `growth` drives the WHOLE plant, not just the bloom, and the phases are
+    // SEQUENTIAL: the stalk goes up and its leaves unfurl behind it, and only
+    // once it has reached its height does the head open. Overlapping the two
+    // reads as a flower inflating while it is still being carried upward.
+    const double gStem  = smoothstep01(0.0, 0.62, g);
+    const double gBloom = smoothstep01(0.66, 1.0, g);
+    // The head swells as it opens; a bud is a fraction of the open bloom's size.
+    const double R = Rfull * (0.34 + 0.66 * gBloom);
 
     // ---- shared stem + low leaves ----
+    // The stalk carries a head several times its own diameter, so it is thicker
+    // than a wire, bows under the load, and swells into the receptacle.
+    StemGrowth SG;
+    SG.height = P.stemHeight;
+    SG.grown  = 0.04 + 0.96 * gStem;
+    SG.baseR  = P.stemRadius * 1.35 * (0.45 + 0.55 * gStem);
+    SG.topR   = P.stemRadius * 0.80 * (0.45 + 0.55 * gStem);
+    SG.seed   = P.seed;
+    StemPath S = buildStem(SG);
     m.curGroup = G_STEM;
-    const int stemSub = 30;
-    int prevIdx = m.addNode(Vector3d(0, 0, 0));
-    for (int i = 1; i <= stemSub; ++i) {
-        double t = double(i) / stemSub;
-        Vector3d p(std::sin(t * 3.0) * 0.6 * t, t * P.stemHeight, 0);
-        int idx = m.addNode(p);
-        m.addSeg(prevIdx, idx, P.stemRadius * (1.0 - 0.4 * t));
-        prevIdx = idx;
+    emitStemPath(m, S);
+    Vector3d stemTop = S.top();
+
+    // The head sits on the tip and takes the tip's DIRECTION, so a stalk that
+    // wanders as it grows carries a flower that nods with it -- the head is not
+    // pinned to world up. Blended toward vertical so a heavy bloom still faces
+    // mostly upward however far the tip has leant.
+    Vector3d tipDir = S.dir(1.0);
+    Vector3d N = tipDir.times(0.62).plus(up.times(0.38)).normalized();
+    Vector3d HU = N.cross(Vector3d(0, 0, 1));
+    if (HU.length() < 1e-5) HU = N.cross(Vector3d(1, 0, 0));
+    HU = HU.normalized();
+    Vector3d HV = N.cross(HU).normalized();
+    // Map a direction expressed in the world-Y frame onto the head's frame, so
+    // the bloom builders below can keep working in a canonical upright frame.
+    Vector3d rotAx = up.cross(N);
+    double   rotAng = std::asin(std::min(1.0, rotAx.length()));
+    if (rotAx.length() > 1e-6) rotAx = rotAx.normalized(); else { rotAx = Vector3d(1,0,0); rotAng = 0; }
+    auto toHead = [&](const Vector3d& v) { return rotAng > 1e-6 ? rotAxis(v, rotAx, rotAng) : v; };
+
+    // How high the bloom rides, and the ring its outermost petals are rooted on
+    // (cupR/cupY) -- the involucre aims at that ring, so it closes the underside
+    // whatever shape the form is. A globe form has to sit a full half-radius
+    // clear of the stem top, or the stalk ends up buried in the ball.
+    Vector3d centre;
+    double cupR, cupH, crownH, centreH;
+    switch (P.form) {
+        case CHRYS_DECORATIVE:
+            centreH = R * 0.34; cupR = R * 0.74; cupH = centreH + R * 0.05; break;
+        case CHRYS_QUILL:
+            centreH = R * 0.20; cupR = R * 0.22; cupH = centreH - R * 0.02; break;
+        default:                                    // REFLEX / INCURVE / POMPOM
+            centreH = R * 0.62; cupR = R * 0.50; cupH = centreH - R * 0.30; break;
     }
-    Vector3d centre(0, P.stemHeight + R * 0.3, 0);
+    centre = stemTop.plus(N.times(centreH));
+    // Where the bracts meet when the bud is shut. This has to sit just over the
+    // furled petal knob (which stands about 0.3R above centre in the decorative
+    // form) -- aimed higher, the bracts overshoot the flower entirely and stand
+    // around it as a fringe instead of closing over it.
+    crownH = centreH + R * 0.30;
 
     // Alternate lobed leaves marching up the stem on petioles: larger and more
-    // horizontal low down, smaller and more upright toward the bloom.
+    // horizontal low down, smaller and more upright toward the bloom. Attachment
+    // point, stem direction and stem radius all come from the SAME analytic curve
+    // the stalk was emitted from, so the petiole meets it exactly.
     m.curGroup = G_LEAF;
+    // One leaf per internode JOINT, which is where a leaf actually grows, and
+    // which also makes them appear in step with the stem: a joint only exists
+    // once the internode below it has extended. A leaf then unfurls over the
+    // stretch of growth after its joint appears.
+    const int joints = (int) S.node.size() - 1;      // joint 0 is the ground end
     for (int i = 0; i < P.stemLeaves; ++i) {
-        double t = 0.22 + 0.55 * (P.stemLeaves > 1 ? double(i) / (P.stemLeaves - 1) : 0.0);
-        double ang = i * kGoldenAngle;
-        double pitch = -0.15 - 0.35 * (1.0 - t);     // droop more near the base
+        // Spread the leaves over ALL the joints rather than taking the first few,
+        // which bunched every leaf onto the bottom of the stalk.
+        int ni = 1 + (int) std::llround((joints - 1) * (P.stemLeaves > 1
+                        ? double(i) / (P.stemLeaves - 1) : 0.0));
+        if (ni < 1 || ni >= (int) S.node.size()) continue;
+        double t     = S.len > 1e-6 ? S.arc[ni] / S.len : 0.0;
+        double tFull = t;
+        // How long this joint has existed, in units of the growth timeline.
+        double le = smoothstep01(0.0, 0.16 * S.len,
+                                 S.len - S.arc[ni] > 0 ? S.len - S.arc[ni] : 0.0);
+        double ang = i * kGoldenAngle + 0.15 * u(rng);
+        // Chrysanthemum leaves are held UP and in, closer to the stalk than to the
+        // horizontal -- a positive pitch, not a droop. Splayed out at right angles
+        // (a negative pitch) they read as a fern or a palm. Still varied leaf to
+        // leaf: at one pitch they all sit in a plane and a camera near eye level
+        // catches every one of them edge-on at once.
+        double pitch = 0.62 - 0.26 * tFull + 0.20 * u(rng);
         Vector3d dir = Vector3d(std::cos(ang), pitch, std::sin(ang)).normalized();
-        Vector3d attach(std::sin(t * 3.0) * 0.6 * t, t * P.stemHeight, 0);
-        double leafLen = R * (1.25 - 0.4 * t);
-        emitLobedLeaf(m, attach, dir, up, leafLen, leafLen * 0.8, 0.2);   // broad, fairly flat
+        Vector3d attach = S.pos(t);
+        // Leaf size is set by the PLANT, not by the bloom. Tied to the bloom
+        // radius they shrank with it when the head was scaled down, and a
+        // chrysanthemum's leaves are not a garnish -- the biggest are about a
+        // quarter of the stalk's height.
+        double leafLen = P.stemHeight * (0.27 - 0.09 * tFull) * (1.0 + 0.10 * u(rng))
+                       * (0.16 + 0.84 * le);
+        // Broad: a chrysanthemum leaf is nearly as wide as it is long.
+        emitLobedLeaf(m, attach, dir, up, leafLen, leafLen * 0.70, 0.35,
+                      S.radius(t), P.seed * 101u + (unsigned) i);
     }
 
-    // --- Green involucre (receptacle + calyx bracts) at the stem top ---
-    // A compact cup that hugs the bloom's underside (see emitInvolucre): closes
-    // over the crown at bud, cradles the base when open -- never a flat skirt.
-    emitInvolucre(m, centre, up, R, (double) P.growth, P.seed);
+    // --- Green involucre (receptacle trumpet + calyx bracts) at the stem top ---
+    // Flares the stalk out to the width the bloom is carried on and shingles
+    // bracts up to the petal-base ring: closes over the crown at bud, cradles the
+    // underside when open -- never a flat skirt, never a gap.
+    emitInvolucre(m, stemTop, N, S.radius(1.0), cupR, cupH, crownH,
+                  gBloom, P.seed);
 
     // Emit one curved petal: base->tip carries the arc, width across the
     // azimuthal tangent so petals shingle rather than fan from a point.
@@ -651,23 +1191,26 @@ inline FlowerMesh buildChrysanthemum(const ChrysanthParams& P) {
         Vector3d axis = tip.minus(base);
         if (axis.length() < 1e-6) return;
         axis = axis.normalized();
-        Vector3d side = axis.cross(up);
+        Vector3d side = axis.cross(N);
         if (side.length() < 1e-5) side = axis.cross(Vector3d(1, 0, 0));
         side = side.normalized();
         // Thin petals; cup carried by latCup (=curl) now that curl only bends.
         m.blade(base, tip, side.times(width * 0.5), width * 0.08, curl, prim, 0.0, 1.0, curl, 0.0);
     };
-    // Fibonacci-sphere direction i of n, over the top `cover` fraction.
+    // Fibonacci-sphere direction i of n, over the top `cover` fraction, rotated
+    // into the head's frame so the globe forms nod with the tip too.
     auto sphereDir = [&](int i, int n, double cover) {
         double f = (n > 1) ? double(i) / (n - 1) : 0.0;
         double y = 1.0 - f * (2.0 * cover);
         double rxz = std::sqrt(std::max(0.0, 1.0 - y * y));
         double ang = i * kGoldenAngle;
-        return Vector3d(std::cos(ang) * rxz, y, std::sin(ang) * rxz).normalized();
+        return toHead(Vector3d(std::cos(ang) * rxz, y, std::sin(ang) * rxz).normalized());
     };
+    // The component of d perpendicular to the head axis (was the world-XZ part,
+    // which shears once the head is not vertical).
     auto horiz = [&](const Vector3d& d) {
-        Vector3d h(d.x, 0, d.z);
-        return h.length() < 1e-6 ? Vector3d(1, 0, 0) : h.normalized();
+        Vector3d h = d.minus(N.times(N.times(d)));
+        return h.length() < 1e-6 ? HU : h.normalized();
     };
 
     m.curGroup = G_PETAL;
@@ -787,7 +1330,7 @@ inline FlowerMesh buildChrysanthemum(const ChrysanthParams& P) {
             // pale -> edge saturated (gradient). Outer petals splay out & down,
             // inner ones short & upright -- the "Cheryl Pink" decorative look.
             int n = P.petalCount > 0 ? P.petalCount : 300;
-            double g = std::min(1.0, std::max(0.0, (double) P.growth));
+            const double g = gBloom;   // the head opens on the bloom phase
             auto lerp = [](double a, double b, double t){ return a + (b - a) * t; };
             for (int i = 0; i < n; ++i) {
                 double f = double(i) / n;                        // 0 centre .. 1 rim
@@ -798,8 +1341,13 @@ inline FlowerMesh buildChrysanthemum(const ChrysanthParams& P) {
 
                 // Per-petal opening: outer petals (f->1) open first, centre last.
                 // A wave of `op` sweeping inward as growth `g` rises.
-                double gstart = (1.0 - f) * 0.45;                // rim starts at 0, centre at 0.45
-                double op = (g - gstart) / (1.0 - 0.45);
+                // The opening wave sweeps inward across the WHOLE range: the rim
+                // starts at 0 and the centre only begins at 0.65, so each petal
+                // takes the last 35% to open. Packed into 0..0.45 (as it was), the
+                // bloom reached full width by growth 0.4 and the back half of the
+                // sequence had nothing left to show.
+                double gstart = (1.0 - f) * 0.65;
+                double op = (g - gstart) / 0.35;
                 op = op < 0 ? 0 : (op > 1 ? 1 : op);
                 op = op * op * (3.0 - 2.0 * op);                 // smoothstep
 
@@ -832,11 +1380,29 @@ inline FlowerMesh buildChrysanthemum(const ChrysanthParams& P) {
                 double latCup  = lerp(latCup_b, latCup_o, op);
                 double width   = R * (0.19 + 0.11 * f);
 
-                Vector3d radial(std::cos(ang), 0, std::sin(ang));
-                Vector3d base = centre.plus(radial.times(baseR)).plus(up.times(dome - R * 0.25));
-                Vector3d dir = up.times(1.0 - outMix).plus(radial.times(outMix)).normalized();
-                m.curvedPetal(base, dir, up, len, width, curl, width * 0.06,
-                              PRIM_PETAL, latCup, 0.0);
+                // --- organic wobble ---------------------------------------
+                // A rosette laid out on exact golden-angle spokes with one length
+                // per ring is too regular to read as grown: the rim comes out a
+                // clean circle and the dome a clean paraboloid. Two low-frequency
+                // waves around the head (deliberately non-integer and out of
+                // phase, so they never line up into a symmetry) push each petal's
+                // reach, height and tilt around, and every petal also leans a
+                // little out of its own radial plane.
+                double wob1 = std::sin(ang * 2.7 + 0.9), wob2 = std::sin(ang * 4.3 + 2.4);
+                double wobR = 1.0 + (0.10 * wob1 + 0.05 * wob2) * op;
+                double wobY = (0.055 * wob2 - 0.035 * wob1) * R * op;
+                double lean = (0.10 * wob1 + 0.06 * u(rng)) * op;
+
+                Vector3d radial = HU.times(std::cos(ang)).plus(HV.times(std::sin(ang)));
+                Vector3d tang   = N.cross(radial).normalized();
+                Vector3d base = centre.plus(radial.times(baseR * wobR))
+                                      .plus(N.times(dome - R * 0.25 + wobY));
+                Vector3d dir = N.times(1.0 - outMix)
+                                .plus(radial.times(outMix))
+                                .plus(tang.times(lean))
+                                .normalized();
+                m.curvedPetal(base, dir, N, len * (1.0 + 0.06 * wob2), width, curl,
+                              width * 0.06, PRIM_PETAL, latCup, 0.0);
             }
             // Tight raised central boss of tiny incurved florets (the eye).
             // Hidden while budding (a real bud shows no eye -- only furled petal
@@ -847,9 +1413,9 @@ inline FlowerMesh buildChrysanthemum(const ChrysanthParams& P) {
                 for (int i = 0; i < 70; ++i) {
                     double ang = i * kGoldenAngle;
                     double r = R * 0.14 * std::sqrt(double(i) / 70.0);
-                    Vector3d radial(std::cos(ang), 0, std::sin(ang));
-                    Vector3d base = centre.plus(radial.times(r)).plus(up.times(R * 0.32 * eye));
-                    Vector3d tip = base.plus(up.times(R * 0.12 * eye)).minus(radial.times(R * 0.03));
+                    Vector3d radial = HU.times(std::cos(ang)).plus(HV.times(std::sin(ang)));
+                    Vector3d base = centre.plus(radial.times(r)).plus(N.times(R * 0.32 * eye));
+                    Vector3d tip = base.plus(N.times(R * 0.12 * eye)).minus(radial.times(R * 0.03));
                     petalTo(base, tip, R * 0.07 * (0.4 + 0.6 * eye), 0.9, PRIM_PETAL);
                 }
             }

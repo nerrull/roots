@@ -201,6 +201,108 @@ static float G_SchlickGGX(float NdotX, float k) {
 static float3 F_Schlick(float cosTheta, float3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
+// --- surface detail ---------------------------------------------------------
+// A root is not a tube. It is a bundle of fibres running lengthwise, and the
+// single thing that most makes these capsules read as extruded plastic is that
+// their surface is perfectly, uniformly smooth: a swept cylinder with a constant
+// albedo gives one broad even highlight down its whole length, which is exactly
+// what moulded plastic looks like and exactly what nothing organic looks like.
+//
+// The fix is anisotropic. Sampling isotropic noise would give the roots a
+// gravelly, sandpapered look -- detail with no direction, which reads as dirt on
+// the surface rather than as structure of it. Compressing the sample
+// coordinate's axial component makes the field vary slowly along the root and
+// quickly around it, so the features come out as fibres running the length of
+// the root, which is what the eye is looking for.
+static float detailField(float3 x, float3 ax, float scale, float stretch,
+                         texture3d<float> tex, sampler smp) {
+    const float axial = dot(x, ax);
+    const float3 perp = x - ax * axial;
+    const float3 q = perp * scale + ax * (axial * scale / max(stretch, 1e-3));
+    return tex.sample(smp, q * (1.0 / ROOT_NOISE_TILE_PERIOD)).r;
+}
+
+// Gradient of that field, projected into the surface, applied to the normal.
+// Returns the field value too, since the shading also wants it for the
+// roughness break-up and paying for a fifth fetch to get it again is silly.
+static float3 detailNormal(float3 p, float3 n, float3 ax, float scale, float stretch,
+                           float strength, texture3d<float> tex, sampler smp,
+                           thread float& fieldOut) {
+    const float f0 = detailField(p, ax, scale, stretch, tex, smp);
+    fieldOut = f0;
+    if (strength <= 0.0) return n;
+    // One noise cell across, so the difference is a real slope and not the
+    // aliased leftovers of one sampled far finer than the lattice.
+    const float e = 1.0 / max(scale, 1e-3);
+    const float3 g = float3(
+        detailField(p + float3(e, 0, 0), ax, scale, stretch, tex, smp) - f0,
+        detailField(p + float3(0, e, 0), ax, scale, stretch, tex, smp) - f0,
+        detailField(p + float3(0, 0, e), ax, scale, stretch, tex, smp) - f0) / e;
+    // Only the in-surface component tilts the normal; the along-normal part
+    // would just rescale it.
+    const float3 gt = g - n * dot(g, n);
+    return normalize(n - gt * strength);
+}
+
+// Per-segment tint jitter. Without it every root in a group carries exactly the
+// same albedo, and a hundred identical objects is a strong cue that they were
+// generated rather than grown -- the world-space colour noise cannot supply this
+// because it is continuous, so two roots crossing at a point get the same value.
+static float3 segmentTint(int si, float amount) {
+    uint h = uint(si) * 2654435761u;
+    h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+    const float r0 = float(h & 0xFFFFu) / 65535.0;
+    const float r1 = float((h >> 16) & 0xFFFFu) / 65535.0;
+    // Brightness carries most of it; a small warm/cool lean stops the variation
+    // from reading as a single dimmer being turned up and down.
+    return float3(1.0 + (r0 - 0.5) * 2.0 * amount,
+                  1.0 + (r0 - 0.5) * 2.0 * amount * 0.85,
+                  1.0 + (r0 - 0.5) * 2.0 * amount * 0.65)
+         * (1.0 + (r1 - 0.5) * amount * 0.35);
+}
+
+// --- environment ------------------------------------------------------------
+// A two-colour hemisphere in place of an environment probe. This is the single
+// cheapest thing that stops a surface reading as plastic: a constant ambient
+// term lights every facing equally, so the unlit side of a tube is a flat patch
+// of colour and the eye gets no shape information from it at all. Keying the
+// ambient on n.y gives the underside a different colour from the top, which is
+// what every real outdoor surface does.
+static float3 hemiAmbient(float3 n, float3 sky, float3 ground) {
+    return mix(ground, sky, n.y * 0.5 + 0.5);
+}
+
+// Roughness-blurred sky reflection. Not a real prefiltered probe -- there is no
+// probe -- but the reflection vector still picks up the sky/ground split, and
+// with a Fresnel in front of it that is enough to read as a glancing sheen
+// rather than as a single hard highlight dot.
+static float3 envSpecular(float3 n, float3 V, float roughness, float3 sky, float3 ground) {
+    const float3 R = reflect(-V, n);
+    // Pull the reflection towards the normal as roughness rises: a rough surface
+    // gathers from a wide cone, and the cone's mean sits between R and N.
+    const float3 Rr = normalize(mix(R, n, roughness * roughness));
+    return hemiAmbient(Rr, sky, ground);
+}
+
+// Wrapped diffuse plus back-lit transmission. Roots and leaves are thin, damp
+// and translucent; a Lambert term terminates at NdotL = 0 with a hard line,
+// which is exactly the edge the scene is trying to lose. Wrapping pushes the
+// terminator around the tube, and the transmission lobe puts light through the
+// far side when the camera is looking towards the source.
+static float3 organicDiffuse(float3 N, float3 V, float3 L, float3 albedo,
+                             float wrap, float trans, float power, float3 tint) {
+    const float w = max(wrap, 0.0);
+    const float wrapped = max((dot(N, L) + w) / ((1.0 + w) * (1.0 + w)), 0.0);
+    float3 c = albedo * wrapped;
+    if (trans > 0.0) {
+        // Light leaving the surface roughly opposite the incoming direction,
+        // seen when V looks back along it.
+        const float back = pow(saturate(dot(V, -L)), max(power, 1.0));
+        c += albedo * tint * (back * trans);
+    }
+    return c;
+}
+
 static float3 pbrBRDF(float3 N, float3 V, float3 L, float3 albedo, float metallic, float roughness) {
     float NdotL = max(dot(N, L), 0.0);
     if (NdotL < 0.0001) return float3(0.0);
@@ -254,6 +356,7 @@ fragment GeomFOut root_geom_fs(GeomVOut in [[stage_in]],
 
     float3 p, n;
     float  gradT = 0.0;
+    float3 axis  = normalize(b - a);   // the direction the surface detail runs
     if (prim == 0) {
         float hit = rayCapsule(ro, rd, a, b, r);
         if (hit < 0.0 || hit > MAX_DIST) discard_fragment();
@@ -311,7 +414,9 @@ fragment GeomFOut root_geom_fs(GeomVOut in [[stage_in]],
     if (U.shaderMode == 2) {
         // Invert/XOR silhouette has no Metal fragment-logic-op equivalent; the
         // best faithful stand-in is a flat white silhouette (nearest-depth wins).
-        fo.color = float4(1.0, 1.0, 1.0, 1.0);
+        // Alpha 0: the silhouette carries no environment term, so there is no
+        // ambient share for the AO to attenuate.
+        fo.color = float4(1.0, 1.0, 1.0, 0.0);
         return fo;
     }
 
@@ -324,13 +429,51 @@ fragment GeomFOut root_geom_fs(GeomVOut in [[stage_in]],
     }
     float cn = rfbm(p * U.colorNoiseScale, noiseTex, noiseSmp);
     float3 albedo = mix(bc, bc2, smoothstep(0.3, 0.7, cn) * U.colorNoiseStrength);
+    if (U.detailTint > 0.0) albedo *= segmentTint(si, U.detailTint);
+
+    // Fibre detail: tilt the normal and record the field for the break-up below.
+    float detail = 0.5;
+    if (U.detailStrength > 0.0 || U.detailRough > 0.0)
+        n = detailNormal(p, n, axis, U.detailScale, U.detailStretch,
+                         U.detailStrength, noiseTex, noiseSmp, detail);
+
+    // Fibres also catch the light unevenly along their length. Modulating the
+    // specular response by the same field is what turns one continuous highlight
+    // running the length of a root into a broken, strand-wise one -- and an
+    // unbroken specular band down a cylinder is most of what "plastic" means.
+    const float detailSpec = 1.0 + (detail - 0.5) * 2.0 * U.detailRough;
+    // Darken where the fibres dip. A crevice is shaded by its own walls, which
+    // nothing else in this shader accounts for at this scale.
+    albedo *= 1.0 - U.detailRough * 0.35 * (1.0 - detail);
+
+    // The indirect (environment) contribution, kept separate from the direct
+    // light so the fog pass can attenuate it by the screen-space AO without
+    // also darkening the key light -- occlusion occludes the sky, not the sun.
+    const float3 sky = U.skyColor.xyz, ground = U.groundColor.xyz;
+    float3 indirect = albedo * U.ambient;
+    if (U.hemiStrength > 0.0)
+        indirect += albedo * hemiAmbient(n, sky, ground) * U.hemiStrength;
+    if (U.envSpec > 0.0) {
+        const float NdotV = max(dot(n, V), 0.0);
+        const float rough = (U.shaderMode == 1) ? U.roughness : 0.5;
+        const float3 F0 = mix(float3(0.04), albedo, (U.shaderMode == 1) ? U.metallic : 0.0);
+        indirect += envSpecular(n, V, rough, sky, ground)
+                  * F_Schlick(NdotV, F0) * U.envSpec * (1.0 - rough * 0.8);
+    }
+    if (U.rimStrength > 0.0) {
+        const float rim = pow(1.0 - max(dot(n, V), 0.0), 3.0);
+        indirect += sky * (rim * U.rimStrength);
+    }
 
     float3 color;
     if (U.shaderMode == 0) {
-        float diff = max(dot(n, U.lightDir.xyz), 0.0);
         float3 h = normalize(U.lightDir.xyz + V);
         float spec = pow(max(dot(n, h), 0.0), U.shininess);
-        color = albedo * (U.ambient + U.diffuse * diff) + U.specColor.xyz * spec;
+        color = indirect
+              + U.keyColor.xyz * U.diffuse
+                * organicDiffuse(n, V, U.lightDir.xyz, albedo,
+                                 U.sssWrap, U.sssTrans, U.sssPower, U.sssTint.xyz)
+              + U.keyColor.xyz * U.specColor.xyz * (spec * detailSpec);
 
         const float WISP_CUTOFF2 = 400.0;
         for (int wi = 0; wi < U.wispCount; wi++) {
@@ -345,8 +488,22 @@ fragment GeomFOut root_geom_fs(GeomVOut in [[stage_in]],
             color += att * wisps[wi].color.xyz * (albedo * U.diffuse * wd + U.specColor.xyz * ws);
         }
     } else {
-        color = albedo * U.ambient;
-        color += pbrBRDF(n, V, U.lightDir.xyz, albedo, U.metallic, U.roughness);
+        color = indirect;
+        // The fibre field varies the finish as well as the form: a raised fibre
+        // is polished by whatever the root grew against, a groove is not.
+        const float rough = clamp(U.roughness * (2.0 - detailSpec), 0.04, 1.0);
+        color += U.keyColor.xyz
+               * pbrBRDF(n, V, U.lightDir.xyz, albedo, U.metallic, rough);
+        // The BRDF's own NdotL already terminated at the horizon; the wrap and
+        // transmission are added on top as the part of the response a
+        // single-scatter microfacet model does not have.
+        if (U.sssWrap > 0.0 || U.sssTrans > 0.0) {
+            const float3 lam = albedo * max(dot(n, U.lightDir.xyz), 0.0);
+            const float3 org = organicDiffuse(n, V, U.lightDir.xyz, albedo,
+                                              U.sssWrap, U.sssTrans, U.sssPower,
+                                              U.sssTint.xyz);
+            color += U.keyColor.xyz * max(org - lam, 0.0) * (1.0 - U.metallic) * (1.0 / PI);
+        }
 
         const float WISP_CUTOFF2 = 400.0;
         for (int wi = 0; wi < U.wispCount; wi++) {
@@ -377,6 +534,15 @@ fragment GeomFOut root_geom_fs(GeomVOut in [[stage_in]],
         color += U.pulseColor.xyz * (band * U.pulseIntensity);
     }
 
-    fo.color = float4(color, 1.0);
+    // Alpha carries the fraction of this pixel's radiance that came from the
+    // environment rather than from a light. The fog pass multiplies exactly
+    // that share by the screen-space AO, so occlusion darkens the sky term and
+    // leaves the key light and the pulses alone -- which is the difference
+    // between AO that grounds the geometry and AO that just looks like dirt.
+    // One spare channel in an attachment we already pay for, instead of a
+    // second render target on the pass that can least afford one.
+    const float lumT = dot(color,    float3(0.2126, 0.7152, 0.0722));
+    const float lumI = dot(indirect, float3(0.2126, 0.7152, 0.0722));
+    fo.color = float4(color, saturate(lumI / max(lumT, 1e-5)));
     return fo;
 }

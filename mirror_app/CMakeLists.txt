@@ -50,7 +50,13 @@ add_executable(mirror_app
     src/text_sdf.cpp
     src/text_overlay.mm
     src/fullscreen_present.mm)
-target_include_directories(mirror_app PRIVATE src)
+# ../sdf_viewer for LeafMesh.h (the leaf triangulation is renderer-agnostic C++
+# and lives with the rest of the flower code); ../wwise_plugins/mi_common for the
+# OnsetTap shared-memory layout -- header-only, and deliberately the *same*
+# header the plug-in writes through, so the two cannot drift apart on it.
+target_include_directories(mirror_app PRIVATE src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../sdf_viewer
+    ${CMAKE_CURRENT_SOURCE_DIR}/../wwise_plugins/mi_common)
 target_link_libraries(mirror_app PRIVATE mirror_imgui glfw
     "-framework Metal" "-framework MetalKit" "-framework QuartzCore"
     "-framework CoreMIDI"
@@ -94,6 +100,7 @@ add_library(mirror_core STATIC
     src/mirror_render.cpp
     src/screen_layout.cpp
     src/show_timeline.cpp
+    src/drop_spawner.cpp
     src/pond_state.cpp)
 target_include_directories(mirror_core PUBLIC src ${MLX_INCLUDE_DIRS})
 # external/ is gitignored: face_basis.bin and the MediaPipe dylib are both
@@ -191,6 +198,18 @@ target_link_libraries(pond_parity_test PRIVATE mirror_core)
 # device but no fixtures, so unlike the two above it runs without a dump step.
 add_executable(ripple_parity_test tests/ripple_parity_test.cpp)
 target_link_libraries(ripple_parity_test PRIVATE mirror_core)
+
+# Raindrops: one impact spreading outward, landing somewhere new each time.
+add_executable(drop_test tests/drop_test.cpp)
+target_link_libraries(drop_test PRIVATE mirror_core)
+
+# The join between the Wwise onset tap and the drops: plays the plug-in's part
+# through the same shared-memory header the plug-in writes through, so it needs
+# no Wwise install and no running sound engine.
+add_executable(audio_drops_test tests/audio_drops_test.cpp)
+target_link_libraries(audio_drops_test PRIVATE mirror_core)
+target_include_directories(audio_drops_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../wwise_plugins/mi_common)
 
 # --- subsystems (wired in as they land) --------------------------------------
 # TODO(tracking): prebuilt libmediapipe .dylib for face_tracker.

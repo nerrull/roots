@@ -22,9 +22,33 @@ namespace mx = mlx::core;
 // sin_field, cos_field, z_cos, spare.
 inline constexpr int ENRICHED_DIM = 8;
 
-// A ripple source: (cx, cy, phase, amp). Center, outward phase (ramp to animate
-// propagation), and 0..1 amplitude envelope.
-using RippleSource = std::array<float, 4>;
+// A ripple source: (cx, cy, phase, amp, packet width). Center, outward phase
+// (ramp to animate propagation), 0..1 amplitude envelope, and how wide a train
+// its rings are confined to.
+//
+// The packet width is what turns a source from a standing ring field into one
+// impact. At 0 the source is the original field: it oscillates over its whole
+// exp(-decay*r) reach at once, so the rings travel but the *envelope* does not
+// and the source can only be brought in and out by modulating its amplitude --
+// the whole field breathing in place, which is nothing like water. Above 0 the
+// rings are confined to a Gaussian train riding the wavefront, and the source
+// reads as a single impact spreading outward and leaving flat water behind it.
+//
+// The wavefront radius is not a separate number: it is phase/k, i.e. exactly
+// where this source's own crests have reached. Deriving it is what keeps the
+// envelope and the oscillation from drifting apart -- a packet whose centre and
+// crests disagree looks like a window sliding over a static wave.
+//
+// Per source rather than one global width because the drops are not
+// interchangeable: a hard transient should land as a wide splash next to a
+// tick's tight ring, and the orbiting source stays a standing field (width 0)
+// in the same frame.
+using RippleSource = std::array<float, 5>;
+inline constexpr int RIPPLE_SRC_DIM = 5;
+
+// How much a packet lengthens per unit of travel. Real ripples disperse, and a
+// packet of fixed width instead reads as a hard ring sliding outward.
+inline constexpr float kDropSpread = 0.5f;
 
 // Where the network is being supervised, in coord space, and how sharply that
 // gives way to the untrained field around it.

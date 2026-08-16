@@ -85,7 +85,12 @@ struct TextRipple {
     float decay = 1.8f;
     float core_r2 = 0.f;   // core_radius^2, or 0 with the rolloff off
     int   n = 0;           // active sources
-    float src[16][4] = {}; // cx, cy, phase, amp
+    // cx, cy, phase, amp, packet width -- RippleSource, laid out plainly so this
+    // header does not have to pull in MLX. The width matters here for the same
+    // reason the rest of this struct does: the text refracts through the field
+    // the feature kernel builds, and a source the kernel has confined to a
+    // travelling ring train would otherwise still bend the text everywhere.
+    float src[16][5] = {};
 };
 
 // Matches TextU in present.metal. Packed as float4s so the C and MSL layouts
@@ -96,7 +101,11 @@ struct TextUniforms {
     simd::float4 tune2 = {0, 3, 1.8f, 0};// warp, k, decay, core_r2
     simd::float4 cnt   = {0, 0, 0, 1};   // source count, enabled, time, reveal
     simd::float4 diss  = {0, 6, 0, 0};   // turbulence, turb scale, turb speed, -
-    simd::float4 src[16] = {};
+    simd::float4 src[16] = {};           // cx, cy, phase, amp
+    simd::float4 wid[16] = {};           // packet width in .x; a float4 per
+                                         // source so the MSL side never has to
+                                         // index a vector by a runtime value
+
 };
 
 class TextOverlay {

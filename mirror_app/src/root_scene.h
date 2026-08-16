@@ -13,6 +13,7 @@
 #include "root_sim.h"
 #include "root_sim.h"
 
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -118,14 +119,39 @@ public:
 
     bool  showFace  = true;
     float faceScale = 0.85f;
+    // How deep the face sits inside its cavity, in multiples of the cavity's
+    // half-depth along the mask normal. The roots dwell around the cavity, so
+    // the further back the face sits the more of it the nest closes over; 0
+    // centres it on the cavity and a negative value pushes it proud of the
+    // surface. 0.5 is the original placement.
+    float faceRecess = 0.5f;
     int   simStepsPerFrame = 2;   // growth steps advanced per rendered frame
 
     // Camera / lighting (mirrors mask_relay_gui's controls).
     float azimuth   = 0.6f;
     float elevation = 0.35f;
     float radius    = 42.0f;
+    // Field of view. Held as a focal length because that is the number that
+    // means something: "17.5 mm" says wide-angle to anyone who has held a
+    // camera, where "0.6 radians of vertical half-angle" says nothing. The
+    // sensor is 35 mm full frame (24 mm tall, so 12 mm half-height), and
+    // fov = atan(12 / focal). The raw angle is still there for when a specific
+    // one is wanted.
+    static constexpr float kSensorHalfMM = 12.0f;
+    float focalMM   = 17.5f;   // == the old fov of 0.6 rad, to the pixel
+    bool  useFocal  = true;
     float fov       = 0.6f;
-    float target[3] = {0.f, 8.f, 0.f};
+    float effectiveFov() const {
+        return useFocal ? std::atan(kSensorHalfMM / std::max(focalMM, 1.0f)) : fov;
+    }
+    // A short lens with the barrel distortion a short lens actually has. Without
+    // the distortion, shortening the focal length only widens a rectilinear
+    // crop, which reads as stepping backwards rather than as changing lens.
+    void setWideAngle(bool on);
+    // Negative Y: the system hangs below the seed at the origin. autoFrame
+    // replaces this from the geometry's own bounds every advance(); it is the
+    // starting frame for the first render and for the fixed-camera shot paths.
+    float target[3] = {0.f, -8.f, 0.f};
     float lightDir[3] = {0.4f, 0.8f, 0.35f};
     bool  autoOrbit = true;
     float orbitRate = 0.15f;   // rad/s

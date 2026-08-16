@@ -36,7 +36,14 @@ struct TextU {
     float4 cnt;      // source count, enabled, time, reveal
     float4 diss;     // turbulence, turb scale, turb speed, unused
     float4 src[16];  // cx, cy, phase, amp
+    float4 wid[16];  // drop-packet width in .x (0 = a standing field)
 };
+
+// How much a drop's ring train lengthens per unit travelled. Must match
+// kDropSpread in mirror_render.h -- the text bends by the gradient of the same
+// field the feature kernel builds, and two spread rates would bend it by the
+// gradient of a field that is not on screen.
+constant float kDropSpread = 0.5;
 
 // --- turbulence for the dissolve ---------------------------------------------
 // Value noise rather than anything fancier: it is sampled once per fragment and
@@ -105,7 +112,14 @@ fragment float4 present_fs(VOut in [[stage_in]],
             const float dy = p.y - S.y;
             const float ri = sqrt(dx * dx + dy * dy + 1e-6);
             const float r2 = ri * ri;
-            const float a = S.w * exp(-decay * ri) * (r2 / (r2 + core_r2));
+            float a = S.w * exp(-decay * ri) * (r2 / (r2 + core_r2));
+            const float pkw = t.wid[s].x;
+            if (pkw > 0.0) {
+                const float rf = S.z / k;                  // wavefront radius
+                const float pw = pkw * (1.0 + kDropSpread * rf);
+                const float u = (ri - rf) / pw;
+                a *= exp(-0.5 * u * u);
+            }
             const float slope = a * cos(k * ri - S.z) / ri;
             gx += slope * dx;
             gy += slope * dy;

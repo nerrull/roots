@@ -1,5 +1,6 @@
 #include "mirror_render.h"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -87,10 +88,11 @@ const char* kRippleSrc = R"MSL(
 
     #pragma unroll
     for (uint s = 0; s < NSRC; ++s) {
-        const float cx  = src[4 * s + 0];
-        const float cy  = src[4 * s + 1];
-        const float ph  = src[4 * s + 2];
-        const float amp = src[4 * s + 3];
+        const float cx  = src[SRCDIM * s + 0];
+        const float cy  = src[SRCDIM * s + 1];
+        const float ph  = src[SRCDIM * s + 2];
+        const float amp = src[SRCDIM * s + 3];
+        const float pkw = src[SRCDIM * s + 4];
 
         const float dx = x - cx;
         const float dy = y - cy;
@@ -101,7 +103,18 @@ const char* kRippleSrc = R"MSL(
 
         // With core_r2 == 0 this factor is exactly 1, so one kernel serves both
         // the rolloff-on and rolloff-off settings without a branch.
-        const float a = amp * exp(-decay * ri) * (r2 / (r2 + core_r2));
+        float a = amp * exp(-decay * ri) * (r2 / (r2 + core_r2));
+
+        // Drop packet: confine this source's rings to a train riding its own
+        // wavefront, at phase/k -- see RippleSource in mirror_render.h. At width
+        // 0 the factor is skipped entirely and the source is the standing field
+        // it always was.
+        if (pkw > 0.0f) {
+            const float rf = ph / k;
+            const float pw = pkw * (1.0f + SPREAD * rf);
+            const float u = (ri - rf) / pw;
+            a *= exp(-0.5f * u * u);
+        }
 
         const float ang = k * ri - ph;
         const float c = cos(ang);
@@ -137,10 +150,16 @@ const char* kRippleSrc = R"MSL(
 )MSL";
 
 const mx::fast::CustomKernelFunction& ripple_kernel() {
+    // The packet's spread rate reaches the kernel as a #define rather than as a
+    // literal, so the kernel, the op graph and the present shader cannot fall
+    // out of step over a number the parity test would then have to chase.
+    static const std::string header =
+        "#define SPREAD " + std::to_string(kDropSpread) + "f\n"
+        "#define SRCDIM " + std::to_string(RIPPLE_SRC_DIM) + "\n";
     static mx::fast::CustomKernelFunction fn = mx::fast::metal_kernel(
         "ripple_features", {"coords", "src", "scal", "nrows", "field"},
         {"out", "regw"},
-        kRippleSrc, /*header=*/"", /*ensure_row_contiguous=*/true);
+        kRippleSrc, header, /*ensure_row_contiguous=*/true);
     return fn;
 }
 
@@ -214,11 +233,11 @@ std::vector<mx::array> multi_ripple_features_region(
     // Falling back to the op-graph path here instead would have quietly made
     // the slow path the common one: measured 20.4 ms vs 16.3 ms per frame.
     std::vector<float> src_flat;
-    src_flat.reserve(static_cast<size_t>(nsrc) * 4);
+    src_flat.reserve(static_cast<size_t>(nsrc) * RIPPLE_SRC_DIM);
     for (const auto& s : sources) src_flat.insert(src_flat.end(), s.begin(), s.end());
-    if (src_flat.empty()) src_flat.assign(4, 0.f);
+    if (src_flat.empty()) src_flat.assign(RIPPLE_SRC_DIM, 0.f);
     auto src = mx::array(src_flat.data(),
-                         {nsrc > 0 ? nsrc : 1, 4}, mx::float32);
+                         {nsrc > 0 ? nsrc : 1, RIPPLE_SRC_DIM}, mx::float32);
 
     // A field is only sampled when one was actually supplied: a region claiming
     // field mode with nothing bound would read a dummy buffer and fade the
@@ -296,7 +315,7 @@ mx::array multi_ripple_features_ops(const mx::array& coords_in,
     auto gx = mx::zeros({n, 1}, mx::float32);
     auto gy = mx::zeros({n, 1}, mx::float32);
     for (const auto& s : sources) {
-        const float cx = s[0], cy = s[1], phase = s[2], amp = s[3];
+        const float cx = s[0], cy = s[1], phase = s[2], amp = s[3], pkw = s[4];
         auto dx = mx::subtract(x, S(cx));
         auto dy = mx::subtract(y, S(cy));
         auto ri = mx::sqrt(mx::add(mx::add(mx::multiply(dx, dx), mx::multiply(dy, dy)),
@@ -305,6 +324,12 @@ mx::array multi_ripple_features_ops(const mx::array& coords_in,
         if (core_radius != 0.f) {                     // fade the singular high-freq core
             auto r2 = mx::multiply(ri, ri);
             a = mx::multiply(a, mx::divide(r2, mx::add(r2, S(core_radius * core_radius))));
+        }
+        if (pkw > 0.f) {                              // ride the wavefront
+            const float rf = phase / k;
+            const float pw = pkw * (1.f + kDropSpread * rf);
+            auto u = mx::divide(mx::subtract(ri, S(rf)), S(pw));
+            a = mx::multiply(a, mx::exp(mx::multiply(S(-0.5f), mx::multiply(u, u))));
         }
         auto ang = mx::subtract(mx::multiply(S(k), ri), S(phase));
         auto c = mx::cos(ang);

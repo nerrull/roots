@@ -80,10 +80,52 @@ docking`) — that is where viewports live.
 Headless checks: `mirror_app --selftest` (MLX→texture path), `mirror_app
 --roottest` (root MSL compile + render + readback), `mirror_app --rootshot
 <out.ppm> [az el radius mode overlays]` (render the root scene to an image),
-`mirror_app --growshot <out.ppm> [steps az el radius]` (step the live CPlantBox
-growth then render), and `mlp_parity_test mirror_app/tests/fixtures` (MLP vs
-Python reference).
+`mirror_app --growshot <out.ppm> [steps az el radius faceScale targetY faceRecess]`
+(step the live CPlantBox growth then render), `mirror_app --taptest [tapId]
+[seconds]` (list the Wwise onset taps that are publishing, watch one, and print
+the hits it delivers -- the way to tell a missing plug-in from a wrong Tap ID
+from a threshold nothing clears), and `mlp_parity_test mirror_app/tests/fixtures`
+(MLP vs Python reference).
 Regenerate the pond weights with `assets/gen_pond_weights.py` (needs neuromirror's venv).
+
+## Raindrops, and driving them from audio
+
+A drop is one impact, not a slot in a periodic table: it lands, its rings ride
+outward on their own wavefront, and it is retired once they leave the frame
+(`src/drop_spawner.h`, `src/mirror_render.h`). Two things spawn them, and the
+split is the point of the design:
+
+- **the schedule** — `rate` drops per second with `rate jitter` deciding how
+  regular that is: 0 is a metronome, 1 is a Poisson process (gaps that cluster,
+  the way rain actually arrives), in between blends the two. Size, strength and
+  spread each have their own jitter, so no two drops read as the same event.
+- **`Pond::triggerDrop(strength, pan)`** — one hit, now, because something
+  outside said so. The **drop one** button in the panel is this, and so is every
+  audio onset.
+
+### Audio onsets
+
+The **Onset Tap** Wwise effect (`../wwise_plugins/OnsetTap`) detects transients
+on whatever bus it is inserted on and publishes them to shared memory; this app
+reads that stream (`src/audio_pulse.h`) once per frame and spawns a drop per
+hit. Nothing is polled from the audio itself — the detection happens on the
+audio thread, where the transients are, and only the conclusion crosses over.
+See the plug-in's section in `../wwise_plugins/README.md` for why the threshold
+adapts and how to set it.
+
+To use it: add **Onset Tap** to a bus in Wwise, give it a **Tap ID** and a
+**Name**, then pick it in the panel under **mirror > rain from audio**. The
+panel shows the tap's live level against the rise it currently has to clear,
+which is how you tell "nothing is playing" from "the threshold is too high" —
+they are otherwise the same silence.
+
+Three sliders decide how much of a drop the hit gets to choose: **hit ->
+strength**, **hit -> size**, **hit -> position** (from the hit's stereo
+balance). At 0 across the board the audio only decides *when*, which is a real
+setting — a steady shower on the beat. `audio_drops_test` covers the whole path
+from a published event to a source on the water, playing the plug-in's part
+through the same header the plug-in writes through, so it needs no Wwise
+install.
 
 ## Root render performance
 

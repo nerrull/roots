@@ -14,8 +14,20 @@ using namespace maskcav;
 
 namespace rootsim {
 
-// CPlantBox grow space -> render space (matches render_relay_gui.cpp::toYup).
-static Vector3d toYup(const Vector3d& v) { return Vector3d(v.x, -v.z, v.y); }
+// CPlantBox grow space -> render space (Y-up).
+//
+// CPlantBox grows roots toward -z, so grow -z is "down" and the mask cone hangs
+// from an apex at z=0 down to its wide base at z=-height. This maps grow -z to
+// render -y, which puts the roots below the seed and the cone's wide base at the
+// bottom of the frame -- which is what a root system looks like.
+//
+// render_relay_gui.cpp's version of this maps grow -z to render +y instead, and
+// looks right there only because its blit flips the image vertically on the way
+// to the screen ("1.0 - v_uv.y" in blitFS). Copying it here, where nothing
+// flips, grew the whole system upward. Note this is a rotation about x and not
+// the axis swap (x, z, y): the swap has determinant -1, and mirroring a scene
+// whose subject is human faces is not a free choice.
+static Vector3d toYup(const Vector3d& v) { return Vector3d(v.x, v.z, -v.y); }
 
 static double minDist(const std::vector<Vector3d>& nodes, const Vector3d& p) {
     double best = std::numeric_limits<double>::max();
@@ -96,21 +108,14 @@ struct RootSim::Impl {
 
     void pushRevealedRender(const MaskNode& m) {
         Vector3d pos = toYup(m.pos), n = toYup(m.normal);
-        // Rotate the frame 180 degrees about the normal.
-        //
-        // MaskCavities builds the cone in CPlantBox's grow space, where the
-        // cone hangs *downward* from a seed at z=0: the tip is at z=0 and the
-        // wide base at z=-height. Its bitangent is "up the surface" in that
-        // space, meaning toward the tip. toYup maps grow -z to render +y, so
-        // the wide base ends up at the top of the render and the bitangent --
-        // still pointing at the tip -- ends up pointing at the floor.
-        //
-        // Placing a face along that frame put every head upside down. Negating
-        // the bitangent alone would fix the head and mirror the face, because
-        // it flips the frame's handedness; negating the tangent with it is a
-        // rotation, which is what this actually is.
-        Vector3d t = toYup(m.tangent).times(-1.0);
-        Vector3d b = toYup(m.bitangent).times(-1.0);
+        // The mask frame carries through toYup unchanged. MaskCavities builds
+        // the bitangent as "up the cone surface", i.e. toward the apex at grow
+        // z=0, and toYup now sends that to render +y -- so a head placed along
+        // this frame stands upright with no correction. (It used to need a
+        // 180-degree rotation about the normal here, purely to undo the
+        // vertical flip the old toYup baked in.)
+        Vector3d t = toYup(m.tangent);
+        Vector3d b = toYup(m.bitangent);
         SimMask sm;
         sm.pos[0] = (float)pos.x; sm.pos[1] = (float)pos.y; sm.pos[2] = (float)pos.z;
         sm.normal[0] = (float)n.x; sm.normal[1] = (float)n.y; sm.normal[2] = (float)n.z;
@@ -122,6 +127,10 @@ struct RootSim::Impl {
 
     void initHop(int h) {
         Vector3d maskGlobal = masks[h].pos;
+        // The travel target sits a little above the mask so the main root
+        // arrives and dwells above the face, framing it, while the dwell rim
+        // still wraps the mask itself. +grow z is render +y, so a positive lift
+        // is up on screen.
         Vector3d targetGlobal = maskGlobal.plus(Vector3d(0, 0, (double)p.targetLift));
 
         rs = std::make_shared<RootSystem>();

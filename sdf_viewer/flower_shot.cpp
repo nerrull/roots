@@ -124,6 +124,21 @@ int main(int argc, char** argv) {
             renderer.paletteTip[i][1]=tips[i][1]; renderer.paletteTip[i][2]=tips[i][2]; }
         renderer.paletteTipCount = 5;
         std::vector<unsigned char> pix(W * H * 4);
+
+        // Frame on the FINISHED plant and hold that camera for every frame.
+        // Framing each frame on its own bounds (target = maxY - 8) re-frames the
+        // shot as the plant grows, so the plant appears to stay one size while
+        // the world zooms -- which hides the growth the sequence is meant to show.
+        float growTargetY = 0.f, growRadius = 40.f;
+        {
+            flower::ChrysanthParams fp; fp.form = flower::CHRYS_DECORATIVE; fp.growth = 1.f;
+            flower::FlowerMesh fm = flower::buildChrysanthemum(fp);
+            float lo = 1e9f, hi = -1e9f;
+            for (auto& n : fm.nodes) { lo = std::min(lo, (float) n.y); hi = std::max(hi, (float) n.y); }
+            growTargetY = (lo + hi) * 0.52f;
+            growRadius  = (hi - lo) * 1.20f;
+        }
+
         const int STEPS = 6;
         for (int k = 0; k < STEPS; ++k) {
             flower::ChrysanthParams cp; cp.form = flower::CHRYS_DECORATIVE;
@@ -131,10 +146,9 @@ int main(int argc, char** argv) {
             flower::FlowerMesh mesh = flower::buildChrysanthemum(cp);
             renderer.uploadSegments(mesh.nodes, mesh.segments, mesh.radii, &mesh.groups,
                                     &mesh.prims, &mesh.frames, &mesh.aux);
-            float maxY = -1e9f; for (auto& n : mesh.nodes) maxY = std::max(maxY, (float) n.y);
-            float target[3] = {0, maxY - 8.f, 0};
+            float target[3] = {0, growTargetY, 0};
             float lightDir[3] = {0.35f, 0.8f, 0.5f};
-            renderer.render(0.6f, 0.35f, 40.0f, target, 0.5236f, lightDir);
+            renderer.render(0.35f, 0.10f, growRadius, target, 0.5236f, lightDir);
             glBindTexture(GL_TEXTURE_2D, renderer.colorTex());
             glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pix.data());
             char name[128]; snprintf(name, sizeof(name), "%s/chrys_grow_%d.ppm", outDir.c_str(), k);
@@ -152,11 +166,10 @@ int main(int argc, char** argv) {
             flower::FlowerMesh mesh = flower::buildChrysanthemum(cp);
             renderer.uploadSegments(mesh.nodes, mesh.segments, mesh.radii, &mesh.groups,
                                     &mesh.prims, &mesh.frames, &mesh.aux);
-            float maxY = -1e9f; for (auto& n : mesh.nodes) maxY = std::max(maxY, (float) n.y);
-            float target[3] = {0, maxY - 8.f, 0};
-            float az = 0.3f + 0.6f * (float) fr / VF;   // slow orbit
+            float target[3] = {0, growTargetY, 0};
+            float az = 0.15f + 0.30f * (float) fr / VF;  // slow drift, stays near head-on
             float lightDir[3] = {0.35f, 0.8f, 0.5f};
-            renderer.render(az, 0.34f, 40.0f, target, 0.5236f, lightDir);
+            renderer.render(az, 0.10f, growRadius, target, 0.5236f, lightDir);
             glBindTexture(GL_TEXTURE_2D, renderer.colorTex());
             glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pix.data());
             char name[128]; snprintf(name, sizeof(name), "%s/gv_%03d.ppm", outDir.c_str(), fr);

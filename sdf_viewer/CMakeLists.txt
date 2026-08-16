@@ -94,6 +94,23 @@ target_link_libraries(flower_shot PRIVATE
     CPlantBox glfw GLEW::GLEW OpenGL::GL
     "-framework Cocoa" "-framework IOKit" "-framework CoreVideo")
 
+# --- chrys_shot: stills-only chrysanthemum harness (plant/join/leaf framings) ---
+add_executable(chrys_shot
+    chrys_shot.cpp
+    RootRenderer.cpp
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+)
+target_include_directories(chrys_shot PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends)
+target_compile_definitions(chrys_shot PRIVATE SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(chrys_shot PRIVATE
+    CPlantBox glfw GLEW::GLEW OpenGL::GL
+    "-framework Cocoa" "-framework IOKit" "-framework CoreVideo")
+
 # --- petal_test: renders single petals in isolation for SDF debugging ---
 add_executable(petal_test
     petal_test.cpp

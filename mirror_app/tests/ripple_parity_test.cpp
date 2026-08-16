@@ -35,14 +35,19 @@ struct Case {
     const char* name;
     float ring_freq, decay, z, z_cos, warp, core_radius, xoff, yoff;
     int   nsrc;
+    // Drop packet width, applied to every source in the case. The envelope is
+    // derived from each source's own phase, so a sign error or a mismatched
+    // spread rate shows up here as the two paths putting the ring train at
+    // different radii, not as a scale factor.
+    float packet_w = 0.f;
 };
 
-std::vector<mirror::RippleSource> make_sources(int n) {
+std::vector<mirror::RippleSource> make_sources(int n, float packet_w = 0.f) {
     std::vector<mirror::RippleSource> s;
     for (int i = 0; i < n; ++i) {
         const float f = static_cast<float>(i);
         s.push_back({-0.7f + 0.3f * f, 0.5f - 0.21f * f, 0.4f + 0.17f * f,
-                     0.35f + 0.12f * f});
+                     0.35f + 0.12f * f, packet_w});
     }
     return s;
 }
@@ -51,7 +56,7 @@ void run(const Case& c) {
     const int lh = 96, lw = 160;
     const float asp = static_cast<float>(lw) / static_cast<float>(lh);
     auto coords = mirror::make_coord_grid(lh, lw, -asp, asp, -1.f, 1.f);
-    const auto srcs = make_sources(c.nsrc);
+    const auto srcs = make_sources(c.nsrc, c.packet_w);
 
     auto ref = mirror::multi_ripple_features_ops(coords, srcs, c.ring_freq, c.decay,
                                                  c.z, c.z_cos, c.warp,
@@ -266,6 +271,9 @@ int main() {
         {"one source",          3.0f, 1.8f,  0.0f,  0.0f, 0.40f, 0.12f,  0.0f,  0.0f, 1},
         {"two sources",         3.0f, 1.8f,  0.0f,  0.0f, 0.40f, 0.12f,  0.0f,  0.0f, 2},
         {"twelve sources",      3.0f, 1.8f,  0.0f,  0.0f, 0.40f, 0.12f,  0.0f,  0.0f, 12},
+        {"drop packets",        3.0f, 1.8f,  0.0f,  0.0f, 0.00f, 0.12f,  0.0f,  0.0f, 5, 0.14f},
+        {"packets + warp",      3.0f, 1.8f,  0.3f, -0.2f, 0.40f, 0.12f,  0.0f,  0.0f, 5, 0.14f},
+        {"wide packet",         6.0f, 0.6f,  0.0f,  0.0f, 0.20f, 0.00f,  0.0f,  0.0f, 4, 0.45f},
     };
     std::printf("ripple_parity: fused kernel vs op-graph reference\n");
     for (const auto& c : cases) run(c);

@@ -198,6 +198,7 @@ TextUniforms TextOverlay::uniforms(const TextParams& p, float aspect,
     u.cnt.x = float(n);
     for (int i = 0; i < n; ++i) {
         u.src[i] = {r.src[i][0], r.src[i][1], r.src[i][2], r.src[i][3]};
+        u.wid[i] = {r.src[i][4], 0.f, 0.f, 0.f};
     }
     return u;
 }

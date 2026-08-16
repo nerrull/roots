@@ -76,28 +76,71 @@ struct Mask { F3 pos, normal, tangent, bitangent; float rDepth, rWidth, rHeight;
 // `vcol`, when non-empty, is a per-vertex RGB (3 floats/vertex, same indexing as
 // `fv`) that overrides the flat `color` -- this is how a mask wears a sampled
 // face rather than a material tint.
+// `recess` is how far the face sits back inside its cavity, in multiples of the
+// cavity's own half-depth: 0.5 puts it where it has always been, 0 centres it on
+// the cavity, and a negative value pushes it proud of the surface so it stands
+// clear of the nest wrapped around it.
 void appendFaceVertexData(std::vector<float>& out, const Mask& m,
                           const std::vector<float>& fv, const std::vector<int>& ftris,
-                          float faceScale, float lightDist, const float color[3],
-                          const std::vector<float>& vcol = {}) {
+                          float faceScale, float recess, float lightDist, const float color[3],
+                          const std::vector<float>& vcol = {}, bool smoothNormals = true) {
     F3 n = m.normal, t = m.tangent, b = m.bitangent;
-    F3 p = sub(m.pos, mul(n, m.rDepth * 0.5f));
+    F3 p = sub(m.pos, mul(n, m.rDepth * recess));
     float scale = faceScale * std::min(m.rWidth, m.rHeight);
     F3 lightPos = add(p, mul(n, lightDist));
-    for (size_t i = 0; i < ftris.size(); i += 3) {
-        F3 v3[3];
-        for (int k = 0; k < 3; k++) {
-            int vi = ftris[i+k];
-            F3 local = {fv[vi*3], fv[vi*3+1], fv[vi*3+2]};
-            v3[k] = add(add(add(p, mul(t, local.x * scale)), mul(b, local.y * scale)),
-                        mul(n, local.z * scale));
-        }
-        F3 fn = norm(cross(sub(v3[1], v3[0]), sub(v3[2], v3[0])));
+
+    // Place every vertex once, then accumulate area-weighted face normals onto
+    // the shared vertex indices before expanding to triangles. The alternative
+    // -- one face normal written to all three vertices -- is what the mask mesh
+    // used to do, and it made a few-thousand-triangle head read as a faceted
+    // polyhedron no amount of shading could recover. The cross product is left
+    // un-normalised on purpose: its length is twice the triangle area, which is
+    // exactly the weight a vertex normal wants.
+    const size_t nv = fv.size() / 3;
+    std::vector<F3> wpos(nv), wnrm(nv, F3{0.f, 0.f, 0.f});
+    for (size_t vi = 0; vi < nv; ++vi) {
+        F3 local = {fv[vi*3], fv[vi*3+1], fv[vi*3+2]};
+        wpos[vi] = add(add(add(p, mul(t, local.x * scale)), mul(b, local.y * scale)),
+                       mul(n, local.z * scale));
+    }
+    for (size_t i = 0; i + 2 < ftris.size(); i += 3) {
+        const int i0 = ftris[i], i1 = ftris[i+1], i2 = ftris[i+2];
+        if (i0 < 0 || i1 < 0 || i2 < 0) continue;
+        if (size_t(i0) >= nv || size_t(i1) >= nv || size_t(i2) >= nv) continue;
+        const F3 fa = cross(sub(wpos[i1], wpos[i0]), sub(wpos[i2], wpos[i0]));
+        wnrm[i0] = add(wnrm[i0], fa);
+        wnrm[i1] = add(wnrm[i1], fa);
+        wnrm[i2] = add(wnrm[i2], fa);
+    }
+    // A vertex whose incident triangles cancel out (degenerate fan) has no
+    // meaningful normal; fall back to the mask's own facing rather than to a
+    // zero vector the shader would normalise into a NaN.
+    for (size_t vi = 0; vi < nv; ++vi)
+        wnrm[vi] = (dot(wnrm[vi], wnrm[vi]) > 1e-20f) ? norm(wnrm[vi]) : n;
+
+    for (size_t i = 0; i + 2 < ftris.size(); i += 3) {
+        // Whole-triangle validity, not per-corner: dropping one corner of a
+        // triangle would leave the other two in the stream and shear the mesh.
+        bool ok = true;
         for (int k = 0; k < 3; k++) {
             const int vi = ftris[i+k];
+            if (vi < 0 || size_t(vi) >= nv) { ok = false; break; }
+        }
+        if (!ok) continue;
+        // The faceted original, kept reachable for A/B: one geometric normal
+        // shared by all three corners.
+        F3 flat = {0.f, 0.f, 0.f};
+        if (!smoothNormals) {
+            flat = cross(sub(wpos[ftris[i+1]], wpos[ftris[i]]),
+                         sub(wpos[ftris[i+2]], wpos[ftris[i]]));
+            flat = (dot(flat, flat) > 1e-20f) ? norm(flat) : n;
+        }
+        for (int k = 0; k < 3; k++) {
+            const int vi = ftris[i+k];
+            const F3 vp = wpos[vi], vn = smoothNormals ? wnrm[vi] : flat;
             const bool haveCol = !vcol.empty() && size_t(vi) * 3 + 2 < vcol.size();
-            out.push_back(v3[k].x); out.push_back(v3[k].y); out.push_back(v3[k].z);
-            out.push_back(fn.x); out.push_back(fn.y); out.push_back(fn.z);
+            out.push_back(vp.x); out.push_back(vp.y); out.push_back(vp.z);
+            out.push_back(vn.x); out.push_back(vn.y); out.push_back(vn.z);
             if (haveCol) {
                 out.push_back(vcol[vi*3]); out.push_back(vcol[vi*3+1]);
                 out.push_back(vcol[vi*3+2]);
@@ -135,14 +178,19 @@ RootScene::RootScene(const MetalContext& ctx, int w, int h) {
     rr_->mat.colorNoiseScale = 0.35f;
     rr_->mat.ambient = 0.06f;
     rr_->mat.diffuse = 0.55f;
-    rr_->fog.density = 0.012f;
-    rr_->fog.noiseStrength = 0.6f;
-    rr_->fog.refDist = radius;
+    rr_->fog.visibility = 45.0f;
+    rr_->fog.noiseStrength = 0.55f;
 
-    rr_->wispCount = 2;
-    rr_->wisps[0].basePos[0] = 6.f;  rr_->wisps[0].basePos[1] = 14.f; rr_->wisps[0].basePos[2] = 4.f;
+
+    // Wisps off by default. They are still fully set up below, so turning the
+    // count up in the panel brings them back -- but as a default they put two
+    // coloured point lights into a scene whose look now comes from the
+    // environment and the mask's own light, and they were reading as a
+    // separate effect sitting on top of it rather than as part of it.
+    rr_->wispCount = 0;
+    rr_->wisps[0].basePos[0] = 6.f;  rr_->wisps[0].basePos[1] = -14.f; rr_->wisps[0].basePos[2] = 4.f;
     rr_->wisps[0].color[0] = 1.0f; rr_->wisps[0].color[1] = 0.85f; rr_->wisps[0].color[2] = 0.5f;
-    rr_->wisps[1].basePos[0] = -7.f; rr_->wisps[1].basePos[1] = 6.f;  rr_->wisps[1].basePos[2] = -3.f;
+    rr_->wisps[1].basePos[0] = -7.f; rr_->wisps[1].basePos[1] = -6.f;  rr_->wisps[1].basePos[2] = -3.f;
     rr_->wisps[1].color[0] = 0.6f; rr_->wisps[1].color[1] = 0.8f; rr_->wisps[1].color[2] = 1.0f;
 
     rr_->pulse.enabled = true;
@@ -339,8 +387,8 @@ void RootScene::uploadFaceFromMasks() {
         m.tangent = {sm.tangent[0], sm.tangent[1], sm.tangent[2]};
         m.bitangent = {sm.bitangent[0], sm.bitangent[1], sm.bitangent[2]};
         m.rDepth = sm.rDepth; m.rWidth = sm.rWidth; m.rHeight = sm.rHeight;
-        appendFaceVertexData(data, m, faceVerts_, faceTris_, faceScale, 3.0f, maskColor,
-                             faceColors_);
+        appendFaceVertexData(data, m, faceVerts_, faceTris_, faceScale, faceRecess, 3.0f,
+                             maskColor, faceColors_, rr_->face.smoothNormals);
     }
     rr_->uploadFaceMesh(data);
 }
@@ -365,8 +413,8 @@ void RootScene::rebuildFace() {
                      target[1] + h - 6.0f,
                      target[2] + 5.0f * std::cos(ang)};
         Mask m = makeMask(center, dir, 4.5f);
-        appendFaceVertexData(data, m, faceVerts_, faceTris_, faceScale, 3.0f, maskColor,
-                             faceColors_);
+        appendFaceVertexData(data, m, faceVerts_, faceTris_, faceScale, faceRecess, 3.0f,
+                             maskColor, faceColors_, rr_->face.smoothNormals);
     }
     rr_->uploadFaceMesh(data);
 }
@@ -457,7 +505,14 @@ void RootScene::applyFraming() {
         target[2] = idleCentre_[2];
         radius = (idleExtent_ * 0.75f + 12.0f) * zoom;
     }
-    if (rr_) rr_->fog.refDist = radius;
+    // The fog's near clearing and its height gradient both follow the framing,
+    // so a zoom does not change how much fog sits in front of the subject or
+    // where the gradient crosses it. Both are opt-out (startAuto /
+    // heightRefAuto) for a fixed camera where a hand-set value is wanted.
+    if (rr_) {
+        if (rr_->fog.startAuto)      rr_->fog.startDist = radius * rr_->fog.startFrac;
+        if (rr_->fog.heightRefAuto)  rr_->fog.heightRef = target[1];
+    }
 }
 
 void RootScene::ensureSize(int w, int h) {
@@ -550,6 +605,7 @@ void RootScene::advance(double dt) {
     rr_->fog.driftTime += (float)dt * rr_->fog.driftSpeed;
     rr_->pulse.time    += (float)dt;
     rr_->wispTime      += (float)dt;
+    rr_->postTime      += (float)dt;
 
     focusAngle_ += orbitRate * (float)dt;
 
@@ -566,10 +622,33 @@ void RootScene::advance(double dt) {
     applyFraming();
 }
 
+void RootScene::setWideAngle(bool on) {
+    if (!rr_) return;
+    if (on) {
+        focalMM = 12.0f;
+        rr_->post.distortK1 = -0.16f;
+        rr_->post.distortK2 = -0.03f;
+        // Barrel pulls the corners in, so the frame has to be re-cropped or the
+        // corners sample outside the rendered image and come back as clamped
+        // smear. This is the zoom that just covers k1 = -0.16 at 16:9.
+        rr_->post.distortZoom = 0.88f;
+        // Short lenses vignette more, and their depth of field is deep.
+        rr_->post.vignette = 0.34f;
+        rr_->post.dofRange = 90.0f;
+    } else {
+        focalMM = 17.5f;
+        rr_->post.distortK1 = 0.0f;
+        rr_->post.distortK2 = 0.0f;
+        rr_->post.distortZoom = 1.0f;
+        rr_->post.vignette = 0.22f;
+        rr_->post.dofRange = 55.0f;
+    }
+}
+
 id<MTLTexture> RootScene::render(id<MTLCommandBuffer> cb) {
     if (!valid()) return nil;
     float ld = std::sqrt(lightDir[0]*lightDir[0] + lightDir[1]*lightDir[1] + lightDir[2]*lightDir[2]);
     if (ld < 1e-5f) ld = 1.f;
     float L[3] = {lightDir[0]/ld, lightDir[1]/ld, lightDir[2]/ld};
-    return rr_->render(cb, azimuth, elevation, radius, target, fov, L);
+    return rr_->render(cb, azimuth, elevation, radius, target, effectiveFov(), L);
 }

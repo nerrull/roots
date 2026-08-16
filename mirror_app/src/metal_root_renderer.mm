@@ -85,8 +85,14 @@ MetalRootRenderer::MetalRootRenderer(const MetalContext& ctx, const std::string&
     // Pipelines: each MSL pass compiled with root_shared.h prepended.
     id<MTLLibrary> geomLib = ctx.newLibraryFromFiles({sharedHeaderPath, shaderDir + "/root_geom.metal"});
     id<MTLLibrary> faceLib = ctx.newLibraryFromFiles({sharedHeaderPath, shaderDir + "/root_face.metal"});
+    id<MTLLibrary> leafLib = ctx.newLibraryFromFiles({sharedHeaderPath, shaderDir + "/root_leaf.metal"});
     id<MTLLibrary> fogLib  = ctx.newLibraryFromFiles({sharedHeaderPath, shaderDir + "/root_fog.metal"});
-    if (!geomLib || !faceLib || !fogLib) { fprintf(stderr, "MetalRootRenderer: shader compile failed\n"); return; }
+    id<MTLLibrary> aoLib   = ctx.newLibraryFromFiles({sharedHeaderPath, shaderDir + "/root_ao.metal"});
+    id<MTLLibrary> blmLib  = ctx.newLibraryFromFiles({sharedHeaderPath, shaderDir + "/root_bloom.metal"});
+    id<MTLLibrary> postLib = ctx.newLibraryFromFiles({sharedHeaderPath, shaderDir + "/root_post.metal"});
+    if (!geomLib || !faceLib || !leafLib || !fogLib || !aoLib || !blmLib || !postLib) {
+        fprintf(stderr, "MetalRootRenderer: shader compile failed\n"); return;
+    }
 
     NSError* err = nil;
     {
@@ -109,12 +115,59 @@ MetalRootRenderer::MetalRootRenderer(const MetalContext& ctx, const std::string&
     }
     {
         MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+        d.vertexFunction   = [leafLib newFunctionWithName:@"root_leaf_vs"];
+        d.fragmentFunction = [leafLib newFunctionWithName:@"root_leaf_fs"];
+        d.colorAttachments[0].pixelFormat = kColorFmt;
+        d.depthAttachmentPixelFormat = kDepthFmt;
+        leafPipe_ = [device_ newRenderPipelineStateWithDescriptor:d error:&err];
+        if (!leafPipe_) { NSLog(@"leaf pipeline failed: %@", err); return; }
+    }
+    {
+        MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
         d.vertexFunction   = [fogLib newFunctionWithName:@"root_fog_vs"];
         d.fragmentFunction = [fogLib newFunctionWithName:@"root_fog_fs"];
         d.colorAttachments[0].pixelFormat = kColorFmt;
         fogPipe_ = [device_ newRenderPipelineStateWithDescriptor:d error:&err];
         if (!fogPipe_) { NSLog(@"fog pipeline failed: %@", err); return; }
     }
+    // The post chain: all fullscreen, all single-attachment, no depth.
+    auto makePost = [&](id<MTLLibrary> lib, const char* vs, const char* fs,
+                        MTLPixelFormat fmt, bool additive) -> id<MTLRenderPipelineState> {
+        MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+        d.vertexFunction   = [lib newFunctionWithName:[NSString stringWithUTF8String:vs]];
+        d.fragmentFunction = [lib newFunctionWithName:[NSString stringWithUTF8String:fs]];
+        d.colorAttachments[0].pixelFormat = fmt;
+        if (additive) {
+            // The bloom up-chain adds each level into the one above it, so the
+            // blend state is what actually accumulates the glow.
+            d.colorAttachments[0].blendingEnabled = YES;
+            d.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+            d.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+            d.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+            d.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
+            d.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+            d.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+        }
+        NSError* e = nil;
+        id<MTLRenderPipelineState> p = [device_ newRenderPipelineStateWithDescriptor:d error:&e];
+        if (!p) NSLog(@"%s pipeline failed: %@", fs, e);
+        return p;
+    };
+    {
+        MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+        d.vertexFunction   = [fogLib newFunctionWithName:@"root_fog_vs"];
+        d.fragmentFunction = [fogLib newFunctionWithName:@"root_fogvol_fs"];
+        d.colorAttachments[0].pixelFormat = kColorFmt;
+        fogVolPipe_ = [device_ newRenderPipelineStateWithDescriptor:d error:&err];
+        if (!fogVolPipe_) { NSLog(@"fog volumetric pipeline failed: %@", err); return; }
+    }
+    aoPipe_        = makePost(aoLib,   "root_ao_vs",    "root_ao_fs",         kAOFmt,    false);
+    aoBlurPipe_    = makePost(aoLib,   "root_ao_vs",    "root_ao_blur_fs",    kAOFmt,    false);
+    bloomDownPipe_ = makePost(blmLib,  "root_bloom_vs", "root_bloom_down_fs", kColorFmt, false);
+    bloomUpPipe_   = makePost(blmLib,  "root_bloom_vs", "root_bloom_up_fs",   kColorFmt, true);
+    postPipe_      = makePost(postLib, "root_post_vs",  "root_post_fs",       kColorFmt, false);
+    if (!aoPipe_ || !aoBlurPipe_ || !bloomDownPipe_ || !bloomUpPipe_ || !postPipe_) return;
+
     {
         MTLDepthStencilDescriptor* dd = [[MTLDepthStencilDescriptor alloc] init];
         dd.depthCompareFunction = MTLCompareFunctionLess;
@@ -130,22 +183,114 @@ MetalRootRenderer::MetalRootRenderer(const MetalContext& ctx, const std::string&
 }
 
 void MetalRootRenderer::buildTargets() {
-    auto make2D = [&](MTLPixelFormat fmt, MTLTextureUsage usage, MTLStorageMode store) -> id<MTLTexture> {
+    auto make2D = [&](MTLPixelFormat fmt, int w, int h, MTLStorageMode store) -> id<MTLTexture> {
         MTLTextureDescriptor* td =
             [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt
-                                                               width:std::max(1, w_)
-                                                              height:std::max(1, h_)
+                                                               width:std::max(1, w)
+                                                              height:std::max(1, h)
                                                            mipmapped:NO];
-        td.usage = usage;
+        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
         td.storageMode = store;
         return [device_ newTextureWithDescriptor:td];
     };
-    const MTLTextureUsage rt = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-    rootColorTex_ = make2D(kColorFmt, rt, MTLStorageModePrivate);
-    rootDepthTex_ = make2D(kDepthFmt, rt, MTLStorageModePrivate);
-    // Shared so the final image can be read back headlessly (--roottest) and
-    // presented without a copy; it's the last texture in the chain.
-    fogColorTex_  = make2D(kColorFmt, rt, MTLStorageModeShared);
+
+    const int ss = std::max(1, std::min(post.ssaa, 4));
+    sw_ = std::max(1, w_ * ss);
+    sh_ = std::max(1, h_ * ss);
+
+    rootColorTex_ = make2D(kColorFmt, sw_, sh_, MTLStorageModePrivate);
+    rootDepthTex_ = make2D(kDepthFmt, sw_, sh_, MTLStorageModePrivate);
+
+    // Both possible outputs are Shared: whichever one render() returns has to be
+    // readable by the headless capture paths without a blit, and which one that
+    // is depends on a runtime flag.
+    fogColorTex_ = make2D(kColorFmt, sw_, sh_, MTLStorageModeShared);
+    postTex_     = make2D(kColorFmt, w_,  h_,  MTLStorageModeShared);
+
+    const int ds = std::max(1, std::min(ao.downscale, 4));
+    aoTex_     = make2D(kAOFmt, sw_ / ds, sh_ / ds, MTLStorageModePrivate);
+    aoBlurTex_ = make2D(kAOFmt, sw_ / ds, sh_ / ds, MTLStorageModePrivate);
+
+    // Sized from the OUTPUT resolution, not the supersampled scene resolution:
+    // the integral's quality has nothing to do with how finely the geometry is
+    // sampled, and tying it to the scene grid would silently quadruple its cost
+    // the moment supersampling was turned on.
+    const int fds = std::max(1, std::min(fog.downscale, 4));
+    fogVolTex_ = make2D(kColorFmt, w_ / fds, h_ / fds, MTLStorageModePrivate);
+
+    // Bloom levels halve from the scene resolution. Stop before any dimension
+    // reaches zero rather than trusting the requested count -- at 320x240 with
+    // no supersampling, five levels would ask for a 10x7 target and then a 5x3.
+    bloomMips_.clear();
+    int bw = sw_, bh = sh_;
+    const int levels = std::max(1, std::min(post.bloomLevels, 8));
+    for (int i = 0; i < levels; ++i) {
+        bw /= 2; bh /= 2;
+        if (bw < 4 || bh < 4) break;
+        bloomMips_.push_back(make2D(kColorFmt, bw, bh, MTLStorageModePrivate));
+    }
+
+    builtSsaa_ = ss;
+    builtAoDs_ = ds;
+    builtFogDs_ = fds;
+    builtBloomLevels_ = (int)bloomMips_.size();
+    outTex_ = post.enabled ? postTex_ : fogColorTex_;
+}
+
+// The targets depend on runtime settings (supersample factor, AO downscale,
+// bloom depth), all of which are live UI sliders. Rebuilding on every frame
+// would thrash allocation; rebuilding never would silently ignore the slider.
+void MetalRootRenderer::ensureTargets() {
+    const int ss = std::max(1, std::min(post.ssaa, 4));
+    const int ds = std::max(1, std::min(ao.downscale, 4));
+    const int fds = std::max(1, std::min(fog.downscale, 4));
+    const int lv = std::max(1, std::min(post.bloomLevels, 8));
+    if (ss != builtSsaa_ || ds != builtAoDs_ || fds != builtFogDs_ ||
+        (lv != builtBloomLevels_ && lv < 8 && builtBloomLevels_ < lv))
+        buildTargets();
+    outTex_ = post.enabled ? postTex_ : fogColorTex_;
+}
+
+void MetalRootRenderer::setTranche(int level) {
+    tranche_ = std::max(0, std::min(level, 3));
+    const bool t1 = tranche_ >= 1, t2 = tranche_ >= 2, t3 = tranche_ >= 3;
+
+    // Tranche 1: the image-formation fundamentals.
+    post.enabled = t1;
+    post.tonemap = t1;
+    env.hemiStrength = t1 ? 1.0f : 0.0f;
+    // Needs a rebuildFace() to take effect; RootScene reads it when it builds
+    // the mesh, and every caller of setTranche does so before growing.
+    face.smoothNormals = t1;
+    face.lightIntensity = t1 ? 1.8f : 3.2f;
+
+    // Tranche 2: what the light does once it arrives.
+    post.ssaa      = t2 ? 2 : 1;
+    ao.enabled     = t2;
+    env.envSpec    = t2 ? 0.6f  : 0.0f;
+    env.rimStrength= t2 ? 0.10f : 0.0f;
+    env.sssWrap    = t2 ? 0.55f : 0.0f;
+    env.sssTrans   = t2 ? 0.35f : 0.0f;
+    detail.strength = t2 ? 0.55f : 0.0f;
+    detail.rough    = t2 ? 0.45f : 0.0f;
+    detail.tint     = t2 ? 0.14f : 0.0f;
+    // Cook-Torrance rather than the ad-hoc Phong lobe. Phong's specular here is
+    // a fixed-width white streak with no Fresnel and no roughness, applied
+    // identically to every tube -- which is most of what made the roots read as
+    // extruded plastic, and no amount of surface detail fixes a highlight that
+    // is the wrong shape to begin with.
+    shaderMode = t2 ? ShaderMode::PBR : ShaderMode::Phong;
+    pbr.roughness = t2 ? 0.80f : 0.70f;
+
+    // Tranche 3: the camera and the film.
+    post.bloom     = t3;
+    post.dof       = t3;
+    post.vignette  = t3 ? 0.22f : 0.0f;
+    post.grain     = t3 ? 0.030f : 0.0f;
+    post.dither    = t3;
+    post.fogDither = t3 ? 1.0f : 0.0f;
+
+    ensureTargets();
 }
 
 void MetalRootRenderer::buildNoiseTexture() {
@@ -185,6 +330,37 @@ void MetalRootRenderer::resize(int w, int h) {
     w_ = w; h_ = h;
     buildTargets();
 }
+
+// Encode one fullscreen-triangle pass. Every stage of the post chain is the same
+// shape -- one pipeline, one uniform block, up to two source textures, one
+// colour attachment -- and writing that out five times was five chances to bind
+// a texture to the wrong index.
+namespace {
+struct FSPass {
+    id<MTLCommandBuffer> cb;
+    id<MTLRenderPipelineState> pipe;
+    id<MTLTexture> dst;
+    const void* uniforms; size_t uniformBytes;
+    id<MTLTexture> tex0 = nil, tex1 = nil, tex2 = nil, tex3 = nil;
+    bool load = false;   // keep the destination's contents (the bloom up-chain)
+};
+void encodeFS(const FSPass& p) {
+    MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = p.dst;
+    rp.colorAttachments[0].loadAction = p.load ? MTLLoadActionLoad : MTLLoadActionClear;
+    rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> e = [p.cb renderCommandEncoderWithDescriptor:rp];
+    [e setRenderPipelineState:p.pipe];
+    [e setFragmentBytes:p.uniforms length:p.uniformBytes atIndex:0];
+    if (p.tex0) [e setFragmentTexture:p.tex0 atIndex:0];
+    if (p.tex1) [e setFragmentTexture:p.tex1 atIndex:1];
+    if (p.tex2) [e setFragmentTexture:p.tex2 atIndex:2];
+    if (p.tex3) [e setFragmentTexture:p.tex3 atIndex:3];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e endEncoding];
+}
+}  // namespace
 
 id<MTLBuffer> MetalRootRenderer::makeBuffer(const void* data, size_t bytes) {
     if (bytes == 0) bytes = 4;   // Metal rejects zero-length buffers
@@ -256,6 +432,13 @@ void MetalRootRenderer::uploadSegments(const std::vector<float>& nodesXYZ,
 void MetalRootRenderer::uploadFaceMesh(const std::vector<float>& interleaved) {
     faceVertCount_ = (int)(interleaved.size() / 12);
     faceBuf_ = faceVertCount_ > 0
+        ? makeBuffer(interleaved.data(), interleaved.size() * sizeof(float))
+        : nil;
+}
+
+void MetalRootRenderer::uploadLeafMesh(const std::vector<float>& interleaved) {
+    leafVertCount_ = (int)(interleaved.size() / 12);
+    leafBuf_ = leafVertCount_ > 0
         ? makeBuffer(interleaved.data(), interleaved.size() * sizeof(float))
         : nil;
 }
@@ -360,6 +543,7 @@ id<MTLTexture> MetalRootRenderer::render(id<MTLCommandBuffer> cb,
                                          const float target3[3], float fov,
                                          const float lightDir3[3]) {
     if (!valid()) return nil;
+    ensureTargets();
 
     // --- Camera (verbatim port of RootRenderer::render) ---
     float cosEl = cosf(elevation), sinEl = sinf(elevation);
@@ -376,7 +560,7 @@ id<MTLTexture> MetalRootRenderer::render(id<MTLCommandBuffer> cb,
 
     const float nearZ = 0.01f, farZ = 500.0f;
     float f   = 1.0f / tanf(fov);
-    float asp = (float)w_ / (float)h_;
+    float asp = (float)sw_ / (float)sh_;   // == w_/h_; the scene passes run supersampled
     float fn  = -(farZ + nearZ) / (farZ - nearZ);
     float fn2 = -2.0f * farZ * nearZ / (farZ - nearZ);
 
@@ -425,8 +609,25 @@ id<MTLTexture> MetalRootRenderer::render(id<MTLCommandBuffer> cb,
     gu.specColor  = (simd_float4){mat.specColor[0], mat.specColor[1], mat.specColor[2], 0};
     gu.lightDir   = (simd_float4){lightDir3[0], lightDir3[1], lightDir3[2], 0};
     gu.pulseColor = (simd_float4){pulse.color[0], pulse.color[1], pulse.color[2], 0};
-    gu.res = (simd_float2){(float)w_, (float)h_};
+    gu.res = (simd_float2){(float)sw_, (float)sh_};
     gu.fov = fov;
+    gu.skyColor    = (simd_float4){env.skyColor[0], env.skyColor[1], env.skyColor[2], 0};
+    gu.groundColor = (simd_float4){env.groundColor[0], env.groundColor[1], env.groundColor[2], 0};
+    gu.sssTint     = (simd_float4){env.sssTint[0], env.sssTint[1], env.sssTint[2], 0};
+    gu.hemiStrength = env.hemiStrength;
+    gu.envSpec      = env.envSpec;
+    gu.rimStrength  = env.rimStrength;
+    gu.sssWrap      = env.sssWrap;
+    gu.sssTrans     = env.sssTrans;
+    gu.sssPower     = env.sssPower;
+    gu.detailStrength = detail.strength;
+    gu.detailScale    = detail.scale;
+    gu.detailStretch  = detail.stretch;
+    gu.detailRough    = detail.rough;
+    gu.detailTint     = detail.tint;
+    gu.keyColor = (simd_float4){env.keyColor[0] * env.keyIntensity,
+                                env.keyColor[1] * env.keyIntensity,
+                                env.keyColor[2] * env.keyIntensity, 0};
     gu.radiusScale = radiusScale; gu.radiusMin = radiusMin; gu.radiusMax = radiusMax;
     gu.ambient = mat.ambient; gu.diffuse = mat.diffuse; gu.shininess = mat.shininess;
     gu.colorNoiseScale = mat.colorNoiseScale; gu.colorNoiseStrength = mat.colorNoiseStrength;
@@ -453,7 +654,9 @@ id<MTLTexture> MetalRootRenderer::render(id<MTLCommandBuffer> cb,
     gp.colorAttachments[0].texture = rootColorTex_;
     gp.colorAttachments[0].loadAction = MTLLoadActionClear;
     gp.colorAttachments[0].clearColor =
-        MTLClearColorMake(invert ? 0.0 : 0.12, invert ? 0.0 : 0.08, invert ? 0.0 : 0.05, 1.0);
+        // Alpha 0: the background has no environment term for the AO to
+        // attenuate (see root_geom.metal's alpha convention).
+        MTLClearColorMake(invert ? 0.0 : 0.12, invert ? 0.0 : 0.08, invert ? 0.0 : 0.05, 0.0);
     gp.colorAttachments[0].storeAction = MTLStoreActionStore;
     gp.depthAttachment.texture = rootDepthTex_;
     gp.depthAttachment.loadAction = MTLLoadActionClear;
@@ -514,7 +717,7 @@ id<MTLTexture> MetalRootRenderer::render(id<MTLCommandBuffer> cb,
             if (l > 1e-8f) planes[k] /= l;
         }
         simd_float3 eye = {ex, ey, ez};
-        float pxScale = f * 0.5f * (float)h_;   // NDC radius r*f/d -> pixels (*0.5*h)
+        float pxScale = f * 0.5f * (float)h_;   // NDC radius r*f/d -> output pixels
         const float lodThresh[3] = {300.f, 120.f, 45.f};   // px boundaries between LODs
 
         for (auto& inst : instances_) {
@@ -554,6 +757,31 @@ id<MTLTexture> MetalRootRenderer::render(id<MTLCommandBuffer> cb,
         ffu.specStrength = face.specStrength;
         ffu.veinScale = face.veinScale;
         ffu.veinStrength = face.veinStrength;
+        ffu.roughness = face.roughness;
+        ffu.metallic = face.metallic;
+        ffu.reliefStrength = face.reliefStrength;
+        ffu.reliefScale = face.reliefScale;
+        ffu.keyColor = gu.keyColor;
+        ffu.spotLightDist = face.spotLightDist;
+        // 90 degrees or wider means "no cone"; the shader takes < -1 as the
+        // disable sentinel so it can skip the work entirely.
+        if (face.spotOuterDeg >= 89.9f) {
+            ffu.spotCosOuter = -2.0f; ffu.spotCosInner = -2.0f;
+        } else {
+            ffu.spotCosOuter = std::cos(face.spotOuterDeg * 3.14159265f / 180.f);
+            ffu.spotCosInner = std::cos(std::min(face.spotInnerDeg,
+                                                 face.spotOuterDeg - 1.f)
+                                        * 3.14159265f / 180.f);
+        }
+        ffu.skyColor = gu.skyColor;
+        ffu.groundColor = gu.groundColor;
+        ffu.sssTint = gu.sssTint;
+        ffu.hemiStrength = env.hemiStrength;
+        ffu.envSpec = env.envSpec;
+        ffu.rimStrength = env.rimStrength;
+        ffu.sssWrap = env.sssWrap;
+        ffu.sssTrans = env.sssTrans;
+        ffu.sssPower = env.sssPower;
         [ge setRenderPipelineState:facePipe_];
         [ge setDepthStencilState:depthState_];
         [ge setCullMode:MTLCullModeNone];
@@ -563,23 +791,103 @@ id<MTLTexture> MetalRootRenderer::render(id<MTLCommandBuffer> cb,
         [ge drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
                 vertexCount:(NSUInteger)faceVertCount_];
     }
+
+    // Leaf mid-geometry pass: meshed leaves, same targets and depth convention
+    // as the face pass, shaded as thin translucent lamina instead of stone.
+    if (leafVertCount_ > 0 && leafPipe_) {
+        RootLeafU lu = {};
+        lu.viewProj     = vp;
+        lu.eye          = gu.eye;
+        lu.lightDir     = gu.lightDir;
+        lu.skyColor     = gu.skyColor;
+        lu.groundColor  = gu.groundColor;
+        lu.sssTint      = gu.sssTint;
+        lu.diffuse      = leaf.diffuse;
+        lu.specStrength = leaf.specStrength;
+        lu.roughness    = leaf.roughness;
+        lu.hemiStrength = env.hemiStrength;
+        lu.rimStrength  = env.rimStrength;
+        lu.sssTrans     = leaf.sssTrans;
+        lu.sssPower     = leaf.sssPower;
+        [ge setRenderPipelineState:leafPipe_];
+        [ge setDepthStencilState:depthState_];
+        [ge setCullMode:MTLCullModeNone];
+        [ge setVertexBuffer:leafBuf_ offset:0 atIndex:0];
+        [ge setVertexBytes:&lu length:sizeof(lu) atIndex:1];
+        [ge setFragmentBytes:&lu length:sizeof(lu) atIndex:1];
+        [ge drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
+                vertexCount:(NSUInteger)leafVertCount_];
+    }
     [ge endEncoding];
 
-    // --- Pass 2: fog ---
+    // --- Pass 2: ambient occlusion (depth only, half resolution) ---
+    // Runs before the fog because the fog pass is what applies it, and it reads
+    // the geometry pass's depth, which is finished by now.
+    const bool aoOn = ao.enabled && aoPipe_ && aoBlurPipe_;
+    if (aoOn) {
+        const int ds = std::max(1, builtAoDs_);
+        RootAOU au = {};
+        au.cam = cam;
+        au.eye = gu.eye;
+        au.res = (simd_float2){(float)(sw_ / ds), (float)(sh_ / ds)};
+        au.fov = fov; au.nearZ = nearZ; au.farZ = farZ;
+        au.radius = ao.radius; au.intensity = ao.intensity; au.bias = ao.bias;
+        au.samples = std::max(1, ao.samples);
+        au.blurDir = 0;
+        encodeFS({cb, aoPipe_, aoTex_, &au, sizeof(au), rootDepthTex_});
+        // Separable bilateral blur, ping-ponging so neither pass reads the
+        // texture it is writing.
+        encodeFS({cb, aoBlurPipe_, aoBlurTex_, &au, sizeof(au), aoTex_, rootDepthTex_});
+        au.blurDir = 1;
+        encodeFS({cb, aoBlurPipe_, aoTex_, &au, sizeof(au), aoBlurTex_, rootDepthTex_});
+    }
+
+    // --- Pass 3: fog ---
     RootFogU fu = {};
     fu.cam = cam;
     fu.eye = gu.eye;
     fu.fogColor = (simd_float4){fog.color[0], fog.color[1], fog.color[2], 0};
     fu.res = gu.res;
     fu.fov = fov; fu.nearZ = nearZ; fu.farZ = farZ;
-    fu.fogDensity = fog.density; fu.fogFalloff = fog.falloff;
-    fu.fogNoiseScale = fog.noiseScale; fu.fogNoiseStrength = fog.noiseStrength;
-    fu.fogTime = fog.driftTime; fu.fogRefDist = fog.refDist;
+    fu.aoEnabled = aoOn ? 1 : 0;
+    fu.fogDither = post.fogDither;
+    fu.fogDensity = (fog.enabled && fog.visibility > 1e-3f) ? 1.0f / fog.visibility : 0.0f;
+    fu.fogHeightRef = fog.heightRef;
+    fu.fogHeightScale = fog.heightScale;
+    fu.fogNoiseScale = fog.noiseScale;
+    fu.fogNoiseStrength = fog.noiseStrength;
+    fu.fogNoiseContrast = fog.noiseContrast;
+    fu.fogStart = fog.startAuto ? radius * fog.startFrac : fog.startDist;
+    fu.fogSteps = fog.steps;
+    fu.fogScatter = fog.scatter;
+    fu.fogAnisotropy = fog.anisotropy;
+    fu.lightDir = gu.lightDir;
+    fu.keyColor = gu.keyColor;
+    // Two advection vectors that are deliberately not parallel and not
+    // commensurate in speed: with one, or with two that differ only in
+    // magnitude, the field still resolves into a single sliding direction.
+    // Both carry a Y component, which the original had none of at all.
+    {
+        const float t = fog.driftTime;
+        fu.fogDrift0 = (simd_float4){ t * 0.050f,  t * 0.021f, t * 0.033f, 0.f};
+        fu.fogDrift1 = (simd_float4){-t * 0.027f,  t * 0.044f, t * 0.012f, 0.f};
+    }
     fu.wispGlowStrength = wispGlowStrength;
     fu.axisLength = overlay.axisLength; fu.gridSpacing = overlay.gridSpacing;
     fu.showAxes = overlay.showAxes ? 1 : 0; fu.showGrid = overlay.showGrid ? 1 : 0;
     fu.wispCount = active;
 
+    // --- Pass 3a: the volumetric integral, at scene resolution / fog.downscale.
+    // Its own uniform copy differs only in `res`, which is what the ray
+    // reconstruction divides by; the aspect is unchanged, so the rays it builds
+    // are the same rays the composite reconstructs.
+    {
+        RootFogU vu = fu;
+        vu.res = (simd_float2){(float)(w_ / builtFogDs_), (float)(h_ / builtFogDs_)};
+        encodeFS({cb, fogVolPipe_, fogVolTex_, &vu, sizeof(vu), rootDepthTex_, noiseTex_});
+    }
+
+    // --- Pass 3b: composite ---
     MTLRenderPassDescriptor* fp = [MTLRenderPassDescriptor renderPassDescriptor];
     fp.colorAttachments[0].texture = fogColorTex_;
     fp.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -593,8 +901,97 @@ id<MTLTexture> MetalRootRenderer::render(id<MTLCommandBuffer> cb,
     [fe setFragmentTexture:rootColorTex_ atIndex:0];
     [fe setFragmentTexture:rootDepthTex_ atIndex:1];
     [fe setFragmentTexture:noiseTex_ atIndex:2];
+    // Bound whether or not AO ran: an unbound texture read is undefined even
+    // behind a branch the shader never takes.
+    [fe setFragmentTexture:aoTex_ atIndex:3];
+    [fe setFragmentTexture:fogVolTex_ atIndex:4];
     [fe drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [fe endEncoding];
 
-    return fogColorTex_;
+    if (!post.enabled) { outTex_ = fogColorTex_; return fogColorTex_; }
+
+    // --- Pass 4: bloom chain ---
+    const bool bloomOn = post.bloom && !bloomMips_.empty()
+                      && bloomDownPipe_ && bloomUpPipe_;
+    if (bloomOn) {
+        // Down: scene -> mip0 -> mip1 -> ... Each step halves, and the shader
+        // assumes exactly that, so the source's texel size is all it needs.
+        for (size_t i = 0; i < bloomMips_.size(); ++i) {
+            id<MTLTexture> src = (i == 0) ? fogColorTex_ : bloomMips_[i - 1];
+            RootBloomU bu = {};
+            bu.srcTexel = (simd_float2){1.0f / (float)src.width, 1.0f / (float)src.height};
+            bu.threshold = post.bloomThreshold;
+            bu.radius = post.bloomRadius;
+            bu.prefilter = (i == 0) ? 1 : 0;
+            encodeFS({cb, bloomDownPipe_, bloomMips_[i], &bu, sizeof(bu), src});
+        }
+        // Up: each level is tent-filtered and *added* into the level above it
+        // (loadAction Load + additive blend), so mip0 ends up holding the sum of
+        // every scale of glow.
+        for (size_t i = bloomMips_.size() - 1; i > 0; --i) {
+            id<MTLTexture> src = bloomMips_[i];
+            RootBloomU bu = {};
+            bu.srcTexel = (simd_float2){1.0f / (float)src.width, 1.0f / (float)src.height};
+            bu.radius = post.bloomRadius;
+            encodeFS({cb, bloomUpPipe_, bloomMips_[i - 1], &bu, sizeof(bu), src,
+                      nil, nil, nil, /*load=*/true});
+        }
+    }
+
+    // --- Pass 5: composite ---
+    RootPostU pu = {};
+    pu.res = (simd_float2){(float)w_, (float)h_};
+    pu.srcTexel = (simd_float2){1.0f / (float)sw_, 1.0f / (float)sh_};
+    pu.ssaa = builtSsaa_;
+    pu.tonemap = post.tonemap ? 1 : 0;
+    pu.bloomOn = bloomOn ? 1 : 0;
+    pu.dofOn = post.dof ? 1 : 0;
+    pu.ditherOn = post.dither ? 1 : 0;
+    pu.exposure = post.exposure;
+    pu.bloomIntensity = post.bloomIntensity;
+    // A focus distance of 0 means "wherever the camera is looking", which for an
+    // orbit camera is its own radius. Hard-coding a distance instead would have
+    // the subject drift out of focus every time the framing changed.
+    pu.dofFocus = (post.dofFocus > 0.0f) ? post.dofFocus : radius;
+    pu.dofRange = post.dofRange;
+    pu.dofStrength = post.dofStrength;
+    pu.vignette = post.vignette;
+    pu.grain = post.grain;
+    pu.time = postTime;
+    pu.nearZ = nearZ; pu.farZ = farZ;
+    pu.caStrength = post.caStrength;
+    pu.streak = post.streak;
+    pu.streakLength = post.streakLength;
+    pu.streakTint = (simd_float4){post.streakTint[0], post.streakTint[1], post.streakTint[2], 0};
+    pu.halation = post.halation;
+    pu.halationTint = (simd_float4){post.halationTint[0], post.halationTint[1], post.halationTint[2], 0};
+    pu.contrast = post.contrast;
+    pu.saturation = post.saturation;
+    pu.lift   = (simd_float4){post.lift[0], post.lift[1], post.lift[2], 0};
+    pu.gammaC = (simd_float4){post.gammaC[0], post.gammaC[1], post.gammaC[2], 0};
+    pu.gainC  = (simd_float4){post.gain[0], post.gain[1], post.gain[2], 0};
+    pu.shadowTint    = (simd_float4){post.shadowTint[0], post.shadowTint[1], post.shadowTint[2], 0};
+    pu.highlightTint = (simd_float4){post.highlightTint[0], post.highlightTint[1], post.highlightTint[2], 0};
+    pu.toneBalance = post.toneBalance;
+    pu.grainSize = post.grainSize;
+    pu.grainChroma = post.grainChroma;
+    pu.splitStrength = post.splitStrength;
+    pu.distortK1 = post.distortK1;
+    pu.distortK2 = post.distortK2;
+    pu.distortZoom = post.distortZoom;
+    // Halation and the streak want a *wider* spread than the bloom composite
+    // does, so they read a deeper level of the same chain rather than paying for
+    // a second blur. Clamped to what the chain actually has: at small render
+    // sizes buildTargets stops before the requested depth.
+    id<MTLTexture> haloTex = fogColorTex_;
+    if (bloomOn) {
+        const int hm = std::max(0, std::min(post.halationMip, (int)bloomMips_.size() - 1));
+        haloTex = bloomMips_[hm];
+    }
+    encodeFS({cb, postPipe_, postTex_, &pu, sizeof(pu),
+              fogColorTex_, bloomOn ? bloomMips_[0] : fogColorTex_, rootDepthTex_,
+              haloTex});
+
+    outTex_ = postTex_;
+    return postTex_;
 }

@@ -139,23 +139,24 @@ void Pond::reseed() {
     w_key_.reset();
 }
 
-std::vector<RippleSource> Pond::sources(float asp, double t, const PondParams& p) const {
-    const float phase = 2.0f * (float)M_PI * p.speed * (float)t + p.ripple_offset;
+std::vector<RippleSource> Pond::sources(float asp, double t, const PondParams& p) {
     std::vector<RippleSource> src;
-    std::mt19937 gen(static_cast<uint32_t>(seed_));
-    auto U = [&](float lo, float hi) {
-        return lo + (hi - lo) * std::generate_canonical<float, 24>(gen);
-    };
-    for (int i = 0; i < p.drops; ++i) {
-        float cx = U(-asp, asp), cy = U(-1.f, 1.f);
-        float rate = U(0.15f, 0.5f), ph = U(0.f, 2.f * (float)M_PI);
-        float amp = 0.5f - 0.5f * std::cos(2.0f * (float)M_PI * rate * (float)t + ph);
-        src.push_back({cx, cy, phase, amp});
-    }
+    // The drops come from the spawner, which owns when they land and what each
+    // one is like (drop_spawner.h). All this does is hand it the clock and the
+    // pond constants the phase is measured in.
+    if (p.drops_on)
+        src = spawner_.update(t, asp, p.ring_freq, p.speed, p.spawn);
+    else
+        spawner_.clear();
+
     if (p.orbit_on) {
+        // Not a drop: a source that circles and rings continuously. Packet width
+        // 0 keeps it the standing field it has always been, alongside however
+        // many travelling drops are live in the same frame.
+        const float phase = 2.0f * (float)M_PI * p.speed * (float)t + p.ripple_offset;
         float ox = 0.6f * asp * std::cos(0.5f * (float)t);
         float oy = 0.6f * std::sin(0.5f * (float)t);
-        src.push_back({ox, oy, phase, 1.0f});
+        src.push_back({ox, oy, phase, 1.0f, 0.0f});
     }
     return src;
 }
