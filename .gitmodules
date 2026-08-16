@@ -3,4 +3,4 @@
 	url = ./CPlantBox
 [submodule "imgui"]
 	path = imgui
-	url = ./imgui
+	url = https://github.com/ocornut/imgui.git

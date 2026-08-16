@@ -13,6 +13,7 @@ was built separately against Wwise 2025.1.10 on Windows — see
 | Modal Voice | Effect | Elements | 32 kHz, resampled | Bus audio feeds the exciter inputs |
 | Macro Oscillator | Source | Plaits | 48 kHz native | All 24 synthesis engines |
 | Drum Synth | Source | Peaks | 48 kHz native | Bass drum, snare, hi-hat, FM drum |
+| Signal Scope | Effect | (none) | Any | Pure audio tap -- publishes whatever passes through it to shared memory for the external `scope_monitor` app; doesn't touch the signal |
 
 The MI code is MIT licensed (Copyright Emilie Gillet) and is compiled
 **unmodified** from a checkout of `pichenettes/eurorack` for the macOS build;
@@ -114,6 +115,28 @@ tests/run_demo.sh
 Writes four WAVs: a Drum Synth pattern, then that pattern run through each of
 the three effects (Rings through all six resonator models, Clouds through all
 four playback modes, Elements struck/bowed/blown).
+
+## Signal Scope: audio capture + external monitor
+
+`SignalScope` is a seventh plug-in, structurally separate from the five MI
+cores: an authoring+sound-engine **Effect** that never alters the audio
+passing through it. Instead, on every `Execute()` it copies the block into a
+named OS shared-memory ring buffer (`mi_common/shm_region.h` -- Win32
+`CreateFileMapping`/`MapViewOfFile`, POSIX `shm_open`/`mmap`), keyed by a
+**Scope ID** property (0-63) set on the instance. `scope_monitor/` is a
+separate, standalone imgui app (GLFW + OpenGL3, not part of this repo's
+Wwise plug-in build) that reads those buffers read-only and renders a
+waveform, scrolling spectrogram and log-frequency spectral envelope for
+whichever Scope ID is selected -- multiple `scope_monitor` instances, or one
+instance switching between IDs, can watch different insert points
+(pre/post another effect, different busses) at once. See
+`scope_monitor/README.md` for build and usage instructions, and
+`mi_common/signal_scope_shm.h` for the shared layout both sides speak.
+
+This only works when the plug-in and the monitor app run on the same
+machine (same OS shared-memory namespace) -- e.g. Wwise Authoring's local
+Play/Preview alongside `scope_monitor` on this machine, not a remote
+CrossOver/Wine Authoring session watched from elsewhere.
 
 ## Things worth knowing
 
@@ -259,7 +282,7 @@ control off centre, and do not use 0.5 as a "neutral" default.
 Wwise Authoring on macOS is the Windows application running under
 CrossOver/Wine, so the authoring component — the DLL that makes a plug-in
 appear in the Wwise UI with a property page — has to be built on Windows. That
-build now exists for all six plug-ins.
+build now exists for all six MI-based plug-ins plus Signal Scope.
 
 ### Prerequisites
 
@@ -280,13 +303,17 @@ set WWISEROOT=Q:\Development\Audiokinetic\Wwise_2025.1.10.9233
 set WWISESDK=%WWISEROOT%\SDK
 set MI_EURORACK_DIR=Q:\Development\git\eurorack
 
-for %P in (RacineComb ModalResonator GranularTexture MacroOscillator ModalVoice DrumSynth) do (
+for %P in (RacineComb ModalResonator GranularTexture MacroOscillator ModalVoice DrumSynth SignalScope) do (
   cd %P
   python %WWISEROOT%\Scripts\Build\Plugins\wp.py premake Authoring
   python %WWISEROOT%\Scripts\Build\Plugins\wp.py build Authoring -t vc170 -c Release
   cd ..
 )
 ```
+
+Signal Scope has no `eurorack`/MI dependency (it doesn't need `MI_EURORACK_DIR`) and
+also builds for the plain Windows sound-engine target, same as the other plug-ins:
+`wp.py build Windows_vc170 -c Release` from inside `SignalScope/`.
 
 `build Authoring` compiles both the sound-engine static lib and the authoring
 DLL and drops the DLL straight into
@@ -327,19 +354,19 @@ to upstream `pichenettes/eurorack`.
 ### Installing on your Mac
 
 `wwise_plugins/dist/` has the built `<Plugin>.dll` + `<Plugin>.xml` pairs
-(Release config) for all six plug-ins, checked into the repo. Install them
+(Release config) for all seven plug-ins, checked into the repo. Install them
 into:
 
 ```
 /Library/Application Support/Audiokinetic/Wwise <Version>/Authoring/x64/Release/bin/Plugins
 ```
 
-1. Copy all twelve files from `wwise_plugins/dist/` (six `.dll` + six `.xml`)
-   into that `Plugins/` folder, substituting your installed `<Version>` (e.g.
-   `2025.1.9`).
+1. Copy all fourteen files from `wwise_plugins/dist/` (seven `.dll` + seven
+   `.xml`) into that `Plugins/` folder, substituting your installed
+   `<Version>` (e.g. `2025.1.9`).
 2. Quit and relaunch Wwise Authoring. Racine Comb, Modal Resonator, Granular
-   Texture, Macro Oscillator, Modal Voice and Drum Synth should now show up in
-   the Effects/Sources insert lists.
+   Texture, Macro Oscillator, Modal Voice, Drum Synth and Signal Scope should
+   now show up in the Effects/Sources insert lists.
 
 **Version caveat:** these DLLs were built against the **2025.1.10** SDK, one
 point release ahead of the **2025.1.9** Authoring app this repo's macOS
